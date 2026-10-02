@@ -3,6 +3,7 @@
 //! Everything works in the game's own space and units: Z up, world units,
 //! speeds per 1/50 s frame, and a timestep `ts` measured in such frames.
 
+pub mod collision;
 pub mod colpoint;
 pub mod pair;
 pub mod physical;

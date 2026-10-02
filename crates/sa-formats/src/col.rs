@@ -31,6 +31,7 @@ pub struct Bx {
 pub struct Face {
     pub v: [u32; 3],
     pub material: u8,
+    pub light: u8,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -40,6 +41,9 @@ pub struct ColModel {
     pub version: u8,
     pub min: [f32; 3],
     pub max: [f32; 3],
+    /// Bounding sphere.
+    pub center: [f32; 3],
+    pub radius: f32,
     pub spheres: Vec<Sphere>,
     pub boxes: Vec<Bx>,
     pub vertices: Vec<[f32; 3]>,
@@ -94,8 +98,8 @@ pub fn parse_model(data: &[u8]) -> Result<ColModel> {
     let mut m = ColModel { name, model_id, version, ..Default::default() };
 
     if version == 1 {
-        r.f32()?; // radius
-        r.vec3()?; // center
+        m.radius = r.f32()?;
+        m.center = r.vec3()?;
         m.min = r.vec3()?;
         m.max = r.vec3()?;
         let n = r.u32()? as usize;
@@ -117,15 +121,15 @@ pub fn parse_model(data: &[u8]) -> Result<ColModel> {
         for _ in 0..n {
             let v = [r.u32()?, r.u32()?, r.u32()?];
             let s = surface(&mut r)?;
-            m.faces.push(Face { v, material: s.material });
+            m.faces.push(Face { v, material: s.material, light: s.light });
         }
         return Ok(m);
     }
 
     m.min = r.vec3()?;
     m.max = r.vec3()?;
-    r.vec3()?; // center
-    r.f32()?; // radius
+    m.center = r.vec3()?;
+    m.radius = r.f32()?;
     let num_spheres = r.u16()? as usize;
     let num_boxes = r.u16()? as usize;
     let num_faces = r.u16()? as usize;
@@ -161,9 +165,9 @@ pub fn parse_model(data: &[u8]) -> Result<ColModel> {
         for _ in 0..num_faces {
             let v = [r.u16()? as u32, r.u16()? as u32, r.u16()? as u32];
             let material = r.u8()?;
-            r.u8()?; // light
+            let light = r.u8()?;
             max_index = max_index.max(v[0]).max(v[1]).max(v[2]);
-            m.faces.push(Face { v, material });
+            m.faces.push(Face { v, material, light });
         }
         // Vertex count isn't stored; it follows from the faces.
         at(&mut r, off_verts)?;

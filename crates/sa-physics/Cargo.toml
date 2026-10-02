@@ -7,3 +7,7 @@ license.workspace = true
 
 [dependencies]
 glam = "0.32"
+sa-formats.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
