@@ -52,9 +52,11 @@ impl Plugin for PlayerPlugin {
         app.insert_resource(if fly { Mode::Fly } else { Mode::Walk })
             .insert_resource(MouseLock(!fly))
             .add_systems(Startup, spawn_player)
-            .add_systems(Update, (toggle_mode, cursor_lock, animate_ped).chain())
-            // Movement feeds the kinematic controller, so it runs in the fixed physics step.
-            .add_systems(FixedUpdate, player_control.before(PhysicsSet::SyncBackend))
+            // Ped movement is computed per frame and *accumulated* into the kinematic
+            // controller; the next fixed physics step applies all of it. (bevy_rapier
+            // applies the controller by editing Transform, which only sticks for the
+            // first physics step of a frame, so per-step movement would be lost.)
+            .add_systems(Update, (toggle_mode, cursor_lock, player_control, animate_ped).chain())
             .add_systems(
                 PostUpdate,
                 orbit_camera.run_if(resource_equals(Mode::Walk)).before(TransformSystems::Propagate),
@@ -385,6 +387,7 @@ fn player_control(
     st: Res<Streamer>,
     driving: Res<crate::vehicle::Driving>,
     cam: Single<&OrbitCam>,
+    mut probe: Local<Option<(Vec3, f32, std::time::Instant)>>,
     ped: Single<(
         &mut Ped,
         &mut KinematicCharacterController,
@@ -410,6 +413,20 @@ fn player_control(
     }
 
     let auto_walk = std::env::var("SA_AUTOWALK").is_ok();
+    // Debug probe: distance covered in the first 5 simulated seconds of movement.
+    if auto_walk {
+        let (start, t, wall) = probe.get_or_insert((tf.translation, 0.0, std::time::Instant::now()));
+        let before = *t;
+        *t += dt;
+        if before < 5.0 && *t >= 5.0 {
+            let d = (tf.translation - *start).with_y(0.0).length();
+            info!(
+                "ped probe: {d:.2} m in 5.0 sim s ({:.2} m/s), wall {:.2} s",
+                d / 5.0,
+                wall.elapsed().as_secs_f32()
+            );
+        }
+    }
     let active = *mode == Mode::Walk;
     let pressed = |k: KeyCode| active && keys.pressed(k);
     let mut input = Vec2::ZERO;
@@ -453,7 +470,8 @@ fn player_control(
         ped.air_time += dt;
     }
     ped.vel_y = (ped.vel_y - GRAVITY * dt).max(-50.0);
-    kcc.translation = Some(dir * speed * dt + Vec3::Y * ped.vel_y * dt);
+    let step = dir * speed * dt + Vec3::Y * ped.vel_y * dt;
+    kcc.translation = Some(kcc.translation.unwrap_or(Vec3::ZERO) + step);
 
     if dir != Vec3::ZERO {
         let target = Quat::from_rotation_y((-dir.x).atan2(-dir.z));
