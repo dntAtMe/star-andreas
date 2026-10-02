@@ -1,0 +1,9 @@
+[package]
+name = "sa-physics"
+description = "Port of GTA San Andreas physics (CPhysical, CCollision, CWorld, vehicles), engine-agnostic"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+glam = "0.32"

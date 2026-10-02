@@ -3,3 +3,4 @@
 # Local reverse-engineering material (notes on the original binary); not published.
 /docs/re/
 /tools/exe_read.py
+__pycache__/
