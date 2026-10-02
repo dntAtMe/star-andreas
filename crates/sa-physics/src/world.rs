@@ -73,8 +73,8 @@ pub trait BodyLogic: Send + Sync + 'static {
     }
 
     /// vtbl+0x40 SpecialEntityCalcCollisionSteps: (steps, probe the full step first).
-    fn collision_steps(&self, phys: &Physical) -> (u8, bool) {
-        let _ = phys;
+    fn collision_steps(&self, phys: &Physical, ts: f32) -> (u8, bool) {
+        let _ = (phys, ts);
         (1, false)
     }
 
@@ -339,7 +339,7 @@ impl World {
         let saved_move = p.move_speed;
         let saved_matrix = p.matrix;
         let ts0 = ctx.ts;
-        let (n_steps, probe_first) = b.logic.collision_steps(&b.phys);
+        let (n_steps, probe_first) = b.logic.collision_steps(&b.phys, ctx.ts);
         let n_steps = n_steps.max(1);
         let step_ts = ts0 / n_steps as f32;
 
