@@ -74,6 +74,13 @@ pub enum Mode {
 #[derive(Resource)]
 pub struct MouseLock(pub bool);
 
+/// The entity the orbit camera follows (the ped, or the car being driven).
+#[derive(Component)]
+pub struct CamFollow {
+    pub height: f32,
+    pub dist: f32,
+}
+
 #[derive(Component)]
 pub struct OrbitCam {
     pub yaw: f32,
@@ -94,6 +101,12 @@ pub struct Ped {
     pub grounded: bool,
     pub frozen: bool,
     anim: AnimPlayer,
+}
+
+impl Ped {
+    pub fn set_velocity_y(&mut self, v: f32) {
+        self.vel_y = v;
+    }
 }
 
 struct AnimPlayer {
@@ -126,7 +139,7 @@ struct Clips(HashMap<String, Clip>);
 
 // ---------------------------------------------------------------- spawn
 
-fn frame_transform(f: &dff::Frame) -> Transform {
+pub fn frame_transform(f: &dff::Frame) -> Transform {
     let m = Mat3::from_cols(f.rot[0].into(), f.rot[1].into(), f.rot[2].into());
     Transform { translation: f.pos.into(), rotation: Quat::from_mat3(&m).normalize(), scale: Vec3::ONE }
 }
@@ -267,13 +280,15 @@ fn spawn_player(
     let root_bone = frame_of_node(0).or_else(|| clump.frames.iter().position(|f| f.name.eq_ignore_ascii_case("root")));
     let spawn: Vec<f32> =
         std::env::var("SA_PLAYER").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
-    let spawn = match spawn[..] {
-        [x, y, z] => g2b([x, y, z]),
-        _ => g2b([2495.0, -1682.0, 14.5]), // outside CJ's house
+    // SA_PLAYER=x,y,z[,heading]: GTA coords; heading in degrees, 0 = north, 90 = west.
+    let (spawn, heading) = match spawn[..] {
+        [x, y, z] => (g2b([x, y, z]), 180.0),
+        [x, y, z, hd] => (g2b([x, y, z]), hd),
+        _ => (g2b([2495.0, -1682.0, 14.5]), 180.0), // outside CJ's house
     };
     commands
         .spawn((
-            Transform::from_translation(spawn).with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            Transform::from_translation(spawn).with_rotation(Quat::from_rotation_y(f32::to_radians(heading))),
             Visibility::default(),
             RigidBody::KinematicPositionBased,
             Collider::capsule_y(CAPSULE_HALF, CAPSULE_RADIUS),
@@ -300,6 +315,7 @@ fn spawn_player(
                 frozen: true,
                 anim: AnimPlayer { cur: ANIM_IDLE, time: 0.0, prev: None, blend: 1.0 },
             },
+            CamFollow { height: 0.6, dist: 3.5 },
         ))
         .add_child(model_root);
     Ok(())
@@ -312,10 +328,11 @@ fn toggle_mode(
     mut mode: ResMut<Mode>,
     mut lock: ResMut<MouseLock>,
     rapier: ReadRapierContext,
+    driving: Res<crate::vehicle::Driving>,
     cam: Single<(&Transform, &mut crate::FlyCam, &mut OrbitCam), Without<Ped>>,
     ped: Single<(Entity, &mut Transform, &mut Ped)>,
 ) -> Result<(), BevyError> {
-    if !keys.just_pressed(KeyCode::KeyF) {
+    if !keys.just_pressed(KeyCode::F2) || driving.0.is_some() {
         return Ok(());
     }
     let (cam_tf, mut fly, mut orbit) = cam.into_inner();
@@ -369,6 +386,7 @@ fn player_control(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     st: Res<Streamer>,
+    driving: Res<crate::vehicle::Driving>,
     cam: Single<&OrbitCam>,
     ped: Single<(
         &mut Ped,
@@ -386,6 +404,11 @@ fn player_control(
             ped.frozen = false;
         }
         kcc.translation = None;
+        return;
+    }
+    if driving.0.is_some() {
+        kcc.translation = None;
+        ped.anim.play(ANIM_IDLE);
         return;
     }
 
@@ -511,28 +534,48 @@ fn animate_ped(
 // ---------------------------------------------------------------- camera
 
 fn orbit_camera(
+    time: Res<Time>,
     lock: Res<MouseLock>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     rapier: ReadRapierContext,
-    ped: Single<(Entity, &Transform), With<Ped>>,
-    cam: Single<(&mut Transform, &mut OrbitCam), Without<Ped>>,
+    mut zoom: Local<Option<f32>>,
+    mut idle: Local<f32>,
+    target: Single<(Entity, &Transform, &CamFollow, Option<&crate::vehicle::Vehicle>)>,
+    cam: Single<(&mut Transform, &mut OrbitCam), Without<CamFollow>>,
 ) {
-    let (ped_e, ped_tf) = *ped;
+    let (target_e, target_tf, follow, car) = *target;
     let (mut tf, mut oc) = cam.into_inner();
-    if lock.0 {
+    let dt = time.delta_secs();
+    let moved = lock.0 && motion.delta != Vec2::ZERO;
+    if moved {
         oc.yaw -= motion.delta.x * 0.003;
         oc.pitch = (oc.pitch - motion.delta.y * 0.003).clamp(-1.3, 0.6);
+        *idle = 0.0;
+    } else {
+        *idle += dt;
     }
+    // Zoom is relative to the target's default distance.
+    let z = zoom.get_or_insert(1.0);
     if scroll.delta.y != 0.0 {
-        oc.dist = (oc.dist * 0.9f32.powf(scroll.delta.y)).clamp(1.5, 20.0);
+        *z = (*z * 0.9f32.powf(scroll.delta.y)).clamp(0.4, 5.0);
+    }
+    oc.dist = follow.dist * *z;
+    // Swing behind a moving car when the mouse is left alone (GTA-style).
+    if let Some(v) = car {
+        if *idle > 1.0 && v.speed.abs() > 3.0 {
+            let car_yaw = target_tf.rotation.to_euler(EulerRot::YXZ).0;
+            let diff = (car_yaw - oc.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            oc.yaw += diff * (1.0 - (-2.5 * dt).exp());
+            oc.pitch += (-0.2 - oc.pitch) * (1.0 - (-2.0 * dt).exp());
+        }
     }
     let rot = Quat::from_euler(EulerRot::YXZ, oc.yaw, oc.pitch, 0.0);
-    let target = ped_tf.translation + Vec3::Y * 0.6;
+    let target = target_tf.translation + Vec3::Y * follow.height;
     let back = rot * Vec3::Z;
     let mut dist = oc.dist;
     if let Ok(ctx) = rapier.single() {
-        let filter = QueryFilter::default().exclude_collider(ped_e);
+        let filter = QueryFilter::default().exclude_rigid_body(target_e);
         if let Some((_, toi)) = ctx.cast_ray(target, back, oc.dist, true, filter) {
             dist = (toi - 0.25).max(0.4);
         }

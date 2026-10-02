@@ -14,3 +14,4 @@ pub mod img;
 pub mod ipl;
 pub mod rw;
 pub mod txd;
+pub mod vehicle;

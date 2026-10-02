@@ -1,5 +1,6 @@
 mod player;
 mod stream;
+mod vehicle;
 mod world;
 
 use std::{path::PathBuf, sync::Arc};
@@ -14,6 +15,7 @@ use bevy::{
 use bevy_rapier3d::prelude::*;
 use player::{GameRoot, Mode, OrbitCam, Ped, PlayerPlugin};
 use stream::{StreamCamera, StreamPlugin, Streamer};
+use vehicle::{Driving, Vehicle, VehiclePlugin};
 use world::{World as SaWorld, WorldRes, b2g, g2b};
 
 const DEFAULT_GAME_DIR: &str = r"G:\Programy\Steam\steamapps\common\Grand Theft Auto San Andreas";
@@ -44,7 +46,7 @@ fn main() -> anyhow::Result<()> {
         .insert_resource(ClearColor(SKY))
         .insert_resource(GameRoot(root))
         .insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness: 600.0, ..default() })
-        .add_plugins((RapierPhysicsPlugin::<NoUserData>::default(), StreamPlugin, PlayerPlugin))
+        .add_plugins((RapierPhysicsPlugin::<NoUserData>::default(), StreamPlugin, PlayerPlugin, VehiclePlugin))
         .add_systems(Startup, setup)
         .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
         .run();
@@ -158,6 +160,8 @@ fn update_hud(
     time: Res<Time>,
     st: Res<Streamer>,
     mode: Res<Mode>,
+    driving: Res<Driving>,
+    cars: Query<&Vehicle>,
     cam: Single<(&Transform, &FlyCam)>,
     ped: Single<(&Transform, &Ped), Without<FlyCam>>,
     mut hud: Single<&mut Text, With<Hud>>,
@@ -169,8 +173,9 @@ fn update_hud(
     hud.0 = format!(
         "pos {:.0} {:.0} {:.0}  speed {:.0}  fps {:.0}\n\
          instances {}  pending {}  models {} (+{} loading)  txds {}\n\
-         mode {:?}{}{}  (F toggles walk/fly)
-         walk: click to grab mouse, Esc release, WASD, Shift sprint, Alt walk, Space jump
+         mode {:?}{}{}{}  (F2 toggles walk/fly)\n\
+         walk: click grabs mouse, Esc releases, WASD, Shift sprint, Alt walk, Space jump, V spawn car, F enter/exit\n\
+         drive: W throttle, S brake/reverse, A/D steer, Space handbrake\n\
          fly: RMB look, WASD/QE move, Shift fast, wheel speed",
         p[0],
         p[1],
@@ -185,6 +190,11 @@ fn update_hud(
         *mode,
         if ped.frozen { "  [waiting for collision]" } else { "" },
         if ped.grounded { "  grounded" } else { "" },
+        driving
+            .0
+            .and_then(|c| cars.get(c).ok())
+            .map(|v| format!("  driving {} {:.0} km/h", v.name, v.speed.abs() * 3.6))
+            .unwrap_or_default(),
     );
 }
 
@@ -202,13 +212,19 @@ fn auto_screenshot(
     let s = st.stats;
     let settled = s.pending == 0 && s.models_loading == 0 && s.spawned > 0;
     *idle = if settled { *idle + time.delta_secs() } else { 0.0 };
+    // SA_SHOT_AFTER=<secs>: shoot at a fixed time instead of when streaming settles.
+    let after: Option<f32> = std::env::var("SA_SHOT_AFTER").ok().and_then(|v| v.parse().ok());
+    let due = match after {
+        Some(t) => time.elapsed_secs() > t,
+        None => *idle > 1.5 || time.elapsed_secs() > 90.0,
+    };
     match *state {
-        0 if *idle > 1.5 || time.elapsed_secs() > 90.0 => {
+        0 if due => {
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
             *state = 1;
             *idle = 0.0;
         }
-        1 if *idle > 1.0 => {
+        1 if *idle > 1.0 || after.is_some_and(|t| time.elapsed_secs() > t + 1.5) => {
             exit.write(AppExit::Success);
         }
         _ => {}

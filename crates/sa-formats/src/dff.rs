@@ -96,6 +96,8 @@ pub struct Clump {
     pub frames: Vec<Frame>,
     pub geometries: Vec<Geometry>,
     pub atomics: Vec<Atomic>,
+    /// Embedded COL model (vehicles), raw bytes starting at its fourcc.
+    pub collision: Option<Vec<u8>>,
 }
 
 impl Clump {
@@ -154,14 +156,26 @@ fn parse_clump(mut r: Reader) -> Result<Clump> {
     let geometries = parse_geometry_list(gl).context("geometry list")?;
 
     let mut atomics = Vec::with_capacity(num_atomics);
+    let mut collision = None;
     for child in rw::children(r) {
         let (h, mut body) = child?;
-        if h.ty == id::ATOMIC {
-            let (_, mut s) = rw::sub(&mut body, id::STRUCT)?;
-            atomics.push(Atomic { frame: s.u32()?, geometry: s.u32()?, flags: s.u32()? });
+        match h.ty {
+            id::ATOMIC => {
+                let (_, mut s) = rw::sub(&mut body, id::STRUCT)?;
+                atomics.push(Atomic { frame: s.u32()?, geometry: s.u32()?, flags: s.u32()? });
+            }
+            id::EXTENSION => {
+                for ext in rw::children(body) {
+                    let (eh, mut eb) = ext?;
+                    if eh.ty == id::COLLISION {
+                        collision = Some(eb.bytes(eh.size)?.to_vec());
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    Ok(Clump { frames, geometries, atomics })
+    Ok(Clump { frames, geometries, atomics, collision })
 }
 
 fn parse_frame_list(mut r: Reader) -> Result<Vec<Frame>> {

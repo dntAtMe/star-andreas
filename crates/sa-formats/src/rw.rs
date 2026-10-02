@@ -25,6 +25,7 @@ pub mod id {
     pub const HANIM: u32 = 0x11E;
     pub const BIN_MESH: u32 = 0x50E;
     pub const EXTRA_VERT_COLOUR: u32 = 0x0253_F2F9;
+    pub const COLLISION: u32 = 0x0253_F2FA;
     pub const NODE_NAME: u32 = 0x0253_F2FE;
 }
 
