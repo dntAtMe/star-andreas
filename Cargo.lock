@@ -5138,6 +5138,7 @@ dependencies = [
  "bevy",
  "bevy_rapier3d",
  "sa-formats",
+ "sa-physics",
  "sc2-bevy",
 ]
 

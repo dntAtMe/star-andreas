@@ -1,8 +1,9 @@
-//! Drivable cars: DFF model with carcols paint, embedded COL collider, and a
-//! raycast-suspension / tire model driven by handling.cfg.
+//! Drivable cars: DFF model with carcols paint, simulated by the ported SA
+//! physics (`sa_physics::automobile`).
 //!
-//! Like the ped, the model hierarchy stays in GTA space (Z-up) under a model
-//! root rotated -90° about X; physics runs on the Bevy-space rigid body.
+//! The model hierarchy stays in GTA space (Z-up) under a model root rotated
+//! -90° about X. The car entity's transform follows its SA body; a kinematic
+//! Rapier proxy keeps the (still Rapier-based) ped from walking through it.
 
 use std::{collections::HashMap, f32::consts::FRAC_PI_2};
 
@@ -17,15 +18,19 @@ use sa_formats::{
     col, dff, txd,
     vehicle::{self, CarColors, Handling, VehicleDef},
 };
+use sa_physics::{
+    automobile::{Automobile, CarInput, VehicleHandling},
+    collision::ColModel as SaColModel,
+    physical::{EntityType, Physical, Status, VehicleClass, VehicleInfo},
+    world::EntityId,
+};
 
 use crate::{
-    interp::Interp,
     player::{CamFollow, GameRoot, Mode, Ped, frame_transform},
+    saphys::{SaBody, SaPhys, SaStep, gta_matrix},
     stream::{convert_texture, make_image},
     world::{WorldRes, g2b},
 };
-
-const GRAVITY: f32 = 9.81;
 /// Cars cycled by the spawn key.
 const SPAWN_LIST: &[&str] = &["greenwoo", "sabre", "infernus", "bobcat", "savanna", "elegy", "banshee", "sultan"];
 
@@ -35,9 +40,8 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Driving>()
             .add_systems(Startup, load_vehicle_db)
-            .add_systems(Update, (spawn_key, auto_drive, enter_exit, update_wheels).chain())
-            // Forces are computed per physics step, so handling doesn't depend on frame rate.
-            .add_systems(FixedUpdate, drive_vehicles.before(PhysicsSet::SyncBackend));
+            .add_systems(Update, (spawn_key, auto_drive, enter_exit, feed_inputs).chain().before(SaStep))
+            .add_systems(Update, update_wheels.after(SaStep));
     }
 }
 
@@ -56,45 +60,23 @@ struct VehicleDb {
 }
 
 struct Wheel {
-    /// Wheel centre at rest, GTA model space.
+    /// Wheel dummy (rest centre), GTA model space.
     dummy: Vec3,
+    /// Index into the SA wheel arrays (0 FL, 1 RL, 2 FR, 3 RR).
+    sa_index: usize,
     front: bool,
-    driven: bool,
-    radius: f32,
     pivot: Entity,
-    /// Current offset of the wheel centre along model Z (GTA), for visuals.
-    offset: f32,
-    spin: f32,
-    grounded: bool,
-}
-
-/// Velocity at the start of the frame, i.e. before this frame's physics step.
-#[derive(Component, Default, Clone, Copy)]
-pub struct PrevVelocity {
-    pub linear: Vec3,
-    pub angular: Vec3,
 }
 
 #[derive(Component)]
 pub struct Vehicle {
     pub name: String,
-    h: Handling,
+    pub sa: EntityId,
     wheels: Vec<Wheel>,
-    steer: f32,
+    /// Forward speed in m/s (from the SA body).
     pub speed: f32,
-    throttle: f32,
-    brake: f32,
-    handbrake: bool,
     /// Seat offset (Bevy local space) for placing the hidden driver.
     seat: Vec3,
-    /// Simulated seconds under driver control (debug probe).
-    driven_time: f32,
-}
-
-impl Vehicle {
-    pub fn mass(&self) -> f32 {
-        self.h.mass
-    }
 }
 
 // ---------------------------------------------------------------- loading
@@ -177,6 +159,7 @@ fn geometry_meshes(geo: &dff::Geometry) -> Vec<(usize, Mesh)> {
 fn spawn_vehicle(
     commands: &mut Commands,
     world: &crate::world::World,
+    sa: &mut SaPhys,
     db: &VehicleDb,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -284,69 +267,27 @@ fn spawn_vehicle(
         }
         commands.entity(pivot).add_child(holder);
         commands.entity(model_root).add_child(pivot);
-        let driven = match h.drive_type {
-            '4' => true,
-            'F' => front,
-            _ => !front,
+        let _ = scale;
+        let sa_index = match (front, left) {
+            (true, true) => 0,
+            (false, true) => 1,
+            (true, false) => 2,
+            (false, false) => 3,
         };
-        wheels.push(Wheel {
-            dummy: dummy.into(),
-            front,
-            driven,
-            radius: scale * 0.5,
-            pivot,
-            offset: 0.0,
-            spin: 0.0,
-            grounded: false,
-        });
+        wheels.push(Wheel { dummy: dummy.into(), sa_index, front, pivot });
     }
 
-    // Collider: the COL spheres, lifted so the body clears the wheels. Rounded
-    // contacts let the suspension ride over curbs instead of the flat-bottomed
-    // COL mesh hitting them like a wall. The mesh hull is only a fallback.
-    let lowest_wheel = wheels.iter().map(|w| w.dummy.z).fold(0.0f32, f32::min);
-    let min_bottom = lowest_wheel - 0.1;
+    // Rapier proxy (ped / camera only): the COL spheres in Bevy space.
+    let raw_col = clump.collision.as_deref().map(col::parse_model).transpose()?;
     let mut shapes: Vec<(Vec3, Quat, Collider)> = Vec::new();
-    let mut lo = Vec3::splat(f32::MAX);
-    let mut hi = Vec3::splat(f32::MIN);
-    if let Some(raw) = &clump.collision {
-        if let Ok(cm) = col::parse_model(raw) {
-            for s in &cm.spheres {
-                let mut c = s.center;
-                c[2] = c[2].max(min_bottom + s.radius);
-                shapes.push((g2b(c), Quat::IDENTITY, Collider::ball(s.radius)));
-            }
-            for b in &cm.boxes {
-                let (a, c) = (g2b(b.min), g2b(b.max));
-                let half = ((c - a).abs() * 0.5).max(Vec3::splat(0.02));
-                shapes.push(((a + c) * 0.5, Quat::IDENTITY, Collider::cuboid(half.x, half.y, half.z)));
-            }
-            let pts: Vec<Vec3> = cm.vertices.iter().map(|&v| g2b(v)).collect();
-            if shapes.is_empty() {
-                if let Some(hull) = (pts.len() >= 4).then(|| Collider::convex_hull(&pts)).flatten() {
-                    shapes.push((Vec3::ZERO, Quat::IDENTITY, hull));
-                }
-            }
-            let (a, c) = (g2b(cm.min), g2b(cm.max));
-            lo = a.min(c);
-            hi = a.max(c);
+    if let Some(cm) = &raw_col {
+        for s in &cm.spheres {
+            shapes.push((g2b(s.center), Quat::IDENTITY, Collider::ball(s.radius)));
         }
     }
     if shapes.is_empty() {
-        lo = Vec3::new(-1.0, -0.4, -2.3);
-        hi = Vec3::new(1.0, 0.8, 2.3);
-        let half = (hi - lo) * 0.5;
-        shapes.push(((lo + hi) * 0.5, Quat::IDENTITY, Collider::cuboid(half.x, half.y, half.z)));
+        shapes.push((Vec3::new(0.0, 0.3, 0.0), Quat::IDENTITY, Collider::cuboid(1.0, 0.6, 2.3)));
     }
-    let size = hi - lo;
-    // Box inertia, scaled by handling turn mass.
-    let m_rot = h.turn_mass.max(h.mass) * 0.6;
-    let inertia = Vec3::new(
-        m_rot / 12.0 * (size.y * size.y + size.z * size.z),
-        m_rot / 12.0 * (size.x * size.x + size.z * size.z),
-        m_rot / 12.0 * (size.x * size.x + size.y * size.y),
-    );
-    let com = g2b(h.centre_of_mass);
 
     let seat = clump
         .frames
@@ -355,42 +296,44 @@ fn spawn_vehicle(
         .map(|i| g2b(clump.frame_world(i).1))
         .unwrap_or(Vec3::ZERO);
 
+    // SA physics body.
+    let dummy_of = |n: &str| {
+        clump
+            .frames
+            .iter()
+            .position(|f| f.name.eq_ignore_ascii_case(n))
+            .map(|i| Vec3::from(clump.frame_world(i).1))
+            .unwrap_or(Vec3::ZERO)
+    };
+    let dummies = [dummy_of("wheel_lf_dummy"), dummy_of("wheel_lb_dummy"), dummy_of("wheel_rf_dummy"), dummy_of("wheel_rb_dummy")];
+    let mut sa_col = raw_col.as_ref().map(SaColModel::from_col).context("vehicle has no collision")?;
+    let vh = VehicleHandling::from_raw(&h);
+    let auto = Automobile::new(
+        vh,
+        def.id as u16,
+        def.wheel_scale_front,
+        def.wheel_scale_rear,
+        dummies,
+        &mut sa_col,
+        sa.world.surfaces.clone(),
+    );
+    let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
+    let m = gta_matrix(&tf);
+    let mut phys = Physical::new(EntityType::Vehicle, m);
+    phys.vehicle = Some(VehicleInfo { class: VehicleClass::Automobile, model: def.id as u16, towed_mass: None });
+    phys.status = Status::Abandoned;
+    auto.setup_physical(&mut phys);
+    let id = sa.world.add_body(phys, sa_col, Box::new(auto));
+
     let car = commands
         .spawn((
-            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+            tf,
             Visibility::default(),
-            RigidBody::Dynamic,
+            RigidBody::KinematicPositionBased,
             Collider::compound(shapes),
-            ColliderMassProperties::MassProperties(MassProperties {
-                local_center_of_mass: com,
-                mass: h.mass,
-                principal_inertia_local_frame: Quat::IDENTITY,
-                principal_inertia: inertia,
-            }),
-            Velocity::default(),
-            PrevVelocity::default(),
-            // Slide along walls and bounce a little, instead of sticking to them.
-            Friction { coefficient: 0.3, combine_rule: CoefficientCombineRule::Min },
-            Restitution { coefficient: 0.2, combine_rule: CoefficientCombineRule::Max },
-            ExternalForce::default(),
-            ReadMassProperties::default(),
-            Damping { linear_damping: 0.02, angular_damping: 0.3 },
-            Ccd::enabled(),
-            Sleeping::disabled(),
-            Vehicle {
-                name: def.game_name.clone(),
-                h,
-                wheels,
-                steer: 0.0,
-                speed: 0.0,
-                throttle: 0.0,
-                brake: 0.0,
-                handbrake: false,
-                seat,
-                driven_time: 0.0,
-            },
+            SaBody::new(id, m),
+            Vehicle { name: def.game_name.clone(), sa: id, wheels, speed: 0.0, seat },
         ))
-        .insert(Interp::new(model_root, model_base, Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw))))
         .add_child(model_root)
         .id();
     Ok(car)
@@ -406,6 +349,7 @@ fn spawn_key(
     world: Res<WorldRes>,
     db: Option<ResMut<VehicleDb>>,
     driving: Res<Driving>,
+    mut sa: ResMut<SaPhys>,
     ped: Single<&Transform, With<Ped>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -421,7 +365,7 @@ fn spawn_key(
     let pos = ped.translation + fwd * 5.0 + Vec3::Y * 1.0;
     let yaw = ped.rotation.to_euler(EulerRot::YXZ).0 + FRAC_PI_2;
     let seed = db.next_spawn;
-    if let Err(e) = spawn_vehicle(&mut commands, &world.0, &db, &mut meshes, &mut materials, &mut images, name, pos, yaw, seed)
+    if let Err(e) = spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, name, pos, yaw, seed)
     {
         warn!("spawn {name}: {e:#}");
     }
@@ -435,6 +379,7 @@ fn auto_drive(
     world: Res<WorldRes>,
     db: Option<Res<VehicleDb>>,
     mut driving: ResMut<Driving>,
+    mut sa: ResMut<SaPhys>,
     ped: Single<(Entity, &Transform, &Ped)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -450,7 +395,7 @@ fn auto_drive(
     }
     *done = true;
     let yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
-    match spawn_vehicle(&mut commands, &world.0, &db, &mut meshes, &mut materials, &mut images, &name, tf.translation + Vec3::Y, yaw, 0) {
+    match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, &name, tf.translation + Vec3::Y, yaw, 0) {
         Ok(car) => {
             info!("SA_DRIVE: spawned {name} as {car:?}");
             driving.0 = Some(car);
@@ -504,148 +449,46 @@ fn enter_exit(
     }
 }
 
-// ---------------------------------------------------------------- physics
+// ---------------------------------------------------------------- SA physics glue
 
-pub fn drive_vehicles(
-    time: Res<Time>,
+/// Keyboard -> SA control inputs; the driven car is STATUS_PLAYER, others are parked.
+fn feed_inputs(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     driving: Res<Driving>,
-    rapier: ReadRapierContext,
-    mut cars: Query<(
-        Entity,
-        &Transform,
-        &Velocity,
-        &mut PrevVelocity,
-        &ReadMassProperties,
-        &mut ExternalForce,
-        &mut Vehicle,
-    )>,
+    mut sa: ResMut<SaPhys>,
+    mut cars: Query<(Entity, &mut Vehicle)>,
 ) {
-    let dt = time.delta_secs().max(1e-4);
-    let Ok(ctx) = rapier.single() else { return };
     let auto = std::env::var("SA_AUTOWALK").is_ok();
-    for (e, tf, vel, mut prev, mp, mut ext, mut v) in &mut cars {
-        *prev = PrevVelocity { linear: vel.linear, angular: vel.angular };
-        let v = &mut *v;
+    for (e, mut v) in &mut cars {
         let controlled = driving.0 == Some(e) && *mode == Mode::Walk;
         let key = |k: KeyCode| controlled && keys.pressed(k);
-        let h = v.h.clone();
-
-        let fwd = tf.rotation * Vec3::NEG_Z;
-        let up = tf.rotation * Vec3::Y;
-        let speed = vel.linear.dot(fwd);
-        v.speed = speed;
-        if controlled {
-            let before = v.driven_time;
-            v.driven_time += dt;
-            // Debug probe for frame-rate independence: state after 5 simulated seconds.
-            if before < 5.0 && v.driven_time >= 5.0 {
-                info!("probe: 5.0s driven, pos {:.2?}, {:.1} km/h", tf.translation, speed * 3.6);
-            }
-        }
-
-        // Driver input.
-        let accel_in = key(KeyCode::KeyW) || (controlled && auto);
-        let brake_in = key(KeyCode::KeyS);
-        v.handbrake = key(KeyCode::Space);
-        (v.throttle, v.brake) = match (accel_in, brake_in) {
-            (true, _) => (1.0, 0.0),
-            (false, true) if speed > 1.0 => (0.0, 1.0),
-            (false, true) => (-0.6, 0.0), // reverse
-            _ => (0.0, 0.0),
+        let input = CarInput {
+            steer: (key(KeyCode::KeyA) as i32 - key(KeyCode::KeyD) as i32) as f32,
+            accelerate: if key(KeyCode::KeyW) || (controlled && auto) { 1.0 } else { 0.0 },
+            brake: if key(KeyCode::KeyS) { 1.0 } else { 0.0 },
+            handbrake: key(KeyCode::Space),
         };
-        let steer_in = (key(KeyCode::KeyA) as i32 - key(KeyCode::KeyD) as i32) as f32;
-        let lock = h.steering_lock.to_radians() / (1.0 + speed.abs() / 25.0);
-        let target = steer_in * lock;
-        v.steer += (target - v.steer) * (1.0 - (-10.0 * dt).exp());
-
-        let mass = h.mass;
-        let com = tf.transform_point(mp.get().local_center_of_mass);
-        let travel = (h.susp_upper - h.susp_lower).max(0.05);
-        let n_wheels = v.wheels.len().max(1) as f32;
-        let k = h.susp_force * mass * GRAVITY / n_wheels * 2.0 / travel;
-        let c_damp = 2.0 * (k * mass / n_wheels).sqrt() * (h.susp_damping * 3.0).clamp(0.2, 1.2);
-        let mu_base = h.traction_mult * 1.7;
-        let driven = v.wheels.iter().filter(|w| w.driven).count().max(1) as f32;
-        let vmax = h.max_velocity / 3.6;
-        let drive_total = mass * h.engine_accel * 0.25 * v.throttle * (1.0 - (speed / vmax).clamp(0.0, 1.0).powi(2));
-        let brake_total = mass * h.brake_decel * v.brake;
-
-        let mut force = Vec3::ZERO;
-        let mut torque = Vec3::ZERO;
-        let filter = QueryFilter::default().exclude_rigid_body(e).exclude_sensors();
-
-        for w in v.wheels.iter_mut() {
-            let ray_len = travel + w.radius;
-            let top = tf.transform_point(g2b((w.dummy + Vec3::Z * h.susp_upper).into()));
-            let down = -up;
-            w.grounded = false;
-            w.offset = h.susp_lower;
-            let Some((_, hit)) = ctx.cast_ray_and_get_normal(top, down, ray_len, true, filter) else { continue };
-            w.grounded = true;
-            let d = hit.time_of_impact;
-            w.offset = h.susp_upper - (d - w.radius);
-            let compression = ray_len - d;
-            let p = hit.point;
-            let pv = vel.linear + vel.angular.cross(p - com);
-
-            // Suspension.
-            let fz = (k * compression + c_damp * pv.dot(down)).max(0.0);
-
-            // Tire frame on the ground plane.
-            let n = hit.normal;
-            let steer = if w.front { v.steer } else { 0.0 };
-            let heading = Quat::from_axis_angle(up, steer) * fwd;
-            let f = (heading - n * heading.dot(n)).normalize_or_zero();
-            let s = n.cross(f).normalize_or_zero();
-            let v_long = pv.dot(f);
-            let v_lat = pv.dot(s);
-
-            let front_share = h.traction_bias * 2.0;
-            let mut mu = mu_base * if w.front { front_share } else { 2.0 - front_share };
-            if v.handbrake && !w.front {
-                mu *= 0.45;
-            }
-            let mut f_long = if w.driven { drive_total / driven } else { 0.0 };
-            let brake_share = if w.front { h.brake_bias } else { 1.0 - h.brake_bias } * 2.0 / n_wheels;
-            let mut brake = brake_total * brake_share;
-            if v.handbrake && !w.front {
-                brake += mass * 6.0 / n_wheels;
-            }
-            // Brakes oppose rolling, never reversing it within a step.
-            let max_stop = v_long.abs() * mass / n_wheels / dt;
-            f_long -= v_long.signum() * brake.min(max_stop);
-            f_long -= v_long * mass / n_wheels * 0.05; // rolling resistance
-            let f_lat = -v_lat * mass / n_wheels * 12.0;
-            // Friction circle.
-            let mut horiz = Vec2::new(f_long, f_lat);
-            let limit = mu * fz;
-            if horiz.length() > limit {
-                horiz = horiz.normalize() * limit;
-            }
-
-            let wf = up * fz + f * horiz.x + s * horiz.y;
-            // Apply horizontal forces a little above the contact to reduce rollover.
-            let app = p + up * (w.radius * 0.6);
-            force += wf;
-            torque += (app - com).cross(f * horiz.x + s * horiz.y) + (p - com).cross(up * fz);
-            w.spin -= v_long / w.radius * dt;
+        if let Some(body) = sa.world.body_mut(v.sa) {
+            body.phys.status = if driving.0 == Some(e) { Status::Player } else { Status::Abandoned };
+            v.speed = body.phys.move_speed.dot(body.phys.matrix.fwd) * 50.0;
         }
-        // Air drag.
-        force -= vel.linear * vel.linear.length() * h.drag_mult * 0.3;
-        ext.force = force;
-        ext.torque = torque;
+        if let Some(car) = sa.logic_mut::<Automobile>(v.sa) {
+            car.input = input;
+        }
     }
 }
 
-fn update_wheels(cars: Query<&Vehicle>, mut tfs: Query<&mut Transform, Without<Vehicle>>) {
+/// Wheel visuals from the SA suspension / wheel spin (CAutomobile::PreRender).
+fn update_wheels(sa: Res<SaPhys>, cars: Query<&Vehicle>, mut tfs: Query<&mut Transform, Without<Vehicle>>) {
     for v in &cars {
+        let Some(car) = sa.logic::<Automobile>(v.sa) else { continue };
         for w in &v.wheels {
             if let Ok(mut tf) = tfs.get_mut(w.pivot) {
-                tf.translation = w.dummy + Vec3::Z * w.offset;
-                let steer = if w.front { v.steer } else { 0.0 };
-                tf.rotation = Quat::from_rotation_z(steer) * Quat::from_rotation_x(w.spin);
+                let i = w.sa_index;
+                tf.translation = Vec3::new(w.dummy.x, w.dummy.y, car.hub_z[i]);
+                let steer = if w.front { car.steer_angle } else { 0.0 };
+                tf.rotation = Quat::from_rotation_z(steer) * Quat::from_rotation_x(car.wheel_rot[i]);
             }
         }
     }

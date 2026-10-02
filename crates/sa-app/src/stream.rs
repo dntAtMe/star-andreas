@@ -25,11 +25,16 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     tasks::AsyncComputeTaskPool,
 };
-use bevy_rapier3d::prelude::{ActiveEvents, Collider, ContactForceEventThreshold, RigidBody};
+use bevy_rapier3d::prelude::{Collider, RigidBody};
 use sa_formats::{col, dff, objdat::ObjectPhysics, txd};
+use sa_physics::{
+    collision::ColModel as SaColModel,
+    physical::{EntityType, Physical, ef},
+    world::BodyLogic,
+};
 
 use crate::{
-    props::{PROP_EVENT_FORCE, Prop, PropPart},
+    saphys::{SaBody, SaBuilding, SaPhys, gta_matrix},
     world::{WorldRes, g2b},
 };
 
@@ -104,10 +109,12 @@ struct Model {
 /// Collision for one model.
 #[derive(Default)]
 struct ColSet {
-    /// Primitive compound and/or triangle mesh (parry can't nest a trimesh in a compound).
+    /// Rapier colliders (ped / camera): primitive compound and/or triangle mesh.
     fixed: Vec<Collider>,
-    /// object.dat props: physics plus a convex hull used once knocked loose.
-    prop: Option<(ObjectPhysics, Collider)>,
+    /// The same model for the SA physics world (GTA space).
+    sa: Option<Arc<SaColModel>>,
+    /// object.dat physics for knockable props.
+    prop: Option<ObjectPhysics>,
 }
 
 enum ModelState {
@@ -171,10 +178,8 @@ fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
                 if let Some(c) = world.col(&obj.model) {
                     let m = col::parse_model(c)?;
                     cols.fixed = build_colliders(&m);
-                    let phys = world.physics.get(&obj.model).filter(|p| !p.is_static());
-                    if let (Some(p), Some(hull)) = (phys, build_hull(&m)) {
-                        cols.prop = Some((*p, hull));
-                    }
+                    cols.sa = Some(Arc::new(SaColModel::from_col(&m)));
+                    cols.prop = world.physics.get(&obj.model).filter(|p| !p.is_static()).copied();
                 }
                 Ok((parts, cols))
             })();
@@ -290,31 +295,6 @@ fn build_colliders(m: &col::ColModel) -> Vec<Collider> {
         out.push(Collider::compound(shapes));
     }
     out
-}
-
-/// Convex hull of everything in a COL model (for props that become dynamic).
-fn build_hull(m: &col::ColModel) -> Option<Collider> {
-    let mut pts: Vec<Vec3> = m.vertices.iter().map(|&v| g2b(v)).collect();
-    for b in &m.boxes {
-        for i in 0..8 {
-            let c = [
-                if i & 1 == 0 { b.min[0] } else { b.max[0] },
-                if i & 2 == 0 { b.min[1] } else { b.max[1] },
-                if i & 4 == 0 { b.min[2] } else { b.max[2] },
-            ];
-            pts.push(g2b(c));
-        }
-    }
-    for s in &m.spheres {
-        let c = g2b(s.center);
-        for d in [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
-            pts.push(c + d * s.radius);
-        }
-    }
-    if pts.len() < 4 {
-        return None;
-    }
-    Collider::convex_hull(&pts)
 }
 
 /// Noon ambient added to lit geometry (stand-in for timecyc `AmbientObj`).
@@ -550,6 +530,7 @@ fn stream_instances(
     loader: Res<Loader>,
     mut cache: ResMut<Cache>,
     mut st: ResMut<Streamer>,
+    mut sa: ResMut<SaPhys>,
     cam: Single<&GlobalTransform, With<StreamCamera>>,
 ) {
     let cam_pos = cam.translation();
@@ -593,27 +574,38 @@ fn stream_instances(
                     use_aabb: false,
                 };
                 let model = model.clone();
-                let mut ec = commands
-                    .spawn((Transform::from_translation(inst.pos).with_rotation(inst.rot), Visibility::default()));
+                let tf = Transform::from_translation(inst.pos).with_rotation(inst.rot);
+                let mut ec = commands.spawn((tf, Visibility::default()));
                 // Only full-detail instances collide; LODs are visual only.
                 let collide = inst.near == 0.0 && !model.cols.fixed.is_empty();
                 if collide {
-                    ec.insert(RigidBody::Fixed);
+                    // Props can move (SA physics), so their Rapier proxy follows the transform.
+                    ec.insert(if model.cols.prop.is_some() { RigidBody::KinematicPositionBased } else { RigidBody::Fixed });
                 }
-                let prop = model.cols.prop.as_ref().filter(|_| collide);
-                if let Some((physics, hull)) = prop {
-                    ec.insert(Prop { physics: *physics, hull: hull.clone(), loose: false });
+                // SA physics: props are static bodies that can be knocked loose, the rest is geometry.
+                if let (true, Some(sa_col)) = (collide, &model.cols.sa) {
+                    let m = gta_matrix(&tf);
+                    match model.cols.prop {
+                        Some(op) => {
+                            let mut p = Physical::new(EntityType::Object, m);
+                            p.eflags |= ef::IS_STATIC;
+                            p.mass = op.mass.clamp(1.0, 50000.0);
+                            p.turn_mass = op.turn_mass.max(1.0);
+                            p.elasticity = op.elasticity;
+                            p.air_resistance = op.air_resistance;
+                            let id = sa.world.add_body(p, (**sa_col).clone(), Box::new(PropLogic { uproot: op.uproot }));
+                            ec.insert(SaBody::new(id, m));
+                        }
+                        None => {
+                            ec.insert(SaBuilding(sa.world.add_building(m, sa_col.clone())));
+                        }
+                    }
                 }
                 let e = ec
                     .with_children(|c| {
                         if collide {
                             for col in &model.cols.fixed {
-                                let mut cc = c.spawn((Transform::default(), col.clone(), PropPart));
-                                if prop.is_some() {
-                                    cc.insert((ActiveEvents::CONTACT_FORCE_EVENTS, ContactForceEventThreshold(PROP_EVENT_FORCE)));
-                                } else {
-                                    cc.remove::<PropPart>();
-                                }
+                                c.spawn((Transform::default(), col.clone()));
                             }
                         }
                         for p in model.parts.iter() {
@@ -647,4 +639,21 @@ fn stream_instances(
         models_loading: loading,
         txds: cache.txds.len(),
     };
+}
+
+/// object.dat prop: static until a hit exceeds its uproot impulse (SA units).
+struct PropLogic {
+    uproot: f32,
+}
+
+impl BodyLogic for PropLogic {
+    fn uproot_limit(&self) -> Option<f32> {
+        Some(self.uproot)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

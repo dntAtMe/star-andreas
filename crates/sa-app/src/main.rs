@@ -1,6 +1,6 @@
 mod interp;
 mod player;
-mod props;
+mod saphys;
 mod stream;
 mod vehicle;
 mod world;
@@ -72,7 +72,7 @@ fn main() -> anyhow::Result<()> {
         StreamPlugin,
         PlayerPlugin,
         VehiclePlugin,
-        props::PropsPlugin,
+        saphys::SaPhysPlugin,
     ))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
