@@ -21,6 +21,8 @@ pub mod id {
     pub const TEXTURE_NATIVE: u32 = 0x15;
     pub const TEX_DICTIONARY: u32 = 0x16;
     pub const GEOMETRY_LIST: u32 = 0x1A;
+    pub const SKIN: u32 = 0x116;
+    pub const HANIM: u32 = 0x11E;
     pub const BIN_MESH: u32 = 0x50E;
     pub const EXTRA_VERT_COLOUR: u32 = 0x0253_F2F9;
     pub const NODE_NAME: u32 = 0x0253_F2FE;

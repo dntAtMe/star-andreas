@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use sa_formats::{dat, dff, ide, img::Img, ipl, txd};
+use sa_formats::{col, dat, dff, ide, ifp, img::Img, ipl, txd};
 
 fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| {
@@ -15,6 +15,7 @@ fn main() -> anyhow::Result<()> {
     let mut fails: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut ok: BTreeMap<&str, usize> = BTreeMap::new();
     let mut tex_formats: BTreeMap<String, usize> = BTreeMap::new();
+    let mut col_stats: BTreeMap<String, usize> = BTreeMap::new();
 
     for name in ["models/gta3.img", "models/gta_int.img"] {
         let img = Img::open(&root.join(name))?;
@@ -29,6 +30,22 @@ fn main() -> anyhow::Result<()> {
                     for t in t {
                         *tex_formats.entry(format!("{:?} alpha={}", t.format, t.has_alpha)).or_default() += 1;
                     }
+                }))
+            } else if lower.ends_with(".col") {
+                ("col", col::index(data).and_then(|idx| {
+                    for e in idx {
+                        let m = col::parse_model(&data[e.offset..e.offset + e.size])?;
+                        // Sanity: mesh vertices must lie (roughly) inside the bounds.
+                        for v in &m.vertices {
+                            for k in 0..3 {
+                                if v[k] < m.min[k] - 2.0 || v[k] > m.max[k] + 2.0 {
+                                    anyhow::bail!("{}: vertex {v:?} outside bounds {:?}..{:?}", m.name, m.min, m.max);
+                                }
+                            }
+                        }
+                        *col_stats.entry(format!("v{}", m.version)).or_default() += 1;
+                    }
+                    Ok(())
                 }))
             } else if lower.ends_with(".ipl") {
                 ("ipl", ipl::parse_binary(data).map(|_| ()))
@@ -66,6 +83,20 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    let anims = ifp::parse(&std::fs::read(root.join("anim/ped.ifp"))?)?;
+    println!("ped.ifp: {} animations", anims.len());
+    for want in ["idle_stance", "walk_civi", "run_civi", "sprint_civi", "walk_player", "run_player", "fall_fall"] {
+        match anims.iter().find(|a| a.name.eq_ignore_ascii_case(want)) {
+            Some(a) => println!("  {}: {} tracks, {:.2}s", a.name, a.tracks.len(), a.duration),
+            None => println!("  {want}: MISSING"),
+        }
+    }
+    let gta3 = Img::open(&root.join("models/gta3.img"))?;
+    let fam1 = dff::parse(gta3.get("fam1.dff").unwrap())?;
+    let skin = fam1.geometries.iter().find_map(|g| g.skin.as_ref()).expect("fam1 skin");
+    let hroot = fam1.frames.iter().find_map(|f| f.hanim.as_ref().filter(|h| !h.nodes.is_empty())).expect("hanim root");
+    println!("fam1: {} frames, skin bones {}, hanim nodes {}", fam1.frames.len(), skin.num_bones, hroot.nodes.len());
+    println!("col models: {col_stats:?}");
     println!("ok: {ok:?}");
     println!("IDE objects: {objs}, text IPL instances: {insts}");
     println!("texture formats: {tex_formats:#?}");

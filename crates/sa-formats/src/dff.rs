@@ -14,6 +14,27 @@ pub struct Frame {
     pub pos: [f32; 3],
     pub parent: i32,
     pub name: String,
+    pub hanim: Option<HAnim>,
+}
+
+/// HAnim plugin on a frame. Every bone frame carries its `node_id`; the
+/// skeleton root additionally lists all bones in skin-index order.
+#[derive(Debug, Clone)]
+pub struct HAnim {
+    pub node_id: i32,
+    /// (node id, node index, flags) in hierarchy order; empty on non-root bones.
+    pub nodes: Vec<(i32, i32, u32)>,
+}
+
+/// Skin plugin on a geometry.
+#[derive(Debug, Clone)]
+pub struct Skin {
+    pub num_bones: usize,
+    /// Per vertex: 4 bone indices (into the HAnim node list) and weights.
+    pub indices: Vec<[u8; 4]>,
+    pub weights: Vec<[f32; 4]>,
+    /// Per bone: inverse of the bone's model-space matrix, column-major 4x4.
+    pub inverse_bind: Vec<[f32; 16]>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +69,7 @@ pub struct Geometry {
     pub materials: Vec<Material>,
     /// Second prelit set from the Extra Vert Colour plugin (SA day/night blend).
     pub extra_colors: Vec<[u8; 4]>,
+    pub skin: Option<Skin>,
 }
 
 pub mod geo_flags {
@@ -151,7 +173,7 @@ fn parse_frame_list(mut r: Reader) -> Result<Vec<Frame>> {
         let pos = s.vec3()?;
         let parent = s.i32()?;
         s.u32()?; // matrix flags
-        frames.push(Frame { rot, pos, parent, name: String::new() });
+        frames.push(Frame { rot, pos, parent, name: String::new(), hanim: None });
     }
     // One extension per frame; may carry the node name plugin.
     for frame in frames.iter_mut() {
@@ -161,8 +183,10 @@ fn parse_frame_list(mut r: Reader) -> Result<Vec<Frame>> {
         let (_, ext) = rw::sub(&mut r, id::EXTENSION)?;
         for child in rw::children(ext) {
             let (h, mut body) = child?;
-            if h.ty == id::NODE_NAME {
-                frame.name = String::from_utf8_lossy(body.bytes(h.size)?).into_owned();
+            match h.ty {
+                id::NODE_NAME => frame.name = String::from_utf8_lossy(body.bytes(h.size)?).into_owned(),
+                id::HANIM => frame.hanim = Some(parse_hanim(body)?),
+                _ => {}
             }
         }
     }
@@ -245,10 +269,14 @@ fn parse_geometry(mut r: Reader, version: u32) -> Result<Geometry> {
         let (_, ext) = rw::sub(&mut r, id::EXTENSION)?;
         for child in rw::children(ext) {
             let (h, mut body) = child?;
-            if h.ty == id::EXTRA_VERT_COLOUR && body.u32()? != 0 {
-                g.extra_colors = (0..num_verts)
-                    .map(|_| Ok([body.u8()?, body.u8()?, body.u8()?, body.u8()?]))
-                    .collect::<Result<_>>()?;
+            match h.ty {
+                id::EXTRA_VERT_COLOUR if body.u32()? != 0 => {
+                    g.extra_colors = (0..num_verts)
+                        .map(|_| Ok([body.u8()?, body.u8()?, body.u8()?, body.u8()?]))
+                        .collect::<Result<_>>()?;
+                }
+                id::SKIN => g.skin = Some(parse_skin(body, num_verts).context("skin")?),
+                _ => {}
             }
         }
     }
@@ -289,4 +317,46 @@ fn parse_material(mut r: Reader) -> Result<Material> {
         None
     };
     Ok(Material { color, texture })
+}
+
+fn parse_hanim(mut r: Reader) -> Result<HAnim> {
+    let _version = r.u32()?;
+    let node_id = r.i32()?;
+    let count = r.u32()? as usize;
+    let mut nodes = Vec::with_capacity(count);
+    if count > 0 {
+        r.u32()?; // flags
+        r.u32()?; // key frame size
+        for _ in 0..count {
+            nodes.push((r.i32()?, r.i32()?, r.u32()?));
+        }
+    }
+    Ok(HAnim { node_id, nodes })
+}
+
+fn parse_skin(mut r: Reader, num_verts: usize) -> Result<Skin> {
+    let num_bones = r.u8()? as usize;
+    let num_used = r.u8()? as usize;
+    let max_weights = r.u8()?;
+    r.u8()?;
+    r.skip(num_used)?; // used bone list
+    let indices = (0..num_verts).map(|_| Ok([r.u8()?, r.u8()?, r.u8()?, r.u8()?])).collect::<Result<_>>()?;
+    let weights = (0..num_verts).map(|_| Ok([r.f32()?, r.f32()?, r.f32()?, r.f32()?])).collect::<Result<_>>()?;
+    let mut inverse_bind = Vec::with_capacity(num_bones);
+    for _ in 0..num_bones {
+        if max_weights == 0 {
+            r.u32()?; // 0xDEADDEAD marker in older skins
+        }
+        let mut m = [0f32; 16];
+        for v in m.iter_mut() {
+            *v = r.f32()?;
+        }
+        // RW leaves junk in the w components; force an affine matrix.
+        m[3] = 0.0;
+        m[7] = 0.0;
+        m[11] = 0.0;
+        m[15] = 1.0;
+        inverse_bind.push(m);
+    }
+    Ok(Skin { num_bones, indices, weights, inverse_bind })
 }

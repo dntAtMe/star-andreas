@@ -5,9 +5,11 @@
 //! the app crate.
 
 pub mod bin;
+pub mod col;
 pub mod dat;
 pub mod dff;
 pub mod ide;
+pub mod ifp;
 pub mod img;
 pub mod ipl;
 pub mod rw;
