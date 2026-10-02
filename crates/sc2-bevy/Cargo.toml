@@ -1,0 +1,15 @@
+[package]
+name = "sc2-bevy"
+description = "Bevy plugin: StarCraft II units (simulated by sc2-api) living in the San Andreas world"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+sc2-api = { path = "../sc2-api" }
+bevy.workspace = true
+bevy_rapier3d.workspace = true
+
+[features]
+default = ["dev"]
+dev = ["bevy/dynamic_linking"]

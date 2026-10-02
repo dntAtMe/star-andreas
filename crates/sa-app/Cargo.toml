@@ -10,9 +10,12 @@ sa-formats.workspace = true
 anyhow.workspace = true
 bevy.workspace = true
 bevy_rapier3d.workspace = true
+sc2-bevy = { path = "../sc2-bevy", optional = true, default-features = false }
 
 [features]
 default = ["dev"]
+# StarCraft II units in the world, simulated by a retail SC2 client (see crates/sc2-bevy).
+sc2 = ["dep:sc2-bevy"]
 # Bevy as a shared library: incremental rebuilds only relink our crate.
 # Disable for distributable builds: cargo build --release --no-default-features
 dev = ["bevy/dynamic_linking"]

@@ -1,0 +1,15 @@
+[package]
+name = "sc2-api"
+description = "StarCraft II client API (s2client-proto): launch a retail client and drive it as a simulation backend"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+prost = "0.14"
+tungstenite = "0.30"
+
+[build-dependencies]
+prost-build = "0.14"
+protox = "0.9"

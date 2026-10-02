@@ -1,0 +1,11 @@
+[package]
+name = "sc2-formats"
+description = "Readers for StarCraft II data (local CASC storage, game data catalogs)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+memmap2.workspace = true
+flate2 = "1"
