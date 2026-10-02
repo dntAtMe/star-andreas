@@ -11,6 +11,7 @@
 
 mod control;
 mod demo;
+mod models;
 mod units;
 
 use std::{path::PathBuf, sync::Mutex};
@@ -60,7 +61,8 @@ impl Sc2Settings {
             })
             // Grove Street cul-de-sac.
             .unwrap_or([2495.0, -1670.0, 13.3]);
-        let scale = std::env::var("SC2_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+        // 2 m per cell: SC2 models are ~0.9 cells tall, GTA peds ~1.8 m.
+        let scale = std::env::var("SC2_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(2.0);
         Self { game_dir, map, anchor, scale, step: 2, show_neutral: std::env::var_os("SC2_NEUTRAL").is_some() }
     }
 
@@ -114,7 +116,7 @@ impl Plugin for Sc2Plugin {
             .add_systems(Startup, start_sim)
             .add_systems(PreUpdate, pump_events)
             .add_systems(Update, demo::demo)
-            .add_plugins((units::UnitsPlugin, control::ControlPlugin));
+            .add_plugins((units::UnitsPlugin, control::ControlPlugin, models::ModelsPlugin));
     }
 }
 

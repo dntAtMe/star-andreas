@@ -5182,9 +5182,11 @@ dependencies = [
 name = "sc2-bevy"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bevy",
  "bevy_rapier3d",
  "sc2-api",
+ "sc2-formats",
 ]
 
 [[package]]

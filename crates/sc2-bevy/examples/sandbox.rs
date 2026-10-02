@@ -2,6 +2,7 @@
 //! `cargo run -p sc2-bevy --example sandbox`
 //! Camera: WASD pan, wheel zoom, Q/E rotate.
 //! `SC2_DEMO=1 [SC2_SHOT=<png>]`: scripted fight (see sc2_bevy demo).
+//! `SANDBOX_CAM=x,z,dist,yaw`: start view.
 
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
 use bevy_rapier3d::prelude::*;
@@ -56,7 +57,13 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: Res
         Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
     ));
     commands.insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness: 400.0, ..default() });
-    commands.spawn((Camera3d::default(), Transform::default(), RtsCam { focus: Vec3::ZERO, yaw: 0.0, dist: 30.0 }));
+    // `SANDBOX_CAM=x,z,dist,yaw` overrides the start view.
+    let v: Vec<f32> = std::env::var("SANDBOX_CAM").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    let (focus, dist, yaw) = match v[..] {
+        [x, z, d, y] => (Vec3::new(x, 0.0, z), d, y),
+        _ => (Vec3::ZERO, 30.0, 0.0),
+    };
+    commands.spawn((Camera3d::default(), Transform::default(), RtsCam { focus, yaw, dist }));
 }
 
 fn rts_camera(

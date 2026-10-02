@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 sc2-api = { path = "../sc2-api" }
+sc2-formats = { path = "../sc2-formats" }
+anyhow.workspace = true
 bevy.workspace = true
 bevy_rapier3d.workspace = true
 

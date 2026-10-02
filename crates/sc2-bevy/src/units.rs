@@ -6,7 +6,13 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 use sc2_api::sim::Alliance;
 
-use crate::{Sc2Link, Sc2Settings, SnapshotArrived};
+use crate::{
+    Sc2Link, Sc2Settings, SnapshotArrived,
+    models::{ModelState, Models},
+};
+
+/// M3 models face -Y (Bevy +Z after the axis swap); turn them to SC2 facing 0 (+X).
+const MODEL_YAW: f32 = std::f32::consts::FRAC_PI_2;
 
 pub(crate) struct UnitsPlugin;
 
@@ -14,7 +20,7 @@ impl Plugin for UnitsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TagMap>()
             .add_systems(Startup, setup_assets)
-            .add_systems(Update, (apply_snapshots, place_units, draw_bars).chain());
+            .add_systems(Update, (apply_snapshots, attach_models, place_units, draw_bars).chain());
     }
 }
 
@@ -36,6 +42,8 @@ pub struct Sc2Unit {
     pub shield: f32,
     pub shield_max: f32,
     pub engaged: Option<u64>,
+    /// Visual height in metres (for overlays).
+    pub height: f32,
     /// Map positions/facings at the previous and latest snapshot.
     prev: ([f32; 2], f32),
     curr: ([f32; 2], f32),
@@ -70,6 +78,14 @@ fn setup_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut ma
         neutral: mat(Color::srgb(0.55, 0.55, 0.5)),
     });
 }
+
+/// Placeholder visuals, replaced once the unit's model has loaded.
+#[derive(Component)]
+struct Placeholder;
+
+/// Unit still waiting for its model.
+#[derive(Component)]
+struct NeedsModel;
 
 /// Body height in metres for a unit of footprint radius `r` (metres).
 fn body_height(r: f32) -> f32 {
@@ -131,21 +147,25 @@ fn apply_snapshots(
                     shield: u.shield,
                     shield_max: u.shield_max,
                     engaged: u.engaged_target,
+                    height: h,
                     prev: pos,
                     curr: pos,
                     ground: None,
                 },
                 Transform::from_translation(settings.to_world(info, pos.0)),
                 Visibility::default(),
+                NeedsModel,
             ))
             .with_children(|p| {
                 p.spawn((
+                    Placeholder,
                     Mesh3d(assets.body.clone()),
                     MeshMaterial3d(material.clone()),
                     Transform::from_xyz(0.0, h * 0.5, 0.0).with_scale(Vec3::new(2.0 * r, h * 0.5, 2.0 * r)),
                 ));
                 // Facing marker on local +X.
                 p.spawn((
+                    Placeholder,
                     Mesh3d(assets.nose.clone()),
                     MeshMaterial3d(material),
                     Transform::from_xyz(r, h * 0.75, 0.0).with_scale(Vec3::splat((r * 0.6).max(0.15))),
@@ -162,6 +182,40 @@ fn apply_snapshots(
         }
         keep
     });
+}
+
+/// Swaps placeholders for the real model once it's loaded.
+fn attach_models(
+    mut commands: Commands,
+    models: Option<ResMut<Models>>,
+    settings: Res<Sc2Settings>,
+    mut units: Query<(Entity, &mut Sc2Unit, &Children), With<NeedsModel>>,
+    placeholders: Query<(), With<Placeholder>>,
+) {
+    let Some(mut models) = models else { return };
+    for (e, mut u, children) in &mut units {
+        match models.get(u.unit_type, &u.name) {
+            ModelState::Pending => continue,
+            ModelState::Failed => {}
+            ModelState::Ready(parts, height) => {
+                for c in children.iter().filter(|c| placeholders.contains(*c)) {
+                    commands.entity(c).despawn();
+                }
+                let s = settings.scale;
+                u.height = height * s;
+                commands.entity(e).with_children(|p| {
+                    for (mesh, mat) in parts {
+                        p.spawn((
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(mat.clone()),
+                            Transform::from_rotation(Quat::from_rotation_y(MODEL_YAW)).with_scale(Vec3::splat(s)),
+                        ));
+                    }
+                });
+            }
+        }
+        commands.entity(e).remove::<NeedsModel>();
+    }
 }
 
 fn place_units(
@@ -225,7 +279,7 @@ fn draw_bars(
             continue;
         }
         let r = u.radius * settings.scale;
-        let top = tf.translation + Vec3::Y * (body_height(r) + 0.35);
+        let top = tf.translation + Vec3::Y * (u.height + 0.35);
         let half = (r * 1.2).clamp(0.4, 3.0);
         let (a, b) = (top - right * half, top + right * half);
         let hp = (u.health / u.health_max).clamp(0.0, 1.0);
