@@ -1,0 +1,10 @@
+[package]
+name = "sa-formats"
+description = "Parsers for GTA San Andreas data files (IMG, DFF, TXD, IDE, IPL, gta.dat)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+memmap2.workspace = true

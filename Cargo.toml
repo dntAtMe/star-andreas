@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/sa-formats", "crates/sa-app"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+sa-formats = { path = "crates/sa-formats" }
+anyhow = "1"
+memmap2 = "0.9"
+bevy = "0.19.1"
+
+# Bevy is painfully slow in debug; optimize deps, keep our crates debuggable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

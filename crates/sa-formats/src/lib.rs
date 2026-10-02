@@ -1,0 +1,14 @@
+//! Readers for GTA San Andreas (PC 1.0) data formats.
+//!
+//! Everything here is engine-agnostic: parsers return plain data in the game's
+//! native Z-up coordinate space. Conversion to the renderer's space happens in
+//! the app crate.
+
+pub mod bin;
+pub mod dat;
+pub mod dff;
+pub mod ide;
+pub mod img;
+pub mod ipl;
+pub mod rw;
+pub mod txd;

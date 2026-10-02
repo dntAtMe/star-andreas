@@ -1,0 +1,11 @@
+[package]
+name = "sa-app"
+description = "GTA San Andreas world viewer on Bevy"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+sa-formats.workspace = true
+anyhow.workspace = true
+bevy.workspace = true
