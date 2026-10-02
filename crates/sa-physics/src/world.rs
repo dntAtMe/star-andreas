@@ -1,0 +1,1011 @@
+//! `CWorld`: entity storage, sector lists and the per-frame physics loop
+//! (`CWorld::Process` 0x5684A0), with `CPhysical::ProcessCollision` (0x54DFB0),
+//! `ProcessShift` (0x54DB10), `CheckCollision` (0x54D920),
+//! `ProcessCollisionSectorList` (0x54BA60) and `ProcessShiftSectorList` (0x546670).
+//!
+//! Differences from the original, on purpose:
+//! - Buildings live in the 120x120 x 50-unit sector grid like the game, but
+//!   dynamic bodies are scanned as one list per type instead of the 16x16
+//!   repeat sectors (same list order: vehicles, objects, peds; shift: objects,
+//!   peds, vehicles, then buildings).
+//! - Attachments, ignored entities, audio, damage gameplay and the
+//!   ped/train kill hooks are omitted.
+
+use std::sync::Arc;
+
+use glam::Vec3;
+
+use crate::{
+    Ctx,
+    collision::{ColModel, MAX_COLPOINTS, process_col_models},
+    colpoint::ColPoint,
+    pair::{self, PairInfo},
+    physical::{EntityType, Matrix, Physical, Status, VehicleClass, ef, pf},
+    surface::{SURFACE_WHEELBASE, SurfaceInfos},
+};
+
+pub const SECTORS: i32 = 120;
+pub const SECTOR_SIZE: f32 = 50.0;
+/// Regular collision passes before the final "stuck" pass.
+const COLLISION_PASSES: usize = 5;
+pub const MAX_LINES: usize = 8;
+
+/// Sector index of a world coordinate (clamped to the grid).
+pub fn sector_coord(c: f32) -> i32 {
+    ((c * 0.02 + 60.0).floor() as i32).clamp(0, SECTORS - 1)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntityId {
+    Building(u32),
+    Body(u32),
+}
+
+pub struct Building {
+    pub matrix: Matrix,
+    pub col: Arc<ColModel>,
+    scan: u16,
+    sectors: Vec<u32>,
+}
+
+/// Results of a body's wheel / suspension lines for the current frame.
+#[derive(Debug, Clone, Copy)]
+pub struct LineHits {
+    pub points: [ColPoint; MAX_LINES],
+    /// Best hit fraction along each line (1.0 = no hit).
+    pub values: [f32; MAX_LINES],
+    pub entities: [Option<EntityId>; MAX_LINES],
+}
+
+impl Default for LineHits {
+    fn default() -> Self {
+        Self { points: [ColPoint::default(); MAX_LINES], values: [1.0; MAX_LINES], entities: [None; MAX_LINES] }
+    }
+}
+
+/// Per-type behaviour (the subclass overrides of CPhysical).
+pub trait BodyLogic: Send + Sync + 'static {
+    /// vtbl+0x28 ProcessControl. Default: CPhysical::ProcessControl.
+    /// `lines` are the wheel-line results of the previous frame's collision passes.
+    fn process_control(&mut self, phys: &mut Physical, col: &mut ColModel, ctx: &Ctx, lines: &LineHits) {
+        let _ = (col, lines);
+        phys.process_control(ctx);
+    }
+
+    /// vtbl+0x40 SpecialEntityCalcCollisionSteps: (steps, probe the full step first).
+    fn collision_steps(&self, phys: &Physical) -> (u8, bool) {
+        let _ = phys;
+        (1, false)
+    }
+
+    /// object.dat uproot limit for static props (impulse in SA units).
+    fn uproot_limit(&self) -> Option<f32> {
+        None
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+/// Plain CPhysical behaviour.
+pub struct PlainLogic;
+
+impl BodyLogic for PlainLogic {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+pub struct Body {
+    pub phys: Physical,
+    /// Per-body copy: vehicles own lines in their collision model.
+    pub col: ColModel,
+    pub logic: Box<dyn BodyLogic>,
+    pub lines: LineHits,
+    scan: u16,
+}
+
+/// What a sector-list entry produced.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    None,
+    Hard,
+}
+
+pub struct World {
+    buildings: Vec<Option<Building>>,
+    free_buildings: Vec<u32>,
+    sectors: Vec<Vec<u32>>,
+    bodies: Vec<Option<Body>>,
+    free_bodies: Vec<u32>,
+    scan_code: u16,
+    pub surfaces: SurfaceInfos,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        Self::new(SurfaceInfos::default())
+    }
+}
+
+impl World {
+    pub fn new(surfaces: SurfaceInfos) -> Self {
+        Self {
+            buildings: Vec::new(),
+            free_buildings: Vec::new(),
+            sectors: vec![Vec::new(); (SECTORS * SECTORS) as usize],
+            bodies: Vec::new(),
+            free_bodies: Vec::new(),
+            scan_code: 0,
+            surfaces,
+        }
+    }
+
+    // ------------------------------------------------------------ entities
+
+    pub fn add_building(&mut self, matrix: Matrix, col: Arc<ColModel>) -> EntityId {
+        let c = matrix.transform(col.bound_center);
+        let r = col.bound_radius;
+        let mut sectors = Vec::new();
+        for y in sector_coord(c.y - r)..=sector_coord(c.y + r) {
+            for x in sector_coord(c.x - r)..=sector_coord(c.x + r) {
+                sectors.push((y * SECTORS + x) as u32);
+            }
+        }
+        let b = Building { matrix, col, scan: 0, sectors };
+        let id = match self.free_buildings.pop() {
+            Some(i) => {
+                self.buildings[i as usize] = Some(b);
+                i
+            }
+            None => {
+                self.buildings.push(Some(b));
+                (self.buildings.len() - 1) as u32
+            }
+        };
+        for &s in &self.buildings[id as usize].as_ref().unwrap().sectors {
+            self.sectors[s as usize].push(id);
+        }
+        EntityId::Building(id)
+    }
+
+    pub fn add_body(&mut self, mut phys: Physical, col: ColModel, logic: Box<dyn BodyLogic>) -> EntityId {
+        phys.bound_radius = col.bound_radius;
+        let b = Body { phys, col, logic, lines: LineHits::default(), scan: 0 };
+        let id = match self.free_bodies.pop() {
+            Some(i) => {
+                self.bodies[i as usize] = Some(b);
+                i
+            }
+            None => {
+                self.bodies.push(Some(b));
+                (self.bodies.len() - 1) as u32
+            }
+        };
+        EntityId::Body(id)
+    }
+
+    pub fn remove(&mut self, id: EntityId) {
+        match id {
+            EntityId::Building(i) => {
+                if let Some(b) = self.buildings.get_mut(i as usize).and_then(Option::take) {
+                    for s in b.sectors {
+                        self.sectors[s as usize].retain(|&x| x != i);
+                    }
+                    self.free_buildings.push(i);
+                }
+            }
+            EntityId::Body(i) => {
+                if self.bodies.get_mut(i as usize).and_then(Option::take).is_some() {
+                    self.free_bodies.push(i);
+                }
+            }
+        }
+    }
+
+    pub fn body(&self, id: EntityId) -> Option<&Body> {
+        match id {
+            EntityId::Body(i) => self.bodies.get(i as usize)?.as_ref(),
+            EntityId::Building(_) => None,
+        }
+    }
+
+    pub fn body_mut(&mut self, id: EntityId) -> Option<&mut Body> {
+        match id {
+            EntityId::Body(i) => self.bodies.get_mut(i as usize)?.as_mut(),
+            EntityId::Building(_) => None,
+        }
+    }
+
+    pub fn building(&self, id: EntityId) -> Option<&Building> {
+        match id {
+            EntityId::Building(i) => self.buildings.get(i as usize)?.as_ref(),
+            EntityId::Body(_) => None,
+        }
+    }
+
+    pub fn body_ids(&self) -> Vec<EntityId> {
+        self.bodies.iter().enumerate().filter(|(_, b)| b.is_some()).map(|(i, _)| EntityId::Body(i as u32)).collect()
+    }
+
+    fn next_scan(&mut self) -> u16 {
+        if self.scan_code == u16::MAX {
+            for b in self.buildings.iter_mut().flatten() {
+                b.scan = 0;
+            }
+            for b in self.bodies.iter_mut().flatten() {
+                b.scan = 0;
+            }
+            self.scan_code = 1;
+        } else {
+            self.scan_code += 1;
+        }
+        self.scan_code
+    }
+
+    fn b(&self, i: usize) -> &Body {
+        self.bodies[i].as_ref().unwrap()
+    }
+
+    fn bm(&mut self, i: usize) -> &mut Body {
+        self.bodies[i].as_mut().unwrap()
+    }
+
+    /// Two distinct bodies, mutably.
+    fn two(&mut self, i: usize, j: usize) -> (&mut Body, &mut Body) {
+        assert_ne!(i, j);
+        if i < j {
+            let (a, b) = self.bodies.split_at_mut(j);
+            (a[i].as_mut().unwrap(), b[0].as_mut().unwrap())
+        } else {
+            let (a, b) = self.bodies.split_at_mut(i);
+            (b[0].as_mut().unwrap(), a[j].as_mut().unwrap())
+        }
+    }
+
+    // ------------------------------------------------------------ CWorld::Process
+
+    /// One physics frame with timestep `ts` (in 1/50 s frames).
+    pub fn process(&mut self, ts: f32) {
+        let mut ctx = Ctx::new(ts);
+        let moving: Vec<usize> = (0..self.bodies.len())
+            .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))
+            .collect();
+
+        // ProcessControl pass (uses last frame's line results), then reset lines.
+        for &i in &moving {
+            let b = self.bm(i);
+            b.logic.process_control(&mut b.phys, &mut b.col, &ctx, &b.lines);
+            b.lines = LineHits::default();
+        }
+
+        // Up to 6 collision passes.
+        ctx.later_collision_pass = false;
+        ctx.keep_going_after_hit = true;
+        for pass in 0..=COLLISION_PASSES {
+            for &i in &moving {
+                if self.b(i).phys.has_e(ef::IN_SAFE_POSITION) {
+                    continue;
+                }
+                if pass == COLLISION_PASSES {
+                    self.bm(i).phys.eflags |= ef::IS_STUCK;
+                }
+                self.process_collision(i, &ctx);
+                if pass == COLLISION_PASSES && !self.b(i).phys.has_e(ef::IN_SAFE_POSITION) {
+                    self.bm(i).phys.eflags |= ef::IS_STUCK;
+                }
+            }
+            ctx.later_collision_pass = true;
+        }
+
+        // Two shift passes.
+        for shift_pass in 0..2 {
+            ctx.keep_going_after_hit = shift_pass == 1;
+            for &i in &moving {
+                if self.b(i).phys.has_e(ef::IN_SAFE_POSITION) {
+                    continue;
+                }
+                self.process_shift(i, &ctx);
+                let p = &mut self.bm(i).phys;
+                if !p.has_e(ef::IN_SAFE_POSITION) {
+                    p.eflags |= ef::IS_STUCK;
+                    if shift_pass == 1 && p.status == Status::Player {
+                        // Forced damped move for a stuck player (turn speed not damped).
+                        p.move_speed *= 0.707f32.powf(ts);
+                        p.apply_move_speed(ts);
+                        p.apply_turn_speed(ts);
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ ProcessCollision
+
+    /// 0x54DFB0 (main path).
+    fn process_collision(&mut self, i: usize, ctx: &Ctx) {
+        let b = self.bm(i);
+        let p = &mut b.phys;
+        p.flags &= !(pf::UNK_1000 | pf::IN_SHIFT);
+        p.moving_speed = 0.0;
+        if !p.has_e(ef::USES_COLLISION) || p.has(pf::NO_COLLISION) || p.status == Status::Simple {
+            p.eflags = (p.eflags & !ef::IS_STUCK) | ef::IN_SAFE_POSITION;
+            return;
+        }
+        let saved_elasticity = p.elasticity;
+        let saved_move = p.move_speed;
+        let saved_matrix = p.matrix;
+        let ts0 = ctx.ts;
+        let (n_steps, probe_first) = b.logic.collision_steps(&b.phys);
+        let n_steps = n_steps.max(1);
+        let step_ts = ts0 / n_steps as f32;
+
+        if probe_first {
+            let p = &mut self.bm(i).phys;
+            p.apply_speed(ts0);
+            p.matrix.reorthogonalise();
+            p.flags = (p.flags & !(pf::UNK_1000 | pf::IN_SHIFT)) | pf::PROBE;
+            let uses = p.eflags & ef::USES_COLLISION;
+            p.eflags &= !ef::USES_COLLISION;
+            let hit = self.check_collision(i, ctx);
+            let p = &mut self.bm(i).phys;
+            p.eflags |= uses;
+            p.flags &= !pf::PROBE;
+            if !hit {
+                return self.mark_safe(i, saved_matrix.pos, saved_elasticity);
+            }
+            p.matrix = saved_matrix;
+            p.move_speed = saved_move;
+            if p.is_vehicle() {
+                p.elasticity *= 2.0;
+            }
+        }
+
+        // Swept probing at s/n of the step from the original pose.
+        for s in 1..n_steps {
+            let sub = Ctx { ts: (s as f32 * step_ts).max(1e-5), ..*ctx };
+            self.bm(i).phys.apply_speed(sub.ts);
+            let hit = self.check_collision(i, &sub);
+            let p = &mut self.bm(i).phys;
+            p.matrix = saved_matrix;
+            if hit {
+                p.elasticity = saved_elasticity;
+                return;
+            }
+        }
+
+        let p = &mut self.bm(i).phys;
+        p.apply_speed(ts0);
+        p.matrix.reorthogonalise();
+        p.flags &= !(pf::UNK_1000 | pf::IN_SHIFT);
+        let still = p.move_speed == Vec3::ZERO
+            && p.turn_speed == Vec3::ZERO
+            && !p.has(pf::UNK_800)
+            && p.status != Status::Player
+            && p.kind != EntityType::Vehicle;
+        if still {
+            return self.mark_safe(i, saved_matrix.pos, saved_elasticity);
+        }
+        if self.check_collision(i, ctx) {
+            let p = &mut self.bm(i).phys;
+            p.matrix = saved_matrix;
+            p.elasticity = saved_elasticity;
+            return;
+        }
+        self.mark_safe(i, saved_matrix.pos, saved_elasticity);
+    }
+
+    fn mark_safe(&mut self, i: usize, old_pos: Vec3, elasticity: f32) {
+        let p = &mut self.bm(i).phys;
+        p.eflags = (p.eflags & !ef::IS_STUCK) | ef::IN_SAFE_POSITION;
+        p.flags &= !(pf::UNK_800 | pf::UNK_1000);
+        p.elasticity = elasticity;
+        p.moving_speed = (p.matrix.pos - old_pos).length();
+    }
+
+    fn bound(&self, i: usize) -> (Vec3, f32) {
+        let b = self.b(i);
+        (b.phys.matrix.transform(b.col.bound_center), b.col.bound_radius)
+    }
+
+    fn sector_range(&self, i: usize) -> (i32, i32, i32, i32) {
+        let (c, r) = self.bound(i);
+        (sector_coord(c.x - r), sector_coord(c.x + r), sector_coord(c.y - r), sector_coord(c.y + r))
+    }
+
+    fn dynamic_order(&self, shift: bool) -> Vec<usize> {
+        let kinds: &[EntityType] = if shift {
+            &[EntityType::Object, EntityType::Ped, EntityType::Vehicle]
+        } else {
+            &[EntityType::Vehicle, EntityType::Object, EntityType::Ped]
+        };
+        let mut out = Vec::new();
+        for k in kinds {
+            for (j, b) in self.bodies.iter().enumerate() {
+                if b.as_ref().is_some_and(|b| b.phys.kind == *k) {
+                    out.push(j);
+                }
+            }
+        }
+        out
+    }
+
+    /// Candidate other entities touching body `i` (buildings via sectors, then bodies).
+    fn candidates(&mut self, i: usize, shift: bool) -> Vec<EntityId> {
+        let scan = self.next_scan();
+        let (c, r) = self.bound(i);
+        let (x0, x1, y0, y1) = self.sector_range(i);
+        let mut out = Vec::new();
+        let mut buildings = Vec::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                for &bi in &self.sectors[(y * SECTORS + x) as usize] {
+                    let b = self.buildings[bi as usize].as_mut().unwrap();
+                    if b.scan == scan {
+                        continue;
+                    }
+                    b.scan = scan;
+                    let bc = b.matrix.transform(b.col.bound_center);
+                    if touching(c, r, bc, b.col.bound_radius) {
+                        buildings.push(EntityId::Building(bi));
+                    }
+                }
+            }
+        }
+        if !shift {
+            out.extend(buildings.iter().copied());
+        }
+        for j in self.dynamic_order(shift) {
+            if j == i {
+                continue;
+            }
+            let o = self.b(j);
+            if !o.phys.has_e(ef::USES_COLLISION) {
+                continue;
+            }
+            let oc = o.phys.matrix.transform(o.col.bound_center);
+            if touching(c, r, oc, o.col.bound_radius) {
+                out.push(EntityId::Body(j as u32));
+            }
+        }
+        if shift {
+            out.extend(buildings);
+        }
+        out
+    }
+
+    /// 0x546D00 ProcessEntityCollision: contacts of body `i` against `other`
+    /// (also accumulates `i`'s wheel-line hits).
+    fn process_entity_collision(&mut self, i: usize, other: EntityId, cps: &mut [ColPoint; MAX_COLPOINTS]) -> usize {
+        let (other_mat, other_col): (Matrix, *const ColModel) = match other {
+            EntityId::Building(bi) => {
+                let b = self.buildings[bi as usize].as_ref().unwrap();
+                (b.matrix, Arc::as_ptr(&b.col))
+            }
+            EntityId::Body(j) => {
+                let b = self.b(j as usize);
+                (b.phys.matrix, &b.col as *const ColModel)
+            }
+        };
+        let a = self.bm(i);
+        let nl = a.col.lines.len().min(MAX_LINES);
+        let mut lp = a.lines.points;
+        let mut lv = a.lines.values;
+        // SAFETY: `other` is a different entity than body `i` (or a building), and
+        // the collision model is only read for the duration of this call.
+        let other_col = unsafe { &*other_col };
+        let n = process_col_models(&a.phys.matrix, &a.col, &other_mat, other_col, cps, &mut lp[..nl], &mut lv[..nl], false);
+        for l in 0..nl {
+            if lv[l] < a.lines.values[l] {
+                a.lines.values[l] = lv[l];
+                a.lines.points[l] = lp[l];
+                a.lines.entities[l] = Some(other);
+            }
+        }
+        if n > 0 {
+            a.phys.flags |= pf::COLLIDED;
+            let other_static = match other {
+                EntityId::Building(_) => true,
+                EntityId::Body(j) => self.b(j as usize).phys.is_static(),
+            };
+            if other_static {
+                self.bm(i).phys.eflags |= ef::HAS_HIT_WALL;
+            }
+            if let EntityId::Body(j) = other {
+                self.bm(j as usize).phys.flags |= pf::COLLIDED;
+            }
+        }
+        n
+    }
+
+    /// 0x54D920 CheckCollision (+ ProcessCollisionSectorList for every candidate).
+    fn check_collision(&mut self, i: usize, ctx: &Ctx) -> bool {
+        self.bm(i).phys.eflags &= !ef::COLLISION_PROCESSED;
+        let mut result = false;
+        for other in self.candidates(i, false) {
+            if self.collide(i, other, ctx) == Hit::Hard {
+                if self.b(i).phys.has(pf::PROBE) || !ctx.keep_going_after_hit {
+                    return true;
+                }
+                result = true;
+            }
+        }
+        result
+    }
+
+    /// One entry of ProcessCollisionSectorList (0x54BA60).
+    fn collide(&mut self, i: usize, other: EntityId, ctx: &Ctx) -> Hit {
+        self.bm(i).phys.flags &= !pf::UNK_1000;
+        let stuck = match other {
+            EntityId::Building(_) => {
+                let p = &self.b(i).phys;
+                p.has(pf::INFINITE_MASS) && p.has_e(ef::IS_STUCK)
+            }
+            EntityId::Body(_) => false,
+        };
+        let mut cps = [ColPoint::default(); MAX_COLPOINTS];
+        let n = self.process_entity_collision(i, other, &mut cps);
+        if n == 0 {
+            return Hit::None;
+        }
+        if self.b(i).phys.has(pf::PROBE) {
+            return Hit::Hard;
+        }
+        let static_path = match other {
+            EntityId::Building(_) => true,
+            EntityId::Body(j) => {
+                let o = &self.b(j as usize).phys;
+                o.has(pf::COLLIDE_AS_STATIC) || (o.is_static() && self.b(j as usize).logic.uproot_limit().is_none())
+            }
+        };
+        if static_path {
+            self.static_response(i, other, &cps[..n], stuck, ctx)
+        } else {
+            let EntityId::Body(j) = other else { unreachable!() };
+            self.physical_response(i, j as usize, &cps[..n], stuck, ctx)
+        }
+    }
+
+    /// Static path of ProcessCollisionSectorList.
+    fn static_response(&mut self, i: usize, other: EntityId, cps: &[ColPoint], stuck: bool, ctx: &Ctx) -> Hit {
+        let n = cps.len();
+        let other_is_static = true;
+        let surfaces = &self.surfaces;
+        let a = self.bodies[i].as_mut().unwrap();
+        let p = &mut a.phys;
+        let (mut count, mut max_imp) = (0usize, 0f32);
+        let (mut move_acc, mut turn_acc) = (Vec3::ZERO, Vec3::ZERO);
+        let _ = other;
+        for cp in cps {
+            if !stuck && !cp.is_wheel_a() {
+                let Some(imp) = p.apply_collision_alt(ctx, cp, other_is_static, &mut move_acc, &mut turn_acc) else {
+                    continue;
+                };
+                count += 1;
+                max_imp = max_imp.max(imp);
+                if p.has_e(ef::HAS_CONTACTED) {
+                    p.set_damaged_piece_record(imp, cp, 1.0);
+                    continue;
+                }
+                let mut adh = surfaces.adhesive_limit(cp) / n as f32;
+                if p.is_vehicle() {
+                    let class = p.vclass();
+                    if class == Some(VehicleClass::Boat) && cp.surface_b == 43 {
+                        adh = 0.0;
+                    } else {
+                        p.set_damaged_piece_record(imp, cp, 1.0);
+                    }
+                    let model = p.vehicle.map(|v| v.model).unwrap_or(0);
+                    if model == 441 {
+                        adh *= 0.2;
+                    } else if class == Some(VehicleClass::Boat) {
+                        adh = if cp.normal.z > 0.6 {
+                            let g = surfaces.adhesion_group(cp.surface_b);
+                            if g == 3 || g == 4 { adh * 3.0 } else { adh }
+                        } else {
+                            0.0
+                        };
+                    } else if class == Some(VehicleClass::Train) {
+                    } else if p.status == Status::Wrecked {
+                        adh *= 3.0;
+                    } else if p.matrix.up.z > 0.3
+                        && p.move_speed.length_squared() < 0.02
+                        && p.turn_speed.length_squared() < 0.01
+                    {
+                        // Upright, slow car: the wheels handle it.
+                        adh = 0.0;
+                    } else if p.status == Status::Abandoned || cp.normal.dot(p.matrix.up) < 0.707 {
+                        adh = 150.0 / p.mass * adh * imp;
+                    }
+                    if class == Some(VehicleClass::Train) {
+                        adh *= 2.0;
+                    }
+                } else {
+                    adh = 150.0 * adh * imp;
+                    p.set_damaged_piece_record(imp, cp, 1.0);
+                }
+                if p.apply_friction_static(ctx, adh, cp) {
+                    p.eflags |= ef::HAS_CONTACTED;
+                }
+            } else if p.apply_soft_collision_static(ctx, cp).is_some()
+                && !p.has_e(ef::HAS_CONTACTED)
+                && !(cp.surface_a == SURFACE_WHEELBASE && cp.surface_b == SURFACE_WHEELBASE)
+            {
+                let adh = surfaces.adhesive_limit(cp);
+                if p.apply_friction_static(ctx, adh, cp) {
+                    p.eflags |= ef::HAS_CONTACTED;
+                }
+            }
+        }
+        if count == 0 {
+            return Hit::None;
+        }
+        let inv = 1.0 / count as f32;
+        p.move_speed += move_acc * inv;
+        p.turn_speed += turn_acc * inv;
+        if !ctx.later_collision_pass
+            && p.status == Status::Player
+            && p.is_vehicle()
+            && p.move_speed.x.abs() < 0.2
+            && p.move_speed.y.abs() < 0.2
+            && !p.has(pf::IN_WATER)
+        {
+            let k = 0.3 / n as f32;
+            p.friction_move.x -= move_acc.x * k;
+            p.friction_move.y -= move_acc.y * k;
+            p.friction_turn += turn_acc * -0.3 * (1.0 / n as f32);
+        }
+        Hit::Hard
+    }
+
+    /// Physical path of ProcessCollisionSectorList (A and B both movable).
+    fn physical_response(&mut self, i: usize, j: usize, cps: &[ColPoint], stuck: bool, ctx: &Ctx) -> Hit {
+        let n = cps.len();
+        // Static prop that can be knocked loose (object.dat uproot limit).
+        if self.b(j).phys.is_static() {
+            let limit = self.b(j).logic.uproot_limit().unwrap_or(f32::MAX);
+            let a = &self.b(i).phys;
+            let mut impulse = 0f32;
+            for cp in cps {
+                let r = cp.point - a.matrix.pos;
+                let v = if a.has(pf::DISABLE_TURN_FORCE) { a.move_speed } else { a.get_speed(r) };
+                let vn = v.dot(cp.normal);
+                if vn < 0.0 {
+                    impulse = impulse.max(-vn * a.mass);
+                }
+            }
+            if impulse > limit {
+                let o = &mut self.bm(j).phys;
+                o.eflags &= !(ef::IS_STATIC | ef::STATIC_WAITING_FOR_COLLISION);
+            } else {
+                return self.static_response(i, EntityId::Body(j as u32), cps, stuck, ctx);
+            }
+        }
+        let surfaces = self.surfaces.clone();
+        let (a, b) = self.two(i, j);
+        let (pa, pb) = (&mut a.phys, &mut b.phys);
+        let a_contacted = pa.has_e(ef::HAS_CONTACTED);
+        let b_contacted = pb.has_e(ef::HAS_CONTACTED);
+        let mut num_soft = 0usize;
+        let info = PairInfo::default();
+        if a_contacted && b_contacted {
+            for cp in cps {
+                if !stuck && !cp.is_wheel_a() && !cp.is_wheel_b() {
+                    if let Some((ia, ib)) = pair::apply_collision(ctx, pa, pb, cp, info, false) {
+                        pa.set_damaged_piece_record(ia, cp, 1.0);
+                        pb.set_damaged_piece_record(ib, cp, -1.0);
+                    }
+                } else {
+                    num_soft += 1;
+                    let _ = pair::apply_collision(ctx, pa, pb, cp, info, true);
+                }
+            }
+        } else {
+            // Save and clear the friction of whichever side already had contact.
+            let save_a = (pa.friction_move, pa.friction_turn);
+            let save_b = (pb.friction_move, pb.friction_turn);
+            if a_contacted {
+                pa.eflags &= !ef::HAS_CONTACTED;
+                pa.friction_move = Vec3::ZERO;
+                pa.friction_turn = Vec3::ZERO;
+            }
+            if b_contacted {
+                pb.eflags &= !ef::HAS_CONTACTED;
+                pb.friction_move = Vec3::ZERO;
+                pb.friction_turn = Vec3::ZERO;
+            }
+            let neither = !a_contacted && !b_contacted;
+            for cp in cps {
+                // Quirk: with neither contacted, the wheel test checks piece A twice.
+                let wheel = if neither { cp.is_wheel_a() } else { cp.is_wheel_a() || cp.is_wheel_b() };
+                if !stuck && !wheel {
+                    if let Some((ia, ib)) = pair::apply_collision(ctx, pa, pb, cp, info, false) {
+                        pa.set_damaged_piece_record(ia, cp, 1.0);
+                        pb.set_damaged_piece_record(ib, cp, -1.0);
+                        let mut adh = surfaces.adhesive_limit(cp) / n as f32;
+                        if pa.is_vehicle()
+                            && pb.is_vehicle()
+                            && (pa.move_speed.length_squared() > 0.02 || pa.turn_speed.length_squared() > 0.01)
+                        {
+                            adh = adh * 1.0 * ia;
+                        }
+                        if pb.is_static() {
+                            if pa.apply_friction_static(ctx, adh, cp) {
+                                pa.eflags |= ef::HAS_CONTACTED;
+                            }
+                        } else if pair::apply_friction(ctx, pa, pb, adh, cp) {
+                            pa.eflags |= ef::HAS_CONTACTED;
+                            pb.eflags |= ef::HAS_CONTACTED;
+                        }
+                    }
+                } else {
+                    num_soft += 1;
+                    let _ = pair::apply_collision(ctx, pa, pb, cp, info, true);
+                }
+            }
+            if a_contacted && !pa.has_e(ef::HAS_CONTACTED) {
+                pa.eflags |= ef::HAS_CONTACTED;
+                (pa.friction_move, pa.friction_turn) = save_a;
+            }
+            if b_contacted && !pb.has_e(ef::HAS_CONTACTED) {
+                pb.eflags |= ef::HAS_CONTACTED;
+                (pb.friction_move, pb.friction_turn) = save_b;
+            }
+        }
+        if pb.status == Status::Simple {
+            pb.status = Status::Physics;
+        }
+        if n > num_soft { Hit::Hard } else { Hit::None }
+    }
+
+    // ------------------------------------------------------------ ProcessShift
+
+    /// 0x54DB10
+    fn process_shift(&mut self, i: usize, ctx: &Ctx) {
+        let (x0, x1, y0, y1) = self.sector_range(i);
+        let _ = (x0, x1, y0, y1);
+        let p = &mut self.bm(i).phys;
+        p.moving_speed = 0.0;
+        if p.status == Status::Simple || p.flags & (pf::DISABLE_MOVE_FORCE | pf::INFINITE_MASS | pf::DISABLE_Z) != 0 {
+            if p.flags & (pf::DISABLE_MOVE_FORCE | pf::INFINITE_MASS | pf::DISABLE_Z) != 0 {
+                p.turn_speed = Vec3::ZERO;
+            }
+            p.eflags = (p.eflags & !ef::IS_STUCK) | ef::IN_SAFE_POSITION;
+            return;
+        }
+        if p.has_e(ef::HAS_HIT_WALL) && (p.kind != EntityType::Ped || ctx.keep_going_after_hit) {
+            let k = 0.707f32.powf(ctx.ts);
+            p.move_speed *= k;
+            p.turn_speed *= k;
+        }
+        let saved = p.matrix;
+        p.apply_speed(ctx.ts);
+        p.matrix.reorthogonalise();
+        let is_vehicle = p.is_vehicle();
+        if is_vehicle {
+            p.flags |= pf::IN_SHIFT;
+        }
+        let shifted = self.process_shift_list(i, ctx);
+        self.bm(i).phys.flags &= !pf::IN_SHIFT;
+        if shifted || is_vehicle {
+            let mut hit = false;
+            for other in self.candidates(i, false) {
+                if self.collide(i, other, ctx) == Hit::Hard {
+                    if !ctx.keep_going_after_hit {
+                        self.bm(i).phys.matrix = saved;
+                        return;
+                    }
+                    hit = true;
+                }
+            }
+            if hit {
+                self.bm(i).phys.matrix = saved;
+                return;
+            }
+        }
+        let p = &mut self.bm(i).phys;
+        p.eflags = (p.eflags & !ef::IS_STUCK) | ef::IN_SAFE_POSITION;
+        p.moving_speed = (p.matrix.pos - saved.pos).length();
+    }
+
+    /// 0x546670 ProcessShiftSectorList (over all candidates).
+    fn process_shift_list(&mut self, i: usize, ctx: &Ctx) -> bool {
+        let mut shift = Vec3::ZERO;
+        let mut max_depth = 0f32;
+        let mut count = 0usize;
+        let hit_wall = self.b(i).phys.has_e(ef::HAS_HIT_WALL);
+        let self_kind = self.b(i).phys.kind;
+        for other in self.candidates(i, true) {
+            let (blocky, other_kind) = match other {
+                EntityId::Building(_) => (true, EntityType::Building),
+                EntityId::Body(j) => {
+                    let o = &self.b(j as usize).phys;
+                    let blocky = (o.kind == EntityType::Object && o.has(pf::DISABLE_COLLISION_FORCE))
+                        || (self_kind == EntityType::Ped && o.kind == EntityType::Object && o.is_static());
+                    (blocky, o.kind)
+                }
+            };
+            if hit_wall && !blocky {
+                continue;
+            }
+            let mut cps = [ColPoint::default(); MAX_COLPOINTS];
+            let n = self.process_entity_collision(i, other, &mut cps);
+            for cp in &cps[..n] {
+                if cp.depth <= 0.0 || cp.is_wheel_b() {
+                    continue;
+                }
+                count += 1;
+                let nrm = cp.normal;
+                if self_kind == EntityType::Vehicle && other_kind == EntityType::Ped && nrm.z < 0.0 {
+                    shift += Vec3::new(nrm.x, nrm.y, 0.0);
+                } else if self_kind == EntityType::Ped && other_kind == EntityType::Object && nrm.z.abs() > 0.1 {
+                    // counted, not added
+                } else {
+                    shift += nrm;
+                }
+                max_depth = max_depth.max(cp.depth);
+            }
+        }
+        if count == 0 {
+            return false;
+        }
+        let l = shift.length();
+        if l > 1.0 {
+            shift /= l;
+        }
+        let delta = if shift.z < -0.5 {
+            shift * max_depth * 0.75
+        } else if self_kind == EntityType::Ped {
+            shift * (1.5 * max_depth).clamp(0.005, 0.3)
+        } else {
+            shift * max_depth * 1.5
+        };
+        let p = &mut self.bm(i).phys;
+        p.matrix.pos += delta;
+        if self_kind == EntityType::Vehicle {
+            p.move_speed += Vec3::new(shift.x, shift.y, shift.z.max(0.0)) * 0.008 * ctx.ts;
+        }
+        true
+    }
+
+    // ------------------------------------------------------------ queries
+
+    /// Simplified `CWorld::ProcessLineOfSight` over buildings and bodies:
+    /// nearest hit along `start..end` as (entity, fraction, colpoint).
+    pub fn line_of_sight(
+        &mut self,
+        start: Vec3,
+        end: Vec3,
+        buildings_only: bool,
+        ignore: Option<EntityId>,
+    ) -> Option<(EntityId, f32, ColPoint)> {
+        use crate::collision::{ColLine, process_line_box, process_line_sphere, process_line_triangle};
+        let scan = self.next_scan();
+        let mut best: Option<(EntityId, f32, ColPoint)> = None;
+        let mut min_t = 1.0f32;
+        let mut test = |id: EntityId, mat: &Matrix, col: &ColModel, min_t: &mut f32| {
+            let inv = mat.inverse();
+            let l = ColLine { start: inv.transform(start), end: inv.transform(end) };
+            let mut cp = ColPoint::default();
+            let mut t = *min_t;
+            for s in &col.spheres {
+                process_line_sphere(&l, s, &mut cp, &mut t);
+            }
+            for b in &col.boxes {
+                process_line_box(&l, b, &mut cp, &mut t);
+            }
+            for k in 0..col.tris.len() {
+                process_line_triangle(&l, col, k, &mut cp, &mut t);
+            }
+            if t < *min_t {
+                *min_t = t;
+                cp.point = mat.transform(cp.point);
+                cp.normal = mat.rotate(cp.normal);
+                best = Some((id, t, cp));
+            }
+        };
+        let (lo, hi) = (start.min(end), start.max(end));
+        for y in sector_coord(lo.y)..=sector_coord(hi.y) {
+            for x in sector_coord(lo.x)..=sector_coord(hi.x) {
+                for &bi in &self.sectors[(y * SECTORS + x) as usize] {
+                    let b = self.buildings[bi as usize].as_mut().unwrap();
+                    if b.scan == scan || ignore == Some(EntityId::Building(bi)) {
+                        continue;
+                    }
+                    b.scan = scan;
+                    test(EntityId::Building(bi), &b.matrix, &b.col, &mut min_t);
+                }
+            }
+        }
+        if !buildings_only {
+            for (j, b) in self.bodies.iter().enumerate() {
+                let id = EntityId::Body(j as u32);
+                if let Some(b) = b.as_ref().filter(|_| ignore != Some(id)) {
+                    test(id, &b.phys.matrix, &b.col, &mut min_t);
+                }
+            }
+        }
+        best
+    }
+}
+
+fn touching(c1: Vec3, r1: f32, c2: Vec3, r2: f32) -> bool {
+    // CEntity::GetIsTouching (0x5344B0)
+    (c1 - c2).length_squared() < (r1 + r2) * (r1 + r2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collision::{ColSphere, ColTriangle, Surf, TrianglePlane};
+
+    fn ground() -> Arc<ColModel> {
+        let verts = vec![
+            Vec3::new(-50.0, -50.0, 0.0),
+            Vec3::new(50.0, -50.0, 0.0),
+            Vec3::new(50.0, 50.0, 0.0),
+            Vec3::new(-50.0, 50.0, 0.0),
+        ];
+        let tris = vec![
+            ColTriangle { v: [0, 2, 1], material: 1, light: 0 },
+            ColTriangle { v: [0, 3, 2], material: 1, light: 0 },
+        ];
+        let planes = tris
+            .iter()
+            .map(|t| TrianglePlane::new(verts[t.v[0] as usize], verts[t.v[1] as usize], verts[t.v[2] as usize]))
+            .collect();
+        Arc::new(ColModel {
+            bbox_min: Vec3::new(-50.0, -50.0, -0.1),
+            bbox_max: Vec3::new(50.0, 50.0, 0.1),
+            bound_center: Vec3::ZERO,
+            bound_radius: 71.0,
+            verts,
+            tris,
+            planes,
+            ..Default::default()
+        })
+    }
+
+    fn crate_box(z: f32) -> (Physical, ColModel) {
+        let mut p = Physical::new(EntityType::Object, Matrix { pos: Vec3::new(0.0, 0.0, z), ..Matrix::IDENTITY });
+        p.mass = 50.0;
+        p.turn_mass = 20.0;
+        p.air_resistance = 0.99;
+        p.elasticity = 0.1;
+        let col = ColModel {
+            bbox_min: Vec3::splat(-0.5),
+            bbox_max: Vec3::splat(0.5),
+            bound_radius: 0.5,
+            spheres: vec![ColSphere { center: Vec3::ZERO, radius: 0.5, surf: Surf::default() }],
+            ..Default::default()
+        };
+        (p, col)
+    }
+
+    #[test]
+    fn dropped_ball_comes_to_rest_on_ground() {
+        let mut w = World::default();
+        w.add_building(Matrix::IDENTITY, ground());
+        let (p, col) = crate_box(3.0);
+        let id = w.add_body(p, col, Box::new(PlainLogic));
+        for _ in 0..300 {
+            w.process(1.0);
+        }
+        let b = w.body(id).unwrap();
+        let z = b.phys.matrix.pos.z;
+        assert!(z > 0.3 && z < 0.6, "resting height {z}");
+        assert!(b.phys.move_speed.length() < 0.02, "speed {:?}", b.phys.move_speed);
+    }
+
+    #[test]
+    fn line_of_sight_hits_ground() {
+        let mut w = World::default();
+        w.add_building(Matrix::IDENTITY, ground());
+        let hit = w.line_of_sight(Vec3::new(1.0, 1.0, 10.0), Vec3::new(1.0, 1.0, -10.0), true, None).unwrap();
+        assert!((hit.1 - 0.5).abs() < 1e-4);
+        assert!(hit.2.point.z.abs() < 1e-4);
+    }
+}
