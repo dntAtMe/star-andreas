@@ -1,7 +1,7 @@
 //! IFP animation packages, San Andreas `ANP3` format.
 //!
-//! Rotations are stored conjugated (RW convention); they are returned here
-//! already conjugated back, so they compose like ordinary local rotations.
+//! Rotations are ordinary local bone rotations (unlike GTA III's ANPK, where
+//! they are stored conjugated); verified visually against ped.ifp.
 
 use anyhow::{Result, bail};
 
@@ -70,8 +70,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Animation>> {
                     time = r.f32()?;
                     pos = if has_pos { Some(r.vec3()?) } else { None };
                 }
-                let [x, y, z, w] = rot;
-                keys.push(Key { time, rot: [-x, -y, -z, w], pos });
+                keys.push(Key { time, rot, pos });
                 duration = duration.max(time);
             }
             tracks.push(Track { bone_name, bone_id, keys });

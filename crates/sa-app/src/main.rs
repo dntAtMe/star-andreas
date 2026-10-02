@@ -1,3 +1,4 @@
+mod player;
 mod stream;
 mod world;
 
@@ -10,6 +11,8 @@ use bevy::{
     render::view::screenshot::{Screenshot, save_to_disk},
     window::{CursorGrabMode, CursorOptions},
 };
+use bevy_rapier3d::prelude::*;
+use player::{GameRoot, Mode, OrbitCam, Ped, PlayerPlugin};
 use stream::{StreamCamera, StreamPlugin, Streamer};
 use world::{World as SaWorld, WorldRes, b2g, g2b};
 
@@ -39,18 +42,20 @@ fn main() -> anyhow::Result<()> {
         }))
         .insert_resource(WorldRes(Arc::new(world)))
         .insert_resource(ClearColor(SKY))
-        .add_plugins(StreamPlugin)
+        .insert_resource(GameRoot(root))
+        .insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness: 600.0, ..default() })
+        .add_plugins((RapierPhysicsPlugin::<NoUserData>::default(), StreamPlugin, PlayerPlugin))
         .add_systems(Startup, setup)
-        .add_systems(Update, (fly_camera, update_hud, auto_screenshot))
+        .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
         .run();
     Ok(())
 }
 
 #[derive(Component)]
-struct FlyCam {
-    yaw: f32,
-    pitch: f32,
-    speed: f32,
+pub struct FlyCam {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub speed: f32,
 }
 
 #[derive(Component)]
@@ -77,7 +82,14 @@ fn setup(
         Transform::from_translation(start).with_rotation(Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0)),
         DistanceFog { color: SKY, falloff: FogFalloff::Linear { start: 900.0, end: 3200.0 }, ..default() },
         FlyCam { yaw, pitch, speed: 60.0 },
+        OrbitCam { yaw: 0.0, pitch: -0.15, dist: 3.5 },
         StreamCamera,
+    ));
+
+    // Noon sun for dynamic (lit) objects like peds; the map itself is prelit.
+    commands.spawn((
+        DirectionalLight { illuminance: 9000.0, ..default() },
+        Transform::from_xyz(0.0, 0.0, 0.0).looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
     ));
 
     // Placeholder sea at z = 0 until water.dat is parsed.
@@ -145,16 +157,21 @@ fn fly_camera(
 fn update_hud(
     time: Res<Time>,
     st: Res<Streamer>,
+    mode: Res<Mode>,
     cam: Single<(&Transform, &FlyCam)>,
+    ped: Single<(&Transform, &Ped), Without<FlyCam>>,
     mut hud: Single<&mut Text, With<Hud>>,
 ) {
     let (tf, fc) = *cam;
-    let p = b2g(tf.translation);
+    let (ptf, ped) = *ped;
+    let p = b2g(if *mode == Mode::Walk { ptf.translation } else { tf.translation });
     let s = st.stats;
     hud.0 = format!(
         "pos {:.0} {:.0} {:.0}  speed {:.0}  fps {:.0}\n\
          instances {}  pending {}  models {} (+{} loading)  txds {}\n\
-         RMB look, WASD/QE move, Shift fast, wheel speed",
+         mode {:?}{}{}  (F toggles walk/fly)
+         walk: click to grab mouse, Esc release, WASD, Shift sprint, Alt walk, Space jump
+         fly: RMB look, WASD/QE move, Shift fast, wheel speed",
         p[0],
         p[1],
         p[2],
@@ -165,6 +182,9 @@ fn update_hud(
         s.models_ready,
         s.models_loading,
         s.txds,
+        *mode,
+        if ped.frozen { "  [waiting for collision]" } else { "" },
+        if ped.grounded { "  grounded" } else { "" },
     );
 }
 

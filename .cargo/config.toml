@@ -1,0 +1,3 @@
+# Faster dev iteration (see README "Build times").
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"

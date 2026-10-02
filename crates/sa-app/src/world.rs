@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use bevy::prelude::*;
-use sa_formats::{dat, ide, img::Img, ipl};
+use sa_formats::{col, dat, ide, img::Img, ipl};
 
 /// GTA is Z-up, Bevy is Y-up: (x, y, z) -> (x, z, -y). A proper rotation,
 /// so winding and handedness are preserved.
@@ -47,6 +47,8 @@ pub struct World {
     pub objects: HashMap<u32, ObjectInfo>,
     pub txd_parent: HashMap<String, String>,
     pub instances: Vec<Instance>,
+    /// Collision model name -> (img index, absolute offset, size).
+    pub cols: HashMap<String, (usize, usize, usize)>,
 }
 
 #[derive(Resource, Clone)]
@@ -56,6 +58,11 @@ impl World {
     /// Look up a file across all loaded IMG archives.
     pub fn file(&self, name: &str) -> Option<&[u8]> {
         self.imgs.iter().find_map(|img| img.get(name))
+    }
+
+    pub fn col(&self, model: &str) -> Option<&[u8]> {
+        let &(img, offset, size) = self.cols.get(model)?;
+        Some(self.imgs[img].slice(offset, size))
     }
 
     pub fn load(root: &Path) -> Result<Self> {
@@ -148,6 +155,15 @@ impl World {
             })
             .collect();
 
-        Ok(Self { imgs, objects, txd_parent, instances })
+        let mut cols = HashMap::new();
+        for (i, img) in imgs.iter().enumerate() {
+            for e in img.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".col")) {
+                for c in col::index(img.data(e)).with_context(|| e.name.clone())? {
+                    cols.insert(c.name.to_ascii_lowercase(), (i, e.offset + c.offset, c.size));
+                }
+            }
+        }
+
+        Ok(Self { imgs, objects, txd_parent, instances, cols })
     }
 }

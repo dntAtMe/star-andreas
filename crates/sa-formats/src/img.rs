@@ -66,6 +66,11 @@ impl Img {
         &self.map[e.offset..e.offset + e.size]
     }
 
+    /// Raw bytes at an absolute archive offset.
+    pub fn slice(&self, offset: usize, len: usize) -> &[u8] {
+        &self.map[offset..offset + len]
+    }
+
     pub fn get(&self, name: &str) -> Option<&[u8]> {
         self.entry(name).map(|e| self.data(e))
     }

@@ -25,7 +25,8 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     tasks::AsyncComputeTaskPool,
 };
-use sa_formats::{dff, txd};
+use bevy_rapier3d::prelude::{Collider, RigidBody};
+use sa_formats::{col, dff, txd};
 
 use crate::world::{WorldRes, g2b};
 
@@ -63,18 +64,18 @@ struct PartCpu {
     color: [u8; 4],
 }
 
-struct TexCpu {
-    name: String,
+pub struct TexCpu {
+    pub name: String,
     width: u32,
     height: u32,
     format: TextureFormat,
     mip_count: u32,
     data: Vec<u8>,
-    alpha: bool,
+    pub alpha: bool,
 }
 
 enum Loaded {
-    Model(u32, Result<Vec<PartCpu>>),
+    Model(u32, Result<(Vec<PartCpu>, Vec<Collider>)>),
     Txd(String, Result<Vec<TexCpu>>),
 }
 
@@ -92,11 +93,17 @@ struct Part {
     material: Handle<StandardMaterial>,
 }
 
+struct Model {
+    parts: Vec<Part>,
+    /// Primitive compound and/or triangle mesh (parry can't nest a trimesh in a compound).
+    colliders: Vec<Collider>,
+}
+
 enum ModelState {
     Loading,
     /// Parsed; waiting for its TXD chain before materials can be built.
-    Parsed(Vec<PartCpu>),
-    Ready(Arc<[Part]>),
+    Parsed(Vec<PartCpu>, Vec<Collider>),
+    Ready(Arc<Model>),
     Failed,
 }
 
@@ -148,7 +155,12 @@ fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
                 let data = world
                     .file(&format!("{}.dff", obj.model))
                     .ok_or_else(|| anyhow::anyhow!("{}.dff missing", obj.model))?;
-                build_parts(&dff::parse(data)?)
+                let parts = build_parts(&dff::parse(data)?)?;
+                let colliders = match world.col(&obj.model) {
+                    Some(c) => build_colliders(&col::parse_model(c)?),
+                    None => Vec::new(),
+                };
+                Ok((parts, colliders))
             })();
             let _ = tx.send(Loaded::Model(id, res));
         })
@@ -234,6 +246,36 @@ fn build_parts(clump: &dff::Clump) -> Result<Vec<PartCpu>> {
     Ok(parts)
 }
 
+/// Collision shapes in Bevy space: spheres, boxes and the triangle mesh.
+fn build_colliders(m: &col::ColModel) -> Vec<Collider> {
+    let mut out = Vec::new();
+    let mut shapes: Vec<(Vec3, Quat, Collider)> = Vec::new();
+    for s in &m.spheres {
+        shapes.push((g2b(s.center), Quat::IDENTITY, Collider::ball(s.radius)));
+    }
+    for b in &m.boxes {
+        let (lo, hi) = (g2b(b.min), g2b(b.max));
+        let half = ((hi - lo).abs() * 0.5).max(Vec3::splat(0.01));
+        shapes.push(((lo + hi) * 0.5, Quat::IDENTITY, Collider::cuboid(half.x, half.y, half.z)));
+    }
+    if !m.faces.is_empty() {
+        let verts: Vec<Vec3> = m.vertices.iter().map(|&v| g2b(v)).collect();
+        let tris: Vec<[u32; 3]> = m
+            .faces
+            .iter()
+            .map(|f| f.v)
+            .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+            .collect();
+        if let Ok(c) = Collider::trimesh(verts, tris) {
+            out.push(c);
+        }
+    }
+    if !shapes.is_empty() {
+        out.push(Collider::compound(shapes));
+    }
+    out
+}
+
 /// Noon ambient added to lit geometry (stand-in for timecyc `AmbientObj`).
 const NOON_AMBIENT: f32 = 0.3;
 
@@ -243,7 +285,7 @@ fn prelit_to_linear(c: [u8; 4], lit: bool) -> [f32; 4] {
     [f(c[0]), f(c[1]), f(c[2]), c[3] as f32 / 255.0]
 }
 
-fn convert_texture(t: txd::Texture, bc_supported: bool) -> Option<TexCpu> {
+pub fn convert_texture(t: txd::Texture, bc_supported: bool) -> Option<TexCpu> {
     use txd::Format;
     if t.mips.is_empty() || t.width == 0 || t.height == 0 {
         return None;
@@ -310,6 +352,27 @@ fn convert_texture(t: txd::Texture, bc_supported: bool) -> Option<TexCpu> {
 
 // ---------------------------------------------------------------- systems
 
+pub fn make_image(t: TexCpu) -> Image {
+    let mut img = Image::new_uninit(
+        Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        t.format,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.data = Some(t.data);
+    img.texture_descriptor.mip_level_count = t.mip_count;
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 8,
+        ..default()
+    });
+    img
+}
+
 fn receive_loaded(
     loader: Res<Loader>,
     mut cache: ResMut<Cache>,
@@ -318,8 +381,8 @@ fn receive_loaded(
     let rx = loader.rx.lock().unwrap();
     for msg in rx.try_iter().take(MAX_RESULTS_PER_FRAME) {
         match msg {
-            Loaded::Model(id, Ok(parts)) => {
-                cache.models.insert(id, ModelState::Parsed(parts));
+            Loaded::Model(id, Ok((parts, colliders))) => {
+                cache.models.insert(id, ModelState::Parsed(parts, colliders));
             }
             Loaded::Model(id, Err(e)) => {
                 warn!("model {id}: {e:#}");
@@ -329,24 +392,8 @@ fn receive_loaded(
                 let map = texs
                     .into_iter()
                     .map(|t| {
-                        let mut img = Image::new_uninit(
-                            Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
-                            TextureDimension::D2,
-                            t.format,
-                            RenderAssetUsages::RENDER_WORLD,
-                        );
-                        img.data = Some(t.data);
-                        img.texture_descriptor.mip_level_count = t.mip_count;
-                        img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                            address_mode_u: ImageAddressMode::Repeat,
-                            address_mode_v: ImageAddressMode::Repeat,
-                            mag_filter: ImageFilterMode::Linear,
-                            min_filter: ImageFilterMode::Linear,
-                            mipmap_filter: ImageFilterMode::Linear,
-                            anisotropy_clamp: 8,
-                            ..default()
-                        });
-                        (t.name, TexEntry { image: images.add(img), alpha: t.alpha })
+                        let (name, alpha, img) = (t.name.clone(), t.alpha, make_image(t));
+                        (name, TexEntry { image: images.add(img), alpha })
                     })
                     .collect();
                 cache.txds.insert(name, TxdState::Ready(map));
@@ -372,7 +419,7 @@ fn finalize_models(
     let parsed: Vec<u32> = cache
         .models
         .iter()
-        .filter(|(_, s)| matches!(s, ModelState::Parsed(_)))
+        .filter(|(_, s)| matches!(s, ModelState::Parsed(..)))
         .map(|(&id, _)| id)
         .collect();
 
@@ -402,7 +449,7 @@ fn finalize_models(
             continue;
         }
 
-        let Some(ModelState::Parsed(cpu)) = cache.models.remove(&id) else { continue };
+        let Some(ModelState::Parsed(cpu, colliders)) = cache.models.remove(&id) else { continue };
         let mut parts = Vec::with_capacity(cpu.len());
         for p in cpu {
             let tex = p.texture.as_ref().and_then(|name| {
@@ -451,7 +498,7 @@ fn finalize_models(
             }
             parts.push(Part { mesh: meshes.add(mesh), material });
         }
-        cache.models.insert(id, ModelState::Ready(parts.into()));
+        cache.models.insert(id, ModelState::Ready(Arc::new(Model { parts, colliders })));
     }
 }
 
@@ -498,17 +545,28 @@ fn stream_instances(
         }
         let inst = &world.0.instances[i];
         match cache.models.get(&inst.id) {
-            Some(ModelState::Ready(parts)) => {
+            Some(ModelState::Ready(model)) => {
                 let range = VisibilityRange {
                     start_margin: inst.near..inst.near,
                     end_margin: inst.far..inst.far,
                     use_aabb: false,
                 };
-                let parts = parts.clone();
-                let e = commands
-                    .spawn((Transform::from_translation(inst.pos).with_rotation(inst.rot), Visibility::default()))
+                let model = model.clone();
+                let mut ec = commands
+                    .spawn((Transform::from_translation(inst.pos).with_rotation(inst.rot), Visibility::default()));
+                // Only full-detail instances collide; LODs are visual only.
+                let collide = inst.near == 0.0 && !model.colliders.is_empty();
+                if collide {
+                    ec.insert(RigidBody::Fixed);
+                }
+                let e = ec
                     .with_children(|c| {
-                        for p in parts.iter() {
+                        if collide {
+                            for col in &model.colliders {
+                                c.spawn((Transform::default(), col.clone()));
+                            }
+                        }
+                        for p in model.parts.iter() {
                             c.spawn((Mesh3d(p.mesh.clone()), MeshMaterial3d(p.material.clone()), range.clone()));
                         }
                     })
@@ -528,7 +586,7 @@ fn stream_instances(
     for s in cache.models.values() {
         match s {
             ModelState::Ready(_) => ready += 1,
-            ModelState::Loading | ModelState::Parsed(_) => loading += 1,
+            ModelState::Loading | ModelState::Parsed(..) => loading += 1,
             ModelState::Failed => {}
         }
     }
