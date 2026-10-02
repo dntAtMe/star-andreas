@@ -24,7 +24,7 @@ pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, smash_props.before(drive_vehicles));
+        app.add_systems(FixedUpdate, smash_props.before(drive_vehicles).before(PhysicsSet::SyncBackend));
     }
 }
 

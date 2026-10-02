@@ -19,6 +19,7 @@ use sa_formats::{
 };
 
 use crate::{
+    interp::Interp,
     player::{CamFollow, GameRoot, Mode, Ped, frame_transform},
     stream::{convert_texture, make_image},
     world::{WorldRes, g2b},
@@ -34,7 +35,9 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Driving>()
             .add_systems(Startup, load_vehicle_db)
-            .add_systems(Update, (spawn_key, auto_drive, enter_exit, drive_vehicles, update_wheels).chain());
+            .add_systems(Update, (spawn_key, auto_drive, enter_exit, update_wheels).chain())
+            // Forces are computed per physics step, so handling doesn't depend on frame rate.
+            .add_systems(FixedUpdate, drive_vehicles.before(PhysicsSet::SyncBackend));
     }
 }
 
@@ -84,6 +87,8 @@ pub struct Vehicle {
     handbrake: bool,
     /// Seat offset (Bevy local space) for placing the hidden driver.
     seat: Vec3,
+    /// Simulated seconds under driver control (debug probe).
+    driven_time: f32,
 }
 
 impl Vehicle {
@@ -225,7 +230,8 @@ fn spawn_vehicle(
     };
 
     // Frame hierarchy in GTA space.
-    let model_root = commands.spawn((Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2)), Visibility::default())).id();
+    let model_base = Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2));
+    let model_root = commands.spawn((model_base, Visibility::default())).id();
     let frames: Vec<Entity> = clump
         .frames
         .iter()
@@ -381,8 +387,10 @@ fn spawn_vehicle(
                 brake: 0.0,
                 handbrake: false,
                 seat,
+                driven_time: 0.0,
             },
         ))
+        .insert(Interp::new(model_root, model_base, Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw))))
         .add_child(model_root)
         .id();
     Ok(car)
@@ -528,6 +536,14 @@ pub fn drive_vehicles(
         let up = tf.rotation * Vec3::Y;
         let speed = vel.linear.dot(fwd);
         v.speed = speed;
+        if controlled {
+            let before = v.driven_time;
+            v.driven_time += dt;
+            // Debug probe for frame-rate independence: state after 5 simulated seconds.
+            if before < 5.0 && v.driven_time >= 5.0 {
+                info!("probe: 5.0s driven, pos {:.2?}, {:.1} km/h", tf.translation, speed * 3.6);
+            }
+        }
 
         // Driver input.
         let accel_in = key(KeyCode::KeyW) || (controlled && auto);

@@ -23,6 +23,7 @@ use bevy_rapier3d::prelude::*;
 use sa_formats::{dff, ifp, txd};
 
 use crate::{
+    interp::Interp,
     stream::{Streamer, convert_texture, make_image},
     world::{WorldRes, g2b},
 };
@@ -51,13 +52,12 @@ impl Plugin for PlayerPlugin {
         app.insert_resource(if fly { Mode::Fly } else { Mode::Walk })
             .insert_resource(MouseLock(!fly))
             .add_systems(Startup, spawn_player)
-            .add_systems(Update, (toggle_mode, cursor_lock, player_control, animate_ped).chain())
+            .add_systems(Update, (toggle_mode, cursor_lock, animate_ped).chain())
+            // Movement feeds the kinematic controller, so it runs in the fixed physics step.
+            .add_systems(FixedUpdate, player_control.before(PhysicsSet::SyncBackend))
             .add_systems(
                 PostUpdate,
-                orbit_camera
-                    .run_if(resource_equals(Mode::Walk))
-                    .after(PhysicsSet::Writeback)
-                    .before(TransformSystems::Propagate),
+                orbit_camera.run_if(resource_equals(Mode::Walk)).before(TransformSystems::Propagate),
             );
     }
 }
@@ -175,12 +175,8 @@ fn spawn_player(
     // Skeleton.
     let min_z = geo.positions.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
     let feet = -(CAPSULE_HALF + CAPSULE_RADIUS) - min_z;
-    let model_root = commands
-        .spawn((
-            Transform::from_xyz(0.0, feet, 0.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-            Visibility::default(),
-        ))
-        .id();
+    let model_base = Transform::from_xyz(0.0, feet, 0.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2));
+    let model_root = commands.spawn((model_base, Visibility::default())).id();
     let bind: Vec<Transform> = clump.frames.iter().map(frame_transform).collect();
     let bones: Vec<Entity> = clump
         .frames
@@ -316,6 +312,7 @@ fn spawn_player(
                 anim: AnimPlayer { cur: ANIM_IDLE, time: 0.0, prev: None, blend: 1.0 },
             },
             CamFollow { height: 0.6, dist: 3.5 },
+            Interp::new(model_root, model_base, Transform::from_translation(spawn)),
         ))
         .add_child(model_root);
     Ok(())
@@ -535,16 +532,19 @@ fn animate_ped(
 
 fn orbit_camera(
     time: Res<Time>,
+    fixed: Res<Time<Fixed>>,
     lock: Res<MouseLock>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     rapier: ReadRapierContext,
     mut zoom: Local<Option<f32>>,
     mut idle: Local<f32>,
-    target: Single<(Entity, &Transform, &CamFollow, Option<&crate::vehicle::Vehicle>)>,
+    target: Single<(Entity, &Transform, &CamFollow, Option<&crate::vehicle::Vehicle>, Option<&Interp>)>,
     cam: Single<(&mut Transform, &mut OrbitCam), Without<CamFollow>>,
 ) {
-    let (target_e, target_tf, follow, car) = *target;
+    let (target_e, body_tf, follow, car, interp) = *target;
+    // Follow the rendered (interpolated) pose, not the raw physics step.
+    let target_tf = &interp.map(|i| i.pose(fixed.overstep_fraction())).unwrap_or(*body_tf);
     let (mut tf, mut oc) = cam.into_inner();
     let dt = time.delta_secs();
     let moved = lock.0 && motion.delta != Vec2::ZERO;

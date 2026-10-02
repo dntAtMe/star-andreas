@@ -31,7 +31,11 @@ player spawn (optional 4th value: heading in degrees, 90 = west), `SA_FLY=1` sta
 fly mode, `SA_AUTOWALK=1` hold forward / full throttle, `SA_DRIVE=infernus` spawn that car
 and get in once the player can move, `SA_SHOT=out.png` save a screenshot once streaming
 settles (or at `SA_SHOT_AFTER=<secs>`), then exit. `SA_LISTPROPS=x,y,radius` prints
-knockable props near a position.
+knockable props near a position. `SA_FPS_CAP=<fps>` caps the frame rate.
+
+Physics (Rapier, car forces, ped controller, prop impacts) runs in `FixedUpdate` at
+120 Hz, so handling is identical at any frame rate; cars and the ped render at a pose
+interpolated between physics steps.
 
 ## Build times
 

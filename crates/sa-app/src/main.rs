@@ -1,3 +1,4 @@
+mod interp;
 mod player;
 mod props;
 mod stream;
@@ -21,6 +22,8 @@ use world::{World as SaWorld, WorldRes, b2g, g2b};
 
 const DEFAULT_GAME_DIR: &str = r"G:\Programy\Steam\steamapps\common\Grand Theft Auto San Andreas";
 const SKY: Color = Color::srgb(0.62, 0.72, 0.85);
+/// Fixed physics rate: simulation (cars, ped, props) is independent of frame rate.
+const PHYSICS_HZ: f64 = 120.0;
 
 fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(
@@ -61,9 +64,19 @@ fn main() -> anyhow::Result<()> {
     .insert_resource(ClearColor(SKY))
     .insert_resource(GameRoot(root))
     .insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness: 600.0, ..default() })
-    .add_plugins((RapierPhysicsPlugin::<NoUserData>::default(), StreamPlugin, PlayerPlugin, VehiclePlugin, props::PropsPlugin))
+    .insert_resource(Time::<Fixed>::from_hz(PHYSICS_HZ))
+    .insert_resource(TimestepMode::Fixed { dt: 1.0 / PHYSICS_HZ as f32, substeps: 1 })
+    .add_plugins((
+        RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule(),
+        interp::InterpPlugin,
+        StreamPlugin,
+        PlayerPlugin,
+        VehiclePlugin,
+        props::PropsPlugin,
+    ))
     .add_systems(Startup, setup)
-    .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot));
+    .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
+    .add_systems(Last, fps_cap);
     #[cfg(feature = "sc2")]
     app.add_plugins(sc2_bevy::Sc2Plugin::default());
     app.run();
@@ -213,6 +226,18 @@ fn update_hud(
             .map(|v| format!("  driving {} {:.0} km/h", v.name, v.speed.abs() * 3.6))
             .unwrap_or_default(),
     );
+}
+
+/// `SA_FPS_CAP=<fps>`: sleep to cap the frame rate (debug: check frame-rate independence).
+fn fps_cap(mut last: Local<Option<std::time::Instant>>) {
+    let Some(cap) = std::env::var("SA_FPS_CAP").ok().and_then(|v| v.parse::<f64>().ok()) else { return };
+    let frame = std::time::Duration::from_secs_f64(1.0 / cap);
+    if let Some(t) = *last {
+        if let Some(left) = frame.checked_sub(t.elapsed()) {
+            std::thread::sleep(left);
+        }
+    }
+    *last = Some(std::time::Instant::now());
 }
 
 /// `SA_SHOT=<png>`: once streaming has settled, save a screenshot and exit.
