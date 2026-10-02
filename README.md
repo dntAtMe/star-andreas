@@ -9,7 +9,9 @@ PC 1.0 install (nothing is modified or redistributed).
 - `crates/sa-app` — Bevy viewer: distance streaming, HD/LOD via `VisibilityRange`,
   BC textures uploaded as-is, Rapier collision from COL, skinned ped with IFP
   animation blending, kinematic character controller, orbit camera, drivable cars
-  (raycast suspension + tire model from handling.cfg, carcols paint)
+  (raycast suspension + tire model from handling.cfg, carcols paint), knockable props
+  from object.dat (lamp posts, hydrants, signs, bins... fly off above their uproot
+  impulse while the car ploughs on)
 
 ```
 cargo run -p sa-app -- "<game dir>"        # or SA_DIR env var
@@ -28,7 +30,8 @@ Debug env vars: `SA_POS=x,y,z,yaw,pitch` (GTA coords) start camera, `SA_PLAYER=x
 player spawn (optional 4th value: heading in degrees, 90 = west), `SA_FLY=1` start in
 fly mode, `SA_AUTOWALK=1` hold forward / full throttle, `SA_DRIVE=infernus` spawn that car
 and get in once the player can move, `SA_SHOT=out.png` save a screenshot once streaming
-settles (or at `SA_SHOT_AFTER=<secs>`), then exit.
+settles (or at `SA_SHOT_AFTER=<secs>`), then exit. `SA_LISTPROPS=x,y,radius` prints
+knockable props near a position.
 
 ## Build times
 

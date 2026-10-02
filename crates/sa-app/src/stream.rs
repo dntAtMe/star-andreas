@@ -25,10 +25,13 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     tasks::AsyncComputeTaskPool,
 };
-use bevy_rapier3d::prelude::{Collider, RigidBody};
-use sa_formats::{col, dff, txd};
+use bevy_rapier3d::prelude::{ActiveEvents, Collider, ContactForceEventThreshold, RigidBody};
+use sa_formats::{col, dff, objdat::ObjectPhysics, txd};
 
-use crate::world::{WorldRes, g2b};
+use crate::{
+    props::{PROP_EVENT_FORCE, Prop, PropPart},
+    world::{WorldRes, g2b},
+};
 
 /// Extra distance beyond visibility at which instances are loaded / kept.
 const LOAD_MARGIN: f32 = 60.0;
@@ -75,7 +78,7 @@ pub struct TexCpu {
 }
 
 enum Loaded {
-    Model(u32, Result<(Vec<PartCpu>, Vec<Collider>)>),
+    Model(u32, Result<(Vec<PartCpu>, ColSet)>),
     Txd(String, Result<Vec<TexCpu>>),
 }
 
@@ -95,14 +98,22 @@ struct Part {
 
 struct Model {
     parts: Vec<Part>,
+    cols: ColSet,
+}
+
+/// Collision for one model.
+#[derive(Default)]
+struct ColSet {
     /// Primitive compound and/or triangle mesh (parry can't nest a trimesh in a compound).
-    colliders: Vec<Collider>,
+    fixed: Vec<Collider>,
+    /// object.dat props: physics plus a convex hull used once knocked loose.
+    prop: Option<(ObjectPhysics, Collider)>,
 }
 
 enum ModelState {
     Loading,
     /// Parsed; waiting for its TXD chain before materials can be built.
-    Parsed(Vec<PartCpu>, Vec<Collider>),
+    Parsed(Vec<PartCpu>, ColSet),
     Ready(Arc<Model>),
     Failed,
 }
@@ -156,11 +167,16 @@ fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
                     .file(&format!("{}.dff", obj.model))
                     .ok_or_else(|| anyhow::anyhow!("{}.dff missing", obj.model))?;
                 let parts = build_parts(&dff::parse(data)?)?;
-                let colliders = match world.col(&obj.model) {
-                    Some(c) => build_colliders(&col::parse_model(c)?),
-                    None => Vec::new(),
-                };
-                Ok((parts, colliders))
+                let mut cols = ColSet::default();
+                if let Some(c) = world.col(&obj.model) {
+                    let m = col::parse_model(c)?;
+                    cols.fixed = build_colliders(&m);
+                    let phys = world.physics.get(&obj.model).filter(|p| !p.is_static());
+                    if let (Some(p), Some(hull)) = (phys, build_hull(&m)) {
+                        cols.prop = Some((*p, hull));
+                    }
+                }
+                Ok((parts, cols))
             })();
             let _ = tx.send(Loaded::Model(id, res));
         })
@@ -276,6 +292,31 @@ fn build_colliders(m: &col::ColModel) -> Vec<Collider> {
     out
 }
 
+/// Convex hull of everything in a COL model (for props that become dynamic).
+fn build_hull(m: &col::ColModel) -> Option<Collider> {
+    let mut pts: Vec<Vec3> = m.vertices.iter().map(|&v| g2b(v)).collect();
+    for b in &m.boxes {
+        for i in 0..8 {
+            let c = [
+                if i & 1 == 0 { b.min[0] } else { b.max[0] },
+                if i & 2 == 0 { b.min[1] } else { b.max[1] },
+                if i & 4 == 0 { b.min[2] } else { b.max[2] },
+            ];
+            pts.push(g2b(c));
+        }
+    }
+    for s in &m.spheres {
+        let c = g2b(s.center);
+        for d in [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
+            pts.push(c + d * s.radius);
+        }
+    }
+    if pts.len() < 4 {
+        return None;
+    }
+    Collider::convex_hull(&pts)
+}
+
 /// Noon ambient added to lit geometry (stand-in for timecyc `AmbientObj`).
 const NOON_AMBIENT: f32 = 0.3;
 
@@ -381,8 +422,8 @@ fn receive_loaded(
     let rx = loader.rx.lock().unwrap();
     for msg in rx.try_iter().take(MAX_RESULTS_PER_FRAME) {
         match msg {
-            Loaded::Model(id, Ok((parts, colliders))) => {
-                cache.models.insert(id, ModelState::Parsed(parts, colliders));
+            Loaded::Model(id, Ok((parts, cols))) => {
+                cache.models.insert(id, ModelState::Parsed(parts, cols));
             }
             Loaded::Model(id, Err(e)) => {
                 warn!("model {id}: {e:#}");
@@ -449,7 +490,7 @@ fn finalize_models(
             continue;
         }
 
-        let Some(ModelState::Parsed(cpu, colliders)) = cache.models.remove(&id) else { continue };
+        let Some(ModelState::Parsed(cpu, cols)) = cache.models.remove(&id) else { continue };
         let mut parts = Vec::with_capacity(cpu.len());
         for p in cpu {
             let tex = p.texture.as_ref().and_then(|name| {
@@ -498,7 +539,7 @@ fn finalize_models(
             }
             parts.push(Part { mesh: meshes.add(mesh), material });
         }
-        cache.models.insert(id, ModelState::Ready(Arc::new(Model { parts, colliders })));
+        cache.models.insert(id, ModelState::Ready(Arc::new(Model { parts, cols })));
     }
 }
 
@@ -555,15 +596,24 @@ fn stream_instances(
                 let mut ec = commands
                     .spawn((Transform::from_translation(inst.pos).with_rotation(inst.rot), Visibility::default()));
                 // Only full-detail instances collide; LODs are visual only.
-                let collide = inst.near == 0.0 && !model.colliders.is_empty();
+                let collide = inst.near == 0.0 && !model.cols.fixed.is_empty();
                 if collide {
                     ec.insert(RigidBody::Fixed);
+                }
+                let prop = model.cols.prop.as_ref().filter(|_| collide);
+                if let Some((physics, hull)) = prop {
+                    ec.insert(Prop { physics: *physics, hull: hull.clone(), loose: false });
                 }
                 let e = ec
                     .with_children(|c| {
                         if collide {
-                            for col in &model.colliders {
-                                c.spawn((Transform::default(), col.clone()));
+                            for col in &model.cols.fixed {
+                                let mut cc = c.spawn((Transform::default(), col.clone(), PropPart));
+                                if prop.is_some() {
+                                    cc.insert((ActiveEvents::CONTACT_FORCE_EVENTS, ContactForceEventThreshold(PROP_EVENT_FORCE)));
+                                } else {
+                                    cc.remove::<PropPart>();
+                                }
                             }
                         }
                         for p in model.parts.iter() {

@@ -12,6 +12,7 @@ pub mod ide;
 pub mod ifp;
 pub mod img;
 pub mod ipl;
+pub mod objdat;
 pub mod rw;
 pub mod txd;
 pub mod vehicle;

@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use bevy::prelude::*;
-use sa_formats::{col, dat, ide, img::Img, ipl};
+use sa_formats::{col, dat, ide, img::Img, ipl, objdat};
 
 /// GTA is Z-up, Bevy is Y-up: (x, y, z) -> (x, z, -y). A proper rotation,
 /// so winding and handedness are preserved.
@@ -49,6 +49,8 @@ pub struct World {
     pub instances: Vec<Instance>,
     /// Collision model name -> (img index, absolute offset, size).
     pub cols: HashMap<String, (usize, usize, usize)>,
+    /// object.dat physics for movable / breakable props, by model name.
+    pub physics: HashMap<String, objdat::ObjectPhysics>,
 }
 
 #[derive(Resource, Clone)]
@@ -164,6 +166,8 @@ impl World {
             }
         }
 
-        Ok(Self { imgs, objects, txd_parent, instances, cols })
+        let physics = objdat::parse(&String::from_utf8_lossy(&std::fs::read(root.join("data/object.dat")).context("object.dat")?));
+
+        Ok(Self { imgs, objects, txd_parent, instances, cols, physics })
     }
 }

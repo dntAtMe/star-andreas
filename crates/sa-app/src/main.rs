@@ -1,4 +1,5 @@
 mod player;
+mod props;
 mod stream;
 mod vehicle;
 mod world;
@@ -30,6 +31,20 @@ fn main() -> anyhow::Result<()> {
     );
     let t = std::time::Instant::now();
     let world = SaWorld::load(&root)?;
+    // SA_LISTPROPS=x,y,radius: print knockable props near a GTA position (debug).
+    if let Ok(q) = std::env::var("SA_LISTPROPS") {
+        let v: Vec<f32> = q.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        if let [x, y, r] = v[..] {
+            for inst in &world.instances {
+                let g = b2g(inst.pos);
+                let d = ((g[0] - x).powi(2) + (g[1] - y).powi(2)).sqrt();
+                let model = &world.objects[&inst.id].model;
+                if let Some(p) = world.physics.get(model).filter(|p| !p.is_static() && d < r) {
+                    println!("prop {model} at {:.1},{:.1},{:.1} d={d:.0} mass {} uproot {}", g[0], g[1], g[2], p.mass, p.uproot);
+                }
+            }
+        }
+    }
     println!(
         "world: {} objects, {} instances, loaded in {:.2?}",
         world.objects.len(),
@@ -37,19 +52,21 @@ fn main() -> anyhow::Result<()> {
         t.elapsed()
     );
 
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window { title: "sa-rs".into(), ..default() }),
-            ..default()
-        }))
-        .insert_resource(WorldRes(Arc::new(world)))
-        .insert_resource(ClearColor(SKY))
-        .insert_resource(GameRoot(root))
-        .insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness: 600.0, ..default() })
-        .add_plugins((RapierPhysicsPlugin::<NoUserData>::default(), StreamPlugin, PlayerPlugin, VehiclePlugin))
-        .add_systems(Startup, setup)
-        .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
-        .run();
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window { title: "sa-rs".into(), ..default() }),
+        ..default()
+    }))
+    .insert_resource(WorldRes(Arc::new(world)))
+    .insert_resource(ClearColor(SKY))
+    .insert_resource(GameRoot(root))
+    .insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness: 600.0, ..default() })
+    .add_plugins((RapierPhysicsPlugin::<NoUserData>::default(), StreamPlugin, PlayerPlugin, VehiclePlugin, props::PropsPlugin))
+    .add_systems(Startup, setup)
+    .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot));
+    #[cfg(feature = "sc2")]
+    app.add_plugins(sc2_bevy::Sc2Plugin::default());
+    app.run();
     Ok(())
 }
 

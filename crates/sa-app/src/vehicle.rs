@@ -65,6 +65,13 @@ struct Wheel {
     grounded: bool,
 }
 
+/// Velocity at the start of the frame, i.e. before this frame's physics step.
+#[derive(Component, Default, Clone, Copy)]
+pub struct PrevVelocity {
+    pub linear: Vec3,
+    pub angular: Vec3,
+}
+
 #[derive(Component)]
 pub struct Vehicle {
     pub name: String,
@@ -77,6 +84,12 @@ pub struct Vehicle {
     handbrake: bool,
     /// Seat offset (Bevy local space) for placing the hidden driver.
     seat: Vec3,
+}
+
+impl Vehicle {
+    pub fn mass(&self) -> f32 {
+        self.h.mass
+    }
 }
 
 // ---------------------------------------------------------------- loading
@@ -282,14 +295,20 @@ fn spawn_vehicle(
         });
     }
 
-    // Collider: COL spheres + convex hull of the COL mesh, in Bevy space.
+    // Collider: the COL spheres, lifted so the body clears the wheels. Rounded
+    // contacts let the suspension ride over curbs instead of the flat-bottomed
+    // COL mesh hitting them like a wall. The mesh hull is only a fallback.
+    let lowest_wheel = wheels.iter().map(|w| w.dummy.z).fold(0.0f32, f32::min);
+    let min_bottom = lowest_wheel - 0.1;
     let mut shapes: Vec<(Vec3, Quat, Collider)> = Vec::new();
     let mut lo = Vec3::splat(f32::MAX);
     let mut hi = Vec3::splat(f32::MIN);
     if let Some(raw) = &clump.collision {
         if let Ok(cm) = col::parse_model(raw) {
             for s in &cm.spheres {
-                shapes.push((g2b(s.center), Quat::IDENTITY, Collider::ball(s.radius)));
+                let mut c = s.center;
+                c[2] = c[2].max(min_bottom + s.radius);
+                shapes.push((g2b(c), Quat::IDENTITY, Collider::ball(s.radius)));
             }
             for b in &cm.boxes {
                 let (a, c) = (g2b(b.min), g2b(b.max));
@@ -297,8 +316,10 @@ fn spawn_vehicle(
                 shapes.push(((a + c) * 0.5, Quat::IDENTITY, Collider::cuboid(half.x, half.y, half.z)));
             }
             let pts: Vec<Vec3> = cm.vertices.iter().map(|&v| g2b(v)).collect();
-            if let Some(hull) = (pts.len() >= 4).then(|| Collider::convex_hull(&pts)).flatten() {
-                shapes.push((Vec3::ZERO, Quat::IDENTITY, hull));
+            if shapes.is_empty() {
+                if let Some(hull) = (pts.len() >= 4).then(|| Collider::convex_hull(&pts)).flatten() {
+                    shapes.push((Vec3::ZERO, Quat::IDENTITY, hull));
+                }
             }
             let (a, c) = (g2b(cm.min), g2b(cm.max));
             lo = a.min(c);
@@ -341,6 +362,10 @@ fn spawn_vehicle(
                 principal_inertia: inertia,
             }),
             Velocity::default(),
+            PrevVelocity::default(),
+            // Slide along walls and bounce a little, instead of sticking to them.
+            Friction { coefficient: 0.3, combine_rule: CoefficientCombineRule::Min },
+            Restitution { coefficient: 0.2, combine_rule: CoefficientCombineRule::Max },
             ExternalForce::default(),
             ReadMassProperties::default(),
             Damping { linear_damping: 0.02, angular_damping: 0.3 },
@@ -473,18 +498,27 @@ fn enter_exit(
 
 // ---------------------------------------------------------------- physics
 
-fn drive_vehicles(
+pub fn drive_vehicles(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     driving: Res<Driving>,
     rapier: ReadRapierContext,
-    mut cars: Query<(Entity, &Transform, &Velocity, &ReadMassProperties, &mut ExternalForce, &mut Vehicle)>,
+    mut cars: Query<(
+        Entity,
+        &Transform,
+        &Velocity,
+        &mut PrevVelocity,
+        &ReadMassProperties,
+        &mut ExternalForce,
+        &mut Vehicle,
+    )>,
 ) {
     let dt = time.delta_secs().max(1e-4);
     let Ok(ctx) = rapier.single() else { return };
     let auto = std::env::var("SA_AUTOWALK").is_ok();
-    for (e, tf, vel, mp, mut ext, mut v) in &mut cars {
+    for (e, tf, vel, mut prev, mp, mut ext, mut v) in &mut cars {
+        *prev = PrevVelocity { linear: vel.linear, angular: vel.angular };
         let v = &mut *v;
         let controlled = driving.0 == Some(e) && *mode == Mode::Walk;
         let key = |k: KeyCode| controlled && keys.pressed(k);
