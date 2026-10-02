@@ -22,6 +22,7 @@ pub mod id {
     pub const TEX_DICTIONARY: u32 = 0x16;
     pub const GEOMETRY_LIST: u32 = 0x1A;
     pub const BIN_MESH: u32 = 0x50E;
+    pub const EXTRA_VERT_COLOUR: u32 = 0x0253_F2F9;
     pub const NODE_NAME: u32 = 0x0253_F2FE;
 }
 

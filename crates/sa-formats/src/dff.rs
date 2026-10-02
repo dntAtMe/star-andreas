@@ -46,6 +46,8 @@ pub struct Geometry {
     pub uvs: Vec<Vec<[f32; 2]>>,
     pub triangles: Vec<Triangle>,
     pub materials: Vec<Material>,
+    /// Second prelit set from the Extra Vert Colour plugin (SA day/night blend).
+    pub extra_colors: Vec<[u8; 4]>,
 }
 
 pub mod geo_flags {
@@ -238,6 +240,18 @@ fn parse_geometry(mut r: Reader, version: u32) -> Result<Geometry> {
 
     let (_, ml) = rw::sub(&mut r, id::MATERIAL_LIST)?;
     g.materials = parse_material_list(ml).context("material list")?;
+
+    if r.remaining() >= 12 {
+        let (_, ext) = rw::sub(&mut r, id::EXTENSION)?;
+        for child in rw::children(ext) {
+            let (h, mut body) = child?;
+            if h.ty == id::EXTRA_VERT_COLOUR && body.u32()? != 0 {
+                g.extra_colors = (0..num_verts)
+                    .map(|_| Ok([body.u8()?, body.u8()?, body.u8()?, body.u8()?]))
+                    .collect::<Result<_>>()?;
+            }
+        }
+    }
     Ok(g)
 }
 
