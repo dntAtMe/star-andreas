@@ -12,7 +12,6 @@ sa-formats = { path = "crates/sa-formats" }
 anyhow = "1"
 memmap2 = "0.9"
 bevy = "0.19.1"
-bevy_rapier3d = "0.36"
 
 # Bevy is painfully slow in debug; optimize deps, keep our crates debuggable.
 [profile.dev]
@@ -20,5 +19,5 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
-# Full debuginfo for all of Bevy + Rapier overflows MSVC's PDB size limit (LNK1318).
+# Full debuginfo for all of Bevy overflows MSVC's PDB size limit (LNK1318).
 debug = false
