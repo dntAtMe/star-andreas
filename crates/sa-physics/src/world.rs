@@ -10,6 +10,10 @@
 //!   peds, vehicles, then buildings).
 //! - Attachments, ignored entities, audio, damage gameplay and the
 //!   ped/train kill hooks are omitted.
+//!
+//! After the physics, each frame runs the bodies' effect hooks (PreRender FX,
+//! BlowUpCar's world side), then `CExplosion::Update` and `CFireManager::Update`
+//! (see explosion.rs / fire.rs), like `CGame::Process`.
 
 use std::sync::Arc;
 
@@ -17,6 +21,10 @@ use glam::Vec3;
 
 use crate::{
     Ctx,
+    damage::Rand,
+    effects::{Effects, FrameFx, WorldRequest},
+    explosion::{Explosion, MAX_EXPLOSIONS},
+    fire::{Fire, MAX_FIRES},
     collision::{ColModel, MAX_COLPOINTS, process_col_models},
     colpoint::ColPoint,
     pair::{self, PairInfo},
@@ -84,6 +92,17 @@ pub trait BodyLogic: Send + Sync + 'static {
         None
     }
 
+    /// The body is leaving the world: stop any FX it owns.
+    fn on_remove(&mut self, fx: &mut Effects) {
+        let _ = fx;
+    }
+
+    /// After the physics: FX requests and world-side consequences (PreRender's
+    /// smoke, BlowUpCar's explosion, ...). Runs for every body, static or not.
+    fn process_effects(&mut self, id: EntityId, phys: &mut Physical, col: &ColModel, fx: &mut FrameFx) {
+        let _ = (id, phys, col, fx);
+    }
+
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
@@ -124,7 +143,21 @@ pub struct World {
     free_bodies: Vec<u32>,
     scan_code: u16,
     pub surfaces: SurfaceInfos,
-    last_ts: f32,
+    pub(crate) last_ts: f32,
+    /// FX, lights and shakes requested by the gameplay code; drained by the app.
+    pub effects: Effects,
+    /// `CTimer::m_snTimeInMilliseconds` and `m_FrameCounter`.
+    pub now_ms: u32,
+    time_ms: f64,
+    pub frame: u32,
+    /// Camera position (fire removal distance), set by the app.
+    pub camera_pos: Vec3,
+    /// The CRT `rand()` shared by explosions and fires.
+    pub rng: Rand,
+    pub(crate) explosions: Vec<Explosion>,
+    pub(crate) fires: Vec<Fire>,
+    /// `CCreepingFire::m_aFireStatus[32][32]`.
+    pub(crate) creeping: [[u8; 32]; 32],
 }
 
 impl Default for World {
@@ -144,6 +177,15 @@ impl World {
             scan_code: 0,
             surfaces,
             last_ts: 1.0,
+            effects: Effects::default(),
+            now_ms: 0,
+            time_ms: 0.0,
+            frame: 0,
+            camera_pos: Vec3::ZERO,
+            rng: Rand::new(1),
+            explosions: vec![Explosion::default(); MAX_EXPLOSIONS],
+            fires: vec![Fire::default(); MAX_FIRES],
+            creeping: [[0; 32]; 32],
         }
     }
 
@@ -202,8 +244,12 @@ impl World {
                 }
             }
             EntityId::Body(i) => {
-                if self.bodies.get_mut(i as usize).and_then(Option::take).is_some() {
+                if let Some(mut b) = self.bodies.get_mut(i as usize).and_then(Option::take) {
+                    b.logic.on_remove(&mut self.effects);
                     self.free_bodies.push(i);
+                    if let Some(f) = self.fire_on(id) {
+                        self.extinguish(f);
+                    }
                 }
             }
         }
@@ -274,6 +320,11 @@ impl World {
     /// One physics frame with timestep `ts` (in 1/50 s frames).
     pub fn process(&mut self, ts: f32) {
         self.last_ts = ts;
+        // CTimer: 20 ms per 1/50 s tick.
+        self.time_ms += ts as f64 * 20.0;
+        self.now_ms = self.time_ms as u32;
+        self.frame = self.frame.wrapping_add(1);
+        self.effects.lights.clear();
         let mut ctx = Ctx::new(ts);
         let moving: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))
@@ -325,6 +376,31 @@ impl World {
                 }
             }
         }
+
+        self.process_effects(ts);
+    }
+
+    /// Body effect hooks, their world requests, then explosions and fires.
+    fn process_effects(&mut self, ts: f32) {
+        let mut requests: Vec<WorldRequest> = Vec::new();
+        for (i, b) in self.bodies.iter_mut().enumerate() {
+            let Some(b) = b else { continue };
+            let mut f = FrameFx { fx: &mut self.effects, requests: &mut requests, now_ms: self.now_ms };
+            b.logic.process_effects(EntityId::Body(i as u32), &mut b.phys, &b.col, &mut f);
+        }
+        for r in requests {
+            match r {
+                WorldRequest::Explosion { victim, creator, kind, pos, lifetime_ms, cam_shake, no_damage } => {
+                    self.add_explosion(victim, creator, kind, pos, lifetime_ms, cam_shake, no_damage);
+                }
+                WorldRequest::StartFire { target, creator } => {
+                    self.start_fire_on(target, creator);
+                }
+            }
+        }
+        self.update_explosions(ts);
+        self.update_fires(ts);
+        self.update_creeping();
     }
 
     // ------------------------------------------------------------ ProcessCollision
@@ -1212,6 +1288,56 @@ mod tests {
         let z = b.phys.matrix.pos.z;
         assert!(z > 0.3 && z < 0.6, "resting height {z}");
         assert!(b.phys.move_speed.length() < 0.02, "speed {:?}", b.phys.move_speed);
+    }
+
+    #[test]
+    fn explosion_throws_a_crate_and_leaves_ground_fires() {
+        use crate::effects::{ExplosionType, FxCmd};
+        let mut w = World::default();
+        w.add_building(Matrix::IDENTITY, ground());
+        let (p, col) = crate_box(0.5);
+        let id = w.add_body(p, col, Box::new(PlainLogic));
+        w.process(1.0);
+        // A rocket 2 units away: full strength, pushed away and upward.
+        w.add_explosion(None, None, ExplosionType::Rocket, Vec3::new(-2.0, 0.0, 0.2), 0, -1.0, false);
+        let v = w.body(id).unwrap().phys.move_speed;
+        // impulse = m/1400 * f * F = 50/1400 * 300 -> 0.214 units/tick along the blast direction.
+        assert!((v.length() - 300.0 / 1400.0).abs() < 0.01 && v.z > 0.0, "crate speed {v:?}");
+        let names: Vec<&str> = w
+            .effects
+            .cmds
+            .iter()
+            .filter_map(|c| if let FxCmd::Create { name, .. } = c { Some(*name) } else { None })
+            .collect();
+        assert_eq!(names[0], "explosion_small");
+        assert!(!w.effects.cam_shakes.is_empty());
+        // Ground fires (5.6..8.4 s, x1..1.3) may spread for 3 generations of 20..26 s
+        // creeping fires, and merges add 7 s per tier; all gone within 3 minutes.
+        for _ in 0..(50 * 180) {
+            w.process(1.0);
+        }
+        assert!(w.fires.iter().all(|f| !f.active));
+    }
+
+    #[test]
+    fn strong_fire_decays_through_the_tiers() {
+        use crate::effects::FxCmd;
+        let mut w = World::default();
+        w.add_building(Matrix::IDENTITY, ground());
+        let i = w.start_fire_at(Vec3::new(3.0, 3.0, 0.0), None, 1000, 0).unwrap();
+        w.fires[i].strength = 2.5;
+        w.effects.cmds.clear();
+        for _ in 0..(50 * 16) {
+            w.process(1.0);
+        }
+        let names: Vec<&str> = w
+            .effects
+            .cmds
+            .iter()
+            .filter_map(|c| if let FxCmd::Create { name, .. } = c { Some(*name) } else { None })
+            .collect();
+        assert_eq!(names, ["fire_med", "fire"]);
+        assert!(!w.fires[i].active);
     }
 
     #[test]

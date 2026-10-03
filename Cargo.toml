@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sa-formats", "crates/sa-physics", "crates/sc2-formats", "crates/sc2-api", "crates/sc2-bevy", "crates/sa-app"]
+members = ["crates/sa-formats", "crates/sa-physics", "crates/sa-fx", "crates/sc2-formats", "crates/sc2-api", "crates/sc2-bevy", "crates/sa-app"]
 
 [workspace.package]
 edition = "2024"

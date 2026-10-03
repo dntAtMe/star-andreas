@@ -4833,6 +4833,7 @@ dependencies = [
  "anyhow",
  "bevy",
  "sa-formats",
+ "sa-fx",
  "sa-physics",
  "sc2-bevy",
 ]
@@ -4843,6 +4844,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "memmap2",
+]
+
+[[package]]
+name = "sa-fx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glam",
+ "sa-formats",
 ]
 
 [[package]]

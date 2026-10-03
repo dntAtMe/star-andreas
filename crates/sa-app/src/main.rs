@@ -1,3 +1,4 @@
+mod fx;
 mod player;
 mod saphys;
 mod stream;
@@ -65,6 +66,7 @@ fn main() -> anyhow::Result<()> {
         PlayerPlugin,
         VehiclePlugin,
         saphys::SaPhysPlugin,
+        fx::FxPlugin,
     ))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))

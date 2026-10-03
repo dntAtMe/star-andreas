@@ -39,7 +39,7 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Driving>()
             .add_systems(Startup, load_vehicle_db)
-            .add_systems(Update, (spawn_key, auto_drive, enter_exit, feed_inputs).chain().before(SaStep))
+            .add_systems(Update, (spawn_key, auto_drive, enter_exit, debug_damage, feed_inputs).chain().before(SaStep))
             .add_systems(Update, (update_wheels, update_damage, expire_flying_parts).after(SaStep));
     }
 }
@@ -83,7 +83,6 @@ pub struct Vehicle {
     materials: Vec<Handle<StandardMaterial>>,
     wheel_parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
     burnt: bool,
-    fire_light: Option<Entity>,
 }
 
 /// A damageable component: eDoors (bonnet, boot, doors) or ePanels (wings, windscreen, bumpers).
@@ -421,6 +420,26 @@ fn spawn_vehicle(
             auto.door_hinges[d] = Some(c.model.pos);
         }
     }
+    // Vehicle structure dummies (PreprocessHierarchy 0x4C8E60): the frame position taken
+    // through every ancestor except the root; (0,0,0) when missing.
+    let structure_dummy = |n: &str| {
+        let Some(mut i) = clump.frames.iter().position(|f| f.name.eq_ignore_ascii_case(n)) else {
+            return Vec3::ZERO;
+        };
+        let mut p = clump.frames[i].pos;
+        while clump.frames[i].parent >= 0 {
+            i = clump.frames[i].parent as usize;
+            if clump.frames[i].parent < 0 {
+                break;
+            }
+            let f = &clump.frames[i];
+            let q = sa_formats::dff::apply(&f.rot, p);
+            p = [q[0] + f.pos[0], q[1] + f.pos[1], q[2] + f.pos[2]];
+        }
+        Vec3::from(p)
+    };
+    auto.engine_pos = structure_dummy("engine");
+    auto.headlights_pos = structure_dummy("headlights");
     let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
     let m = gta_matrix(&tf);
     let mut phys = Physical::new(EntityType::Vehicle, m);
@@ -445,7 +464,6 @@ fn spawn_vehicle(
                 materials: body_materials,
                 wheel_parts,
                 burnt: false,
-                fire_light: None,
             },
         ))
         .add_child(model_root)
@@ -522,6 +540,38 @@ fn auto_drive(
     }
 }
 
+/// Debug: B knocks 150 health off the car you drive (or the nearest one);
+/// `SA_HEALTH=<hp>` sets the driven car's health once (to test smoke / fire stages).
+fn debug_damage(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut done: Local<bool>,
+    driving: Res<Driving>,
+    mut sa: ResMut<SaPhys>,
+    cars: Query<(Entity, &Vehicle, &Transform)>,
+    ped: Single<&Transform, With<Ped>>,
+) {
+    let set = if !*done && driving.0.is_some() {
+        *done = true;
+        std::env::var("SA_HEALTH").ok().and_then(|v| v.parse::<f32>().ok())
+    } else {
+        None
+    };
+    if set.is_none() && !keys.just_pressed(KeyCode::KeyB) {
+        return;
+    }
+    let target = driving.0.and_then(|e| cars.get(e).ok()).or_else(|| {
+        cars.iter().min_by(|a, b| {
+            let d = |t: &Transform| t.translation.distance_squared(ped.translation);
+            d(a.2).total_cmp(&d(b.2))
+        })
+    });
+    let Some((_, v, _)) = target else { return };
+    if let Some(car) = sa.logic_mut::<Automobile>(v.sa) {
+        car.damage.health = set.unwrap_or(car.damage.health - 150.0).max(0.0);
+        info!("{}: health {}", v.name, car.damage.health);
+    }
+}
+
 fn enter_exit(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -589,7 +639,9 @@ fn feed_inputs(
             handbrake: key(KeyCode::Space),
         };
         if let Some(body) = sa.world.body_mut(v.sa) {
-            body.phys.status = if driving.0 == Some(e) { Status::Player } else { Status::Abandoned };
+            if body.phys.status != Status::Wrecked {
+                body.phys.status = if driving.0 == Some(e) { Status::Player } else { Status::Abandoned };
+            }
             v.speed = body.phys.move_speed.dot(body.phys.matrix.fwd) * 50.0;
         }
         if let Some(car) = sa.logic_mut::<Automobile>(v.sa) {
@@ -615,7 +667,8 @@ fn update_wheels(sa: Res<SaPhys>, cars: Query<&Vehicle>, mut tfs: Query<&mut Tra
 
 // ---------------------------------------------------------------- damage visuals
 
-/// Component visibility, door hinges, flying parts, burnt look and fire light.
+/// Component visibility, door hinges, flying parts and the burnt look (smoke, fire and
+/// explosions are FX systems, see fx.rs).
 #[allow(clippy::too_many_arguments)]
 fn update_damage(
     mut commands: Commands,
@@ -626,13 +679,12 @@ fn update_damage(
     mut tfs: Query<&mut Transform, Without<Vehicle>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (car_e, mut v) in &mut cars {
+    for (_car_e, mut v) in &mut cars {
         let Some(car_phys) = sa.world.body(v.sa).map(|b| b.phys.clone()) else { continue };
         let Some(auto) = sa.logic_mut::<Automobile>(v.sa) else { continue };
         let events = std::mem::take(&mut auto.damage.events);
         let dm = auto.damage.dm.clone();
         let doors = auto.damage.doors;
-        let on_fire = auto.damage.on_fire;
         v.health = auto.damage.health;
 
         for c in &v.comps {
@@ -718,24 +770,6 @@ fn update_damage(
             }
         }
 
-        // A flickering orange light while the car burns.
-        match (on_fire, v.fire_light) {
-            (true, None) => {
-                let light = commands
-                    .spawn((
-                        PointLight { color: Color::srgb(1.0, 0.45, 0.1), intensity: 400_000.0, range: 12.0, ..default() },
-                        Transform::from_xyz(0.0, 1.2, -1.2),
-                    ))
-                    .id();
-                commands.entity(car_e).add_child(light);
-                v.fire_light = Some(light);
-            }
-            (false, Some(l)) => {
-                commands.entity(l).despawn();
-                v.fire_light = None;
-            }
-            _ => {}
-        }
     }
 }
 

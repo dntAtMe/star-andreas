@@ -17,10 +17,11 @@ use crate::{
     Ctx,
     collision::{ColLine, ColModel},
     damage::{CarDamage, init_doors},
+    effects::{ExplosionType, FrameFx, FxHandle, WorldRequest},
     colpoint::ColPoint,
     physical::{Physical, Status, normalise, pf},
     surface::{SURFACE_WHEELBASE, SurfaceInfos},
-    world::{BodyLogic, LineHits},
+    world::{BodyLogic, EntityId, LineHits},
 };
 
 /// 0xC1CDAC: set once any wheel enters ProcessWheel skidding, never cleared.
@@ -215,6 +216,8 @@ pub struct VehicleHandling {
     pub flags: u32,
     /// Converted collision damage multiplier (raw * 2000 / mass).
     pub collision_damage: f32,
+    /// handling.cfg engine type: 'P' petrol, 'D' diesel, 'E' electric.
+    pub engine_type: char,
     pub trans: Transmission,
 }
 
@@ -290,6 +293,7 @@ impl VehicleHandling {
             model_flags: h.model_flags,
             flags: h.handling_flags,
             collision_damage: 1.0 / h.mass * h.collision_damage * 2000.0,
+            engine_type: h.engine_type,
             trans: t,
         }
     }
@@ -363,6 +367,13 @@ pub struct Automobile {
     pub damage: CarDamage,
     /// Model-space door hinge positions (eDoors order), set by the app from the DFF.
     pub door_hinges: [Option<Vec3>; 6],
+    /// Vehicle structure dummies 7 ("engine") and 0 ("headlights"), model space,
+    /// (0,0,0) when the DFF lacks them. Set by the app.
+    pub engine_pos: Vec3,
+    pub headlights_pos: Vec3,
+    /// +0x578 engine smoke and +0x57C fire_car FX systems.
+    smoke_fx: Option<FxHandle>,
+    fire_fx: Option<FxHandle>,
     rest_counter: u32,
     avg_move: Vec3,
     avg_turn: Vec3,
@@ -443,6 +454,10 @@ impl Automobile {
             steer_angle2: 0.0,
             damage,
             door_hinges: [None; 6],
+            engine_pos: Vec3::ZERO,
+            headlights_pos: Vec3::ZERO,
+            smoke_fx: None,
+            fire_fx: None,
             avg_move: Vec3::ZERO,
             avg_turn: Vec3::ZERO,
             bbox_max_x: col.bbox_max.x,
@@ -1022,6 +1037,69 @@ impl BodyLogic for Automobile {
         self.damage.process_doors(p, ts, &hinges, ok);
 
         self.update_wheel_visuals(p, col, ts);
+    }
+
+    fn on_remove(&mut self, fx: &mut crate::effects::Effects) {
+        for h in [self.smoke_fx.take(), self.fire_fx.take()].into_iter().flatten() {
+            fx.kill(h);
+        }
+    }
+
+    /// BlowUpCar's world side, the FX part of ProcessCarOnFireAndExplode (0x6A7090)
+    /// and CVehicle::ProcessEngineSmokeFx (0x6D2A80, from PreRender).
+    fn process_effects(&mut self, id: EntityId, p: &mut Physical, col: &ColModel, f: &mut FrameFx) {
+        if let Some(culprit) = self.damage.blown_up.take() {
+            f.fx.cam_shakes.push((0.4, p.matrix.pos));
+            // gFireManager.StartFire(car, culprit, ...) is refused here: the engine
+            // status is 250 after FuckCarCompletely (>= 225).
+            let lim = 0.75; // cars and quads
+            let r = &mut self.damage.rng;
+            let mut u = |a: f32, b: f32| a + (b - a) * r.rand01();
+            let (bx, by) = (u(-lim, lim) * col.bbox_max.x, u(-lim, lim) * col.bbox_max.y);
+            let mut pos = p.matrix.pos + p.matrix.right * bx + p.matrix.fwd * by;
+            pos.z -= (r.rand01() + 0.5) * col.bbox_max.z;
+            let kind = if matches!(self.model, 564 | 441) { ExplosionType::QuickCar } else { ExplosionType::Car };
+            f.requests.push(WorldRequest::Explosion {
+                victim: Some(id),
+                creator: culprit,
+                kind,
+                pos,
+                lifetime_ms: 0,
+                cam_shake: -1.0,
+                no_damage: false,
+            });
+        }
+
+        // fire_car at the engine, attached to the car.
+        if !self.damage.burning {
+            if let Some(h) = self.fire_fx.take() {
+                f.fx.kill(h);
+            }
+        } else if self.fire_fx.is_none() {
+            let h = f.fx.create("fire_car", self.engine_pos, Some(id), false);
+            f.fx.play(h);
+            self.fire_fx = Some(h);
+        }
+        if let Some(h) = self.fire_fx {
+            f.fx.set_vel_add(h, p.move_speed * 50.0);
+        }
+
+        // Engine smoke between 650 and 250 health; white to black via the system time.
+        let hp = self.damage.health;
+        if hp >= 650.0 || hp < 250.0 || p.has(pf::IN_WATER) {
+            if let Some(h) = self.smoke_fx.take() {
+                f.fx.kill(h);
+            }
+            return;
+        }
+        let h = *self.smoke_fx.get_or_insert_with(|| {
+            let name = if self.h.engine_type == 'E' { "overheat_car_electric" } else { "overheat_car" };
+            let h = f.fx.create(name, self.engine_pos, Some(id), false);
+            f.fx.play(h);
+            h
+        });
+        f.fx.set_const_time(h, true, 1.0 - (hp - 250.0) * 0.0025);
+        f.fx.set_vel_add(h, p.move_speed * 50.0);
     }
 
     /// 0x6D0E90 SpecialEntityCalcCollisionSteps.

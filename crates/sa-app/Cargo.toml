@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 sa-formats.workspace = true
 sa-physics = { path = "../sa-physics", features = ["bevy"] }
+sa-fx = { path = "../sa-fx" }
 anyhow.workspace = true
 bevy.workspace = true
 sc2-bevy = { path = "../sc2-bevy", optional = true, default-features = false }

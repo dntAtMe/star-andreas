@@ -4,14 +4,18 @@
 //! Visual consequences are reported as `DamageEvent`s for the renderer; the
 //! door hinge angles and component states are read directly.
 //!
-//! Not ported: events/speech/audio, wanted level, bullets/explosions as damage
-//! sources, bouncing panels (bumpers just show their `_dam` model), FX.
+//! Explosion damage (`InflictDamage`) and the bomb fuse it arms are here too; the
+//! FX and the explosion itself are driven from `Automobile::process_effects`.
+//!
+//! Not ported: events/speech/audio, wanted level, bullets as damage sources,
+//! bouncing panels (bumpers just show their `_dam` model).
 
 use glam::Vec3;
 
 use crate::{
     colpoint::ColPoint,
     physical::{EntityType, Matrix, Physical, Status},
+    world::EntityId,
 };
 
 /// Group damage multipliers (0x8D32A0): bumper, wheel, door, bonnet, boot, panel.
@@ -222,6 +226,11 @@ impl Rand {
         (self.0 >> 16) & 0x7FFF
     }
 
+    /// `rand() * (1/32767)` (0x858C7C), 0..=1.
+    pub fn rand01(&mut self) -> f32 {
+        self.next() as f32 * 3.051_850_9e-5
+    }
+
     pub fn unit(&mut self) -> f32 {
         (self.next() & 0xFFFF) as f32 / 32768.0
     }
@@ -246,6 +255,15 @@ pub struct CarDamage {
     pub rng: Rand,
     /// Bounding-box max x of the collision model (side logic).
     pub bbox_max_x: f32,
+    /// +0x928: who set the car burning (gets the blame for the explosion).
+    pub fire_culprit: Option<EntityId>,
+    /// +0x4DE / +0x4E0: explosion fuse in ms, armed when an explosion kills the car.
+    pub bomb_timer_ms: u16,
+    pub bomb_owner: Option<EntityId>,
+    /// Set by `blow_up` (with the culprit); the world turns it into an explosion.
+    pub blown_up: Option<Option<EntityId>>,
+    /// ProcessCarOnFireAndExplode saw the car burning this frame (fire_car FX wanted).
+    pub burning: bool,
 }
 
 impl CarDamage {
@@ -263,6 +281,11 @@ impl CarDamage {
             frame_intensity: 0.0,
             rng: Rand::new(seed),
             bbox_max_x,
+            fire_culprit: None,
+            bomb_timer_ms: 0,
+            bomb_owner: None,
+            blown_up: None,
+            burning: false,
         }
     }
 
@@ -465,6 +488,43 @@ impl CarDamage {
         if self.health < 250.0 && self.dm.engine < 225 {
             self.dm.engine = 225;
             self.burn_timer_ms = 0.0;
+            self.fire_culprit = None; // collision damage: +0xDC, which we do not track
+        }
+    }
+
+    /// `CVehicle::InflictDamage` (0x6D7C90), health part. `explosion` = weapon type 51.
+    pub fn inflict_damage(&mut self, p: &mut Physical, damager: Option<EntityId>, explosion: bool, intensity: f32) {
+        if self.health <= 0.0 {
+            return;
+        }
+        if self.health > intensity {
+            let old = self.health;
+            self.health -= intensity;
+            if old >= 250.0 && self.health < 250.0 {
+                self.dm.engine = 225;
+                self.fire_culprit = damager;
+            }
+        } else {
+            self.health = 0.0;
+            if explosion {
+                // Chain reactions are delayed: a 1000..3047 ms fuse.
+                self.bomb_timer_ms = (self.rng.next() & 0x7FF) as u16 + 1000;
+                self.bomb_owner = damager;
+            } else {
+                self.blow_up(p, damager);
+            }
+        }
+    }
+
+    /// `CVehicle::ProcessBombTimer` (0x6D1340): 16.67 ms per tick.
+    fn process_bomb_timer(&mut self, p: &mut Physical, ts: f32) {
+        if self.bomb_timer_ms == 0 {
+            return;
+        }
+        let step = (ts * 16.666_666) as u16;
+        self.bomb_timer_ms = self.bomb_timer_ms.saturating_sub(step);
+        if self.bomb_timer_ms == 0 {
+            self.blow_up(p, self.bomb_owner);
         }
     }
 
@@ -509,11 +569,12 @@ impl CarDamage {
         self.old_turn = p.turn_speed + p.friction_turn;
     }
 
-    /// ProcessCarOnFireAndExplode (0x6A7090). Returns true when the car blows up this frame.
+    /// ProcessCarOnFireAndExplode (0x6A7090), cars only. Returns true when the car blows up this frame.
     pub fn process_fire(&mut self, p: &mut Physical, ts: f32) -> bool {
         let start = self.dm.engine;
         let mut exploded = false;
-        if self.health >= 250.0 || p.status == Status::Wrecked {
+        self.burning = self.health < 250.0 && p.status != Status::Wrecked;
+        if !self.burning {
             self.burn_timer_ms = 0.0;
             self.on_fire = false;
         } else {
@@ -523,18 +584,22 @@ impl CarDamage {
             }
             self.burn_timer_ms += ((ts * 0.02 * 1000.0) as u32) as f32;
             if self.burn_timer_ms > 5000.0 {
-                self.blow_up(p);
+                self.blow_up(p, self.fire_culprit);
                 exploded = true;
             }
         }
         if start > 225 && self.health > 250.0 {
             self.health -= 2.0;
         }
+        self.process_bomb_timer(p, ts);
         exploded
     }
 
-    /// BlowUpCar (0x6B3780), physics-relevant part.
-    pub fn blow_up(&mut self, p: &mut Physical) {
+    /// BlowUpCar (0x6B3780), physics-relevant part. The explosion, camera shake and
+    /// the (always refused) StartFire are issued by `Automobile::process_effects`.
+    pub fn blow_up(&mut self, p: &mut Physical, culprit: Option<EntityId>) {
+        self.blown_up = Some(culprit);
+        self.bomb_timer_ms = 0;
         p.move_speed.z += 0.13;
         p.status = Status::Wrecked;
         // FuckCarCompletely: one random front/left wheel missing, all doors off, engine dead.
@@ -637,5 +702,20 @@ mod tests {
         assert!(exploded);
         assert_eq!(p.status, Status::Wrecked);
         assert!(d.events.contains(&DamageEvent::Exploded));
+    }
+
+    #[test]
+    fn explosion_kill_arms_a_fuse() {
+        let (mut p, mut d) = car();
+        d.inflict_damage(&mut p, None, true, 2000.0);
+        assert_eq!(d.health, 0.0);
+        assert!((1000..=3047).contains(&d.bomb_timer_ms));
+        assert!(d.blown_up.is_none());
+        // 16.67 ms per tick: gone within 3047 / 16 ticks.
+        for _ in 0..200 {
+            d.process_fire(&mut p, 1.0);
+        }
+        assert_eq!(p.status, Status::Wrecked);
+        assert!(d.blown_up.is_some());
     }
 }

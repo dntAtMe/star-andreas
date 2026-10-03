@@ -1,0 +1,11 @@
+[package]
+name = "sa-fx"
+description = "Port of GTA San Andreas' particle FX runtime (FxManager_c / FxSystem_c / FxEmitter_c), engine-agnostic"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+glam = "0.32"
+sa-formats.workspace = true
+anyhow.workspace = true
