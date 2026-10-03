@@ -161,6 +161,8 @@ pub struct Physical {
     pub damage_piece: u8,
     pub last_collision_pos: Vec3,
     pub last_collision_impact_velocity: Vec3,
+    /// Kind of entity that caused `damage_intensity` (m_pDamageEntity's type).
+    pub damage_entity_kind: Option<EntityType>,
     /// Distance moved by the last successful ProcessCollision / ProcessShift.
     pub moving_speed: f32,
 }
@@ -188,6 +190,7 @@ impl Physical {
             damage_piece: 0,
             last_collision_pos: Vec3::ZERO,
             last_collision_impact_velocity: Vec3::ZERO,
+            damage_entity_kind: None,
             moving_speed: 0.0,
         }
     }
@@ -430,6 +433,7 @@ impl Physical {
         self.flags &= !(pf::COLLIDED | pf::DOOR_HIT_LIMIT);
         self.damage_piece = 0;
         self.damage_intensity = 0.0;
+        self.damage_entity_kind = None;
         self.apply_friction_accumulated(ctx);
         self.apply_gravity(ctx.ts);
         self.apply_air_resistance(ctx.ts, false);
@@ -451,10 +455,12 @@ impl Physical {
     }
 
     /// 0x5428C0 (object surface-65 marking and the mini-game hook omitted).
-    pub fn set_damaged_piece_record(&mut self, impulse: f32, cp: &ColPoint, sign: f32) {
+    pub fn set_damaged_piece_record(&mut self, impulse: f32, cp: &ColPoint, sign: f32, other: Option<EntityType>) {
         if impulse > self.damage_intensity {
             self.damage_intensity = impulse;
-            self.damage_piece = cp.piece_a;
+            self.damage_entity_kind = other;
+            // For B the contact's own piece is piece_b.
+            self.damage_piece = if sign < 0.0 { cp.piece_b } else { cp.piece_a };
             self.last_collision_pos = cp.point;
             self.last_collision_impact_velocity = cp.normal * sign;
         }

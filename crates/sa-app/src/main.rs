@@ -215,7 +215,7 @@ fn update_hud(
         driving
             .0
             .and_then(|c| cars.get(c).ok())
-            .map(|v| format!("  driving {} {:.0} km/h", v.name, v.speed.abs() * 3.6))
+            .map(|v| format!("  driving {} {:.0} km/h  health {:.0}", v.name, v.speed.abs() * 3.6, v.health))
             .unwrap_or_default(),
     );
 }

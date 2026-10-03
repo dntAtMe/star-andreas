@@ -18,14 +18,15 @@ use sa_formats::{
 };
 use sa_physics::{
     automobile::{Automobile, CarInput, VehicleHandling},
-    collision::ColModel as SaColModel,
-    physical::{EntityType, Physical, Status, VehicleClass, VehicleInfo},
-    world::EntityId,
+    collision::{ColModel as SaColModel, ColSphere, Surf},
+    damage::{DamageEvent, FlyingKind, flying_component_velocity},
+    physical::{EntityType, Matrix as GMatrix, Physical, Status, VehicleClass, VehicleInfo},
+    world::{EntityId, PlainLogic},
 };
 
 use crate::{
     player::{CamFollow, GameRoot, Mode, Ped, frame_transform, ped_set_in_vehicle, ped_teleport},
-    saphys::{SaBody, SaPhys, SaPhysExt, SaStep, gta_matrix},
+    saphys::{SaBody, SaPhys, SaPhysExt, SaStep, gta_matrix, transform_from_gta},
     stream::{convert_texture, make_image},
     world::{WorldRes, g2b},
 };
@@ -39,7 +40,7 @@ impl Plugin for VehiclePlugin {
         app.init_resource::<Driving>()
             .add_systems(Startup, load_vehicle_db)
             .add_systems(Update, (spawn_key, auto_drive, enter_exit, feed_inputs).chain().before(SaStep))
-            .add_systems(Update, update_wheels.after(SaStep));
+            .add_systems(Update, (update_wheels, update_damage, expire_flying_parts).after(SaStep));
     }
 }
 
@@ -73,8 +74,61 @@ pub struct Vehicle {
     wheels: Vec<Wheel>,
     /// Forward speed in m/s (from the SA body).
     pub speed: f32,
+    /// Car health (1000 new, < 250 burning).
+    pub health: f32,
     /// Seat offset (Bevy local space) for placing the hidden driver.
     seat: Vec3,
+    comps: Vec<CompVisual>,
+    /// Body materials (darkened when the car blows up).
+    materials: Vec<Handle<StandardMaterial>>,
+    wheel_parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    burnt: bool,
+    fire_light: Option<Entity>,
+}
+
+/// A damageable component: eDoors (bonnet, boot, doors) or ePanels (wings, windscreen, bumpers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comp {
+    Door(usize),
+    Panel(usize),
+}
+
+fn comp_of_dummy(name: &str) -> Option<Comp> {
+    Some(match name {
+        "bonnet_dummy" => Comp::Door(0),
+        "boot_dummy" => Comp::Door(1),
+        "door_lf_dummy" => Comp::Door(2),
+        "door_rf_dummy" => Comp::Door(3),
+        "door_lr_dummy" => Comp::Door(4),
+        "door_rr_dummy" => Comp::Door(5),
+        "wing_lf_dummy" => Comp::Panel(0),
+        "wing_rf_dummy" => Comp::Panel(1),
+        "windscreen_dummy" => Comp::Panel(4),
+        "bump_front_dummy" => Comp::Panel(5),
+        "bump_rear_dummy" => Comp::Panel(6),
+        _ => return None,
+    })
+}
+
+struct CompVisual {
+    comp: Comp,
+    /// Dummy (hinge) frame entity and its rest transform.
+    dummy: Entity,
+    rest: Transform,
+    /// Dummy frame in GTA model space (for spawning the flying part).
+    model: GMatrix,
+    ok: Vec<Entity>,
+    dam: Vec<Entity>,
+    /// Meshes for a flying copy (the `_dam` version if there is one), relative to the dummy.
+    parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>, Transform)>,
+    /// Part bounds relative to the dummy (GTA space), for its collision spheres.
+    bounds: (Vec3, Vec3),
+}
+
+/// A component that came off a car; despawns after its lifetime.
+#[derive(Component)]
+struct FlyingPart {
+    until: f32,
 }
 
 // ---------------------------------------------------------------- loading
@@ -224,19 +278,76 @@ fn spawn_vehicle(
     }
 
     let mut wheel_parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)> = Vec::new();
+    let mut body_materials = Vec::new();
+    let mut comps: Vec<CompVisual> = Vec::new();
+    // Component dummy ancestor of a frame.
+    let comp_dummy = |mut fi: usize| -> Option<(Comp, usize)> {
+        for _ in 0..8 {
+            let f = &clump.frames[fi];
+            if let Some(c) = comp_of_dummy(&f.name.to_ascii_lowercase()) {
+                return Some((c, fi));
+            }
+            if f.parent < 0 {
+                return None;
+            }
+            fi = f.parent as usize;
+        }
+        None
+    };
     for a in &clump.atomics {
-        let fname = clump.frames[a.frame as usize].name.to_ascii_lowercase();
-        if fname.ends_with("_dam") || fname.ends_with("_vlo") {
+        let fi = a.frame as usize;
+        let fname = clump.frames[fi].name.to_ascii_lowercase();
+        if fname.ends_with("_vlo") {
             continue;
         }
+        let damaged = fname.ends_with("_dam");
         let geo = &clump.geometries[a.geometry as usize];
+        let comp = comp_dummy(fi);
         for (mi, mesh) in geometry_meshes(geo) {
-            let part = (meshes.add(mesh), make_material(&geo.materials[mi]));
+            let material = make_material(&geo.materials[mi]);
+            body_materials.push(material.clone());
+            let part = (meshes.add(mesh), material);
             if fname == "wheel" {
                 wheel_parts.push(part);
-            } else {
-                let e = commands.spawn((Mesh3d(part.0), MeshMaterial3d(part.1))).id();
-                commands.entity(frames[a.frame as usize]).add_child(e);
+                continue;
+            }
+            // `_dam` models start hidden; damage swaps them in.
+            let vis = if damaged { Visibility::Hidden } else { Visibility::Inherited };
+            let e = commands.spawn((Mesh3d(part.0.clone()), MeshMaterial3d(part.1.clone()), vis)).id();
+            commands.entity(frames[fi]).add_child(e);
+            if let Some((c, di)) = comp {
+                let idx = match comps.iter().position(|x| x.comp == c) {
+                    Some(i) => i,
+                    None => {
+                        let (rot, pos) = clump.frame_world(di);
+                        comps.push(CompVisual {
+                            comp: c,
+                            dummy: frames[di],
+                            rest: frame_transform(&clump.frames[di]),
+                            model: GMatrix { right: rot[0].into(), fwd: rot[1].into(), up: rot[2].into(), pos: pos.into() },
+                            ok: Vec::new(),
+                            dam: Vec::new(),
+                            parts: Vec::new(),
+                            bounds: (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                        });
+                        comps.len() - 1
+                    }
+                };
+                let cv = &mut comps[idx];
+                if damaged { cv.dam.push(e) } else { cv.ok.push(e) }
+                // Flying copy: prefer the damaged model.
+                let local = if fi == di { Transform::IDENTITY } else { frame_transform(&clump.frames[fi]) };
+                if damaged || cv.dam.is_empty() {
+                    if damaged && cv.dam.len() == 1 {
+                        cv.parts.clear();
+                    }
+                    cv.parts.push((part.0.clone(), part.1.clone(), local));
+                }
+                for v in &geo.positions {
+                    let q = local.transform_point(Vec3::from(*v));
+                    cv.bounds.0 = cv.bounds.0.min(q);
+                    cv.bounds.1 = cv.bounds.1.max(q);
+                }
             }
         }
     }
@@ -296,7 +407,7 @@ fn spawn_vehicle(
     let dummies = [dummy_of("wheel_lf_dummy"), dummy_of("wheel_lb_dummy"), dummy_of("wheel_rf_dummy"), dummy_of("wheel_rb_dummy")];
     let mut sa_col = raw_col.as_ref().map(SaColModel::from_col).context("vehicle has no collision")?;
     let vh = VehicleHandling::from_raw(&h);
-    let auto = Automobile::new(
+    let mut auto = Automobile::new(
         vh,
         def.id as u16,
         def.wheel_scale_front,
@@ -305,6 +416,11 @@ fn spawn_vehicle(
         &mut sa_col,
         sa.world.surfaces.clone(),
     );
+    for c in &comps {
+        if let Comp::Door(d) = c.comp {
+            auto.door_hinges[d] = Some(c.model.pos);
+        }
+    }
     let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
     let m = gta_matrix(&tf);
     let mut phys = Physical::new(EntityType::Vehicle, m);
@@ -318,7 +434,19 @@ fn spawn_vehicle(
             tf,
             Visibility::default(),
             SaBody::new(id, m),
-            Vehicle { name: def.game_name.clone(), sa: id, wheels, speed: 0.0, seat },
+            Vehicle {
+                name: def.game_name.clone(),
+                sa: id,
+                wheels,
+                speed: 0.0,
+                health: 1000.0,
+                seat,
+                comps,
+                materials: body_materials,
+                wheel_parts,
+                burnt: false,
+                fire_light: None,
+            },
         ))
         .add_child(model_root)
         .id();
@@ -481,6 +609,201 @@ fn update_wheels(sa: Res<SaPhys>, cars: Query<&Vehicle>, mut tfs: Query<&mut Tra
                 let steer = if w.front { car.steer_angle } else { 0.0 };
                 tf.rotation = Quat::from_rotation_z(steer) * Quat::from_rotation_x(car.wheel_rot[i]);
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- damage visuals
+
+/// Component visibility, door hinges, flying parts, burnt look and fire light.
+#[allow(clippy::too_many_arguments)]
+fn update_damage(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut sa: ResMut<SaPhys>,
+    mut cars: Query<(Entity, &mut Vehicle)>,
+    mut vis: Query<&mut Visibility>,
+    mut tfs: Query<&mut Transform, Without<Vehicle>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (car_e, mut v) in &mut cars {
+        let Some(car_phys) = sa.world.body(v.sa).map(|b| b.phys.clone()) else { continue };
+        let Some(auto) = sa.logic_mut::<Automobile>(v.sa) else { continue };
+        let events = std::mem::take(&mut auto.damage.events);
+        let dm = auto.damage.dm.clone();
+        let doors = auto.damage.doors;
+        let on_fire = auto.damage.on_fire;
+        v.health = auto.damage.health;
+
+        for c in &v.comps {
+            // 0 = ok model, 1 = damaged model, 2 = gone.
+            let state = match c.comp {
+                Comp::Door(d) => match dm.doors[d] {
+                    0 | 1 => 0,
+                    2 | 3 => 1,
+                    _ => 2,
+                },
+                Comp::Panel(p) => match dm.panels[p] {
+                    0 => 0,
+                    1 | 2 => 1,
+                    _ => 2,
+                },
+            };
+            let show_dam = state == 1 && !c.dam.is_empty();
+            for &e in &c.ok {
+                if let Ok(mut x) = vis.get_mut(e) {
+                    *x = if state == 0 || (state == 1 && !show_dam) { Visibility::Inherited } else { Visibility::Hidden };
+                }
+            }
+            for &e in &c.dam {
+                if let Ok(mut x) = vis.get_mut(e) {
+                    *x = if show_dam { Visibility::Inherited } else { Visibility::Hidden };
+                }
+            }
+            if let (Comp::Door(d), Ok(mut tf)) = (c.comp, tfs.get_mut(c.dummy)) {
+                let door = doors[d];
+                let axis = if door.axis == 0 { Vec3::X } else { Vec3::Z };
+                tf.rotation = c.rest.rotation * Quat::from_axis_angle(axis, door.angle);
+            }
+        }
+        for w in &v.wheels {
+            if let Ok(mut x) = vis.get_mut(w.pivot) {
+                *x = if dm.wheels[w.sa_index] == 2 { Visibility::Hidden } else { Visibility::Inherited };
+            }
+        }
+
+        for ev in events {
+            match ev {
+                DamageEvent::DoorOff(d, kind) => {
+                    if let Some(c) = v.comps.iter().find(|c| c.comp == Comp::Door(d)) {
+                        spawn_flying_part(&mut commands, &mut sa, &time, &car_phys, c, kind, false);
+                    }
+                }
+                DamageEvent::PanelOff(p, kind) => {
+                    if let Some(c) = v.comps.iter().find(|c| c.comp == Comp::Panel(p)) {
+                        spawn_flying_part(&mut commands, &mut sa, &time, &car_phys, c, kind, p == 4);
+                    }
+                }
+                DamageEvent::WheelOff(w) => {
+                    if let Some(wh) = v.wheels.iter().find(|x| x.sa_index == w) {
+                        let model = GMatrix { pos: wh.dummy, ..GMatrix::IDENTITY };
+                        let parts = v.wheel_parts.iter().map(|(m, mat)| (m.clone(), mat.clone(), Transform::IDENTITY)).collect();
+                        let c = CompVisual {
+                            comp: Comp::Panel(99),
+                            dummy: wh.pivot,
+                            rest: Transform::IDENTITY,
+                            model,
+                            ok: Vec::new(),
+                            dam: Vec::new(),
+                            parts,
+                            bounds: (Vec3::splat(-0.35), Vec3::splat(0.35)),
+                        };
+                        spawn_flying_part(&mut commands, &mut sa, &time, &car_phys, &c, FlyingKind::Wheel, false);
+                    }
+                }
+                DamageEvent::Exploded => {
+                    if !v.burnt {
+                        v.burnt = true;
+                        for h in &v.materials {
+                            if let Some(mut m) = materials.get_mut(h) {
+                                let c = m.base_color.to_srgba();
+                                m.base_color = Color::srgba(c.red * 0.15, c.green * 0.14, c.blue * 0.13, c.alpha);
+                                m.reflectance = 0.1;
+                                m.perceptual_roughness = 0.9;
+                            }
+                        }
+                    }
+                }
+                DamageEvent::OnFire => {}
+            }
+        }
+
+        // A flickering orange light while the car burns.
+        match (on_fire, v.fire_light) {
+            (true, None) => {
+                let light = commands
+                    .spawn((
+                        PointLight { color: Color::srgb(1.0, 0.45, 0.1), intensity: 400_000.0, range: 12.0, ..default() },
+                        Transform::from_xyz(0.0, 1.2, -1.2),
+                    ))
+                    .id();
+                commands.entity(car_e).add_child(light);
+                v.fire_light = Some(light);
+            }
+            (false, Some(l)) => {
+                commands.entity(l).despawn();
+                v.fire_light = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SpawnFlyingComponent (0x6A8580): the part becomes a 10 kg SA object.
+#[allow(clippy::too_many_arguments)]
+fn spawn_flying_part(
+    commands: &mut Commands,
+    sa: &mut SaPhys,
+    time: &Time,
+    car: &Physical,
+    c: &CompVisual,
+    kind: FlyingKind,
+    windscreen: bool,
+) {
+    if c.parts.is_empty() {
+        return;
+    }
+    let m = car.matrix.mul(&c.model);
+    let (v, w) = flying_component_velocity(car, m.pos, kind, windscreen);
+    let mut phys = Physical::new(EntityType::Object, m);
+    phys.mass = 10.0;
+    phys.turn_mass = if kind == FlyingKind::Wheel { 5.0 } else { 25.0 };
+    phys.air_resistance = if kind == FlyingKind::Wheel { 0.99 } else { 0.97 };
+    phys.elasticity = 0.1;
+    phys.move_speed = v;
+    phys.turn_speed = w;
+    // Collision: spheres along the part's longest axis.
+    let (lo, hi) = c.bounds;
+    let (lo, hi) = if lo.x > hi.x { (Vec3::splat(-0.3), Vec3::splat(0.3)) } else { (lo, hi) };
+    let size = hi - lo;
+    let centre = (lo + hi) * 0.5;
+    let axis = if size.x >= size.y && size.x >= size.z {
+        Vec3::X
+    } else if size.y >= size.z {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    let long = size.dot(axis);
+    let r = ((size - axis * long).max_element() * 0.5).clamp(0.08, 0.4);
+    let spheres = [-0.33f32, 0.0, 0.33]
+        .iter()
+        .map(|k| ColSphere { center: centre + axis * (long * k), radius: r, surf: Surf { material: 63, piece: 0, lighting: 0 } })
+        .collect();
+    let col = SaColModel {
+        bbox_min: lo - Vec3::splat(r),
+        bbox_max: hi + Vec3::splat(r),
+        bound_center: centre,
+        bound_radius: long * 0.5 + r,
+        spheres,
+        ..Default::default()
+    };
+    let id = sa.world.add_body(phys, col, Box::new(PlainLogic));
+    let tf = transform_from_gta(&m);
+    let root = commands.spawn((Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2)), Visibility::default())).id();
+    for (mesh, mat, local) in &c.parts {
+        let e = commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), *local)).id();
+        commands.entity(root).add_child(e);
+    }
+    commands
+        .spawn((tf, Visibility::default(), SaBody::new(id, m), FlyingPart { until: time.elapsed_secs() + 20.0 }))
+        .add_child(root);
+}
+
+fn expire_flying_parts(mut commands: Commands, time: Res<Time>, parts: Query<(Entity, &FlyingPart)>) {
+    for (e, p) in &parts {
+        if time.elapsed_secs() > p.until {
+            commands.entity(e).despawn();
         }
     }
 }

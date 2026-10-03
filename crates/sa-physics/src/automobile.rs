@@ -16,6 +16,7 @@ use sa_formats::vehicle::Handling as RawHandling;
 use crate::{
     Ctx,
     collision::{ColLine, ColModel},
+    damage::{CarDamage, init_doors},
     colpoint::ColPoint,
     physical::{Physical, Status, normalise, pf},
     surface::{SURFACE_WHEELBASE, SurfaceInfos},
@@ -212,6 +213,8 @@ pub struct VehicleHandling {
     pub anti_dive: f32,
     pub model_flags: u32,
     pub flags: u32,
+    /// Converted collision damage multiplier (raw * 2000 / mass).
+    pub collision_damage: f32,
     pub trans: Transmission,
 }
 
@@ -286,6 +289,7 @@ impl VehicleHandling {
             anti_dive: h.anti_dive,
             model_flags: h.model_flags,
             flags: h.handling_flags,
+            collision_damage: 1.0 / h.mass * h.collision_damage * 2000.0,
             trans: t,
         }
     }
@@ -356,6 +360,9 @@ pub struct Automobile {
     pub surfaces: SurfaceInfos,
     /// Second steer angle (HB_REARWHEEL_STEER).
     pub steer_angle2: f32,
+    pub damage: CarDamage,
+    /// Model-space door hinge positions (eDoors order), set by the app from the DFF.
+    pub door_hinges: [Option<Vec3>; 6],
     rest_counter: u32,
     avg_move: Vec3,
     avg_turn: Vec3,
@@ -395,6 +402,12 @@ impl Automobile {
         });
         col.bbox_min.z = col.bbox_min.z.min(col.lines[0].end.z);
         col.bound_radius = col.bound_radius.max(col.bbox_min.length()).max(col.bbox_max.length());
+        let damage = CarDamage::new(
+            h.collision_damage,
+            init_doors(h.model_flags, h.model_flags & 0x1 != 0, h.model_flags & 0x2 != 0),
+            col.bbox_max.x,
+            model as u32 * 7919 + 1,
+        );
         Self {
             h,
             model,
@@ -428,6 +441,8 @@ impl Automobile {
             surfaces,
             rest_counter: 0,
             steer_angle2: 0.0,
+            damage,
+            door_hinges: [None; 6],
             avg_move: Vec3::ZERO,
             avg_turn: Vec3::ZERO,
             bbox_max_x: col.bbox_max.x,
@@ -852,11 +867,24 @@ impl BodyLogic for Automobile {
         }
         let skip = self.rest_check(p, ts);
 
+        // Step 4: VehicleDamage (consumes last frame's damage record).
+        let is_player = p.status == Status::Player;
+        self.damage.vehicle_damage(p, ts, is_player);
+        if p.status == Status::Wrecked {
+            self.engine_on = false;
+            self.gas = 0.0;
+        }
+
         // Wheel line results of the last collision passes (raw line fractions).
         for i in 0..4 {
             self.comp[i] = lines.values[i];
             if lines.values[i] < 1.0 {
                 self.wheel_cp[i] = lines.points[i];
+            }
+            // A missing wheel never touches the ground (DoBurstAndSoftGroundRatios).
+            let dm_wheel = i; // same order: 0 FL, 1 RL, 2 FR, 3 RR
+            if self.damage.dm.wheels[dm_wheel] == 2 {
+                self.comp[i] = 1.0;
             }
         }
 
@@ -985,6 +1013,13 @@ impl BodyLogic for Automobile {
             p.move_speed = Vec3::ZERO;
             p.turn_speed.z = 0.0;
         }
+
+        // Step 20: fire and explosion.
+        self.damage.process_fire(p, ts);
+        // PreRender: swinging doors / bonnet.
+        let ok = matches!(p.status, Status::Player | Status::Physics | Status::Abandoned);
+        let hinges = self.door_hinges;
+        self.damage.process_doors(p, ts, &hinges, ok);
 
         self.update_wheel_visuals(p, col, ts);
     }

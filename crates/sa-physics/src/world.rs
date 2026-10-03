@@ -599,6 +599,10 @@ impl World {
     /// Static path of ProcessCollisionSectorList.
     fn static_response(&mut self, i: usize, other: EntityId, cps: &[ColPoint], stuck: bool, ctx: &Ctx) -> Hit {
         let n = cps.len();
+        let other_kind = Some(match other {
+            EntityId::Building(_) => EntityType::Building,
+            EntityId::Body(j) => self.b(j as usize).phys.kind,
+        });
         let other_is_static = true;
         let surfaces = &self.surfaces;
         let a = self.bodies[i].as_mut().unwrap();
@@ -614,7 +618,7 @@ impl World {
                 count += 1;
                 max_imp = max_imp.max(imp);
                 if p.has_e(ef::HAS_CONTACTED) {
-                    p.set_damaged_piece_record(imp, cp, 1.0);
+                    p.set_damaged_piece_record(imp, cp, 1.0, other_kind);
                     continue;
                 }
                 let mut adh = surfaces.adhesive_limit(cp) / n as f32;
@@ -623,7 +627,7 @@ impl World {
                     if class == Some(VehicleClass::Boat) && cp.surface_b == 43 {
                         adh = 0.0;
                     } else {
-                        p.set_damaged_piece_record(imp, cp, 1.0);
+                        p.set_damaged_piece_record(imp, cp, 1.0, other_kind);
                     }
                     let model = p.vehicle.map(|v| v.model).unwrap_or(0);
                     if model == 441 {
@@ -652,7 +656,7 @@ impl World {
                     }
                 } else {
                     adh = 150.0 * adh * imp;
-                    p.set_damaged_piece_record(imp, cp, 1.0);
+                    p.set_damaged_piece_record(imp, cp, 1.0, other_kind);
                 }
                 if p.apply_friction_static(ctx, adh, cp) {
                     p.eflags |= ef::HAS_CONTACTED;
@@ -723,8 +727,8 @@ impl World {
             for cp in cps {
                 if !stuck && !cp.is_wheel_a() && !cp.is_wheel_b() {
                     if let Some((ia, ib)) = pair::apply_collision(ctx, pa, pb, cp, info, false) {
-                        pa.set_damaged_piece_record(ia, cp, 1.0);
-                        pb.set_damaged_piece_record(ib, cp, -1.0);
+                        pa.set_damaged_piece_record(ia, cp, 1.0, Some(pb.kind));
+                        pb.set_damaged_piece_record(ib, cp, -1.0, Some(pa.kind));
                         max_imp_b = max_imp_b.max(ib.abs());
                     }
                 } else {
@@ -752,8 +756,8 @@ impl World {
                 let wheel = if neither { cp.is_wheel_a() } else { cp.is_wheel_a() || cp.is_wheel_b() };
                 if !stuck && !wheel {
                     if let Some((ia, ib)) = pair::apply_collision(ctx, pa, pb, cp, info, false) {
-                        pa.set_damaged_piece_record(ia, cp, 1.0);
-                        pb.set_damaged_piece_record(ib, cp, -1.0);
+                        pa.set_damaged_piece_record(ia, cp, 1.0, Some(pb.kind));
+                        pb.set_damaged_piece_record(ib, cp, -1.0, Some(pa.kind));
                         max_imp_b = max_imp_b.max(ib.abs());
                         let mut adh = surfaces.adhesive_limit(cp) / n as f32;
                         if pa.is_vehicle()
