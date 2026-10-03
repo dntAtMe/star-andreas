@@ -1,4 +1,3 @@
-mod interp;
 mod player;
 mod saphys;
 mod stream;
@@ -14,7 +13,6 @@ use bevy::{
     render::view::screenshot::{Screenshot, save_to_disk},
     window::{CursorGrabMode, CursorOptions},
 };
-use bevy_rapier3d::prelude::*;
 use player::{GameRoot, Mode, OrbitCam, Ped, PlayerPlugin};
 use stream::{StreamCamera, StreamPlugin, Streamer};
 use vehicle::{Driving, Vehicle, VehiclePlugin};
@@ -22,8 +20,6 @@ use world::{World as SaWorld, WorldRes, b2g, g2b};
 
 const DEFAULT_GAME_DIR: &str = r"G:\Programy\Steam\steamapps\common\Grand Theft Auto San Andreas";
 const SKY: Color = Color::srgb(0.62, 0.72, 0.85);
-/// Fixed physics rate: simulation (cars, ped, props) is independent of frame rate.
-const PHYSICS_HZ: f64 = 120.0;
 
 fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(
@@ -64,11 +60,7 @@ fn main() -> anyhow::Result<()> {
     .insert_resource(ClearColor(SKY))
     .insert_resource(GameRoot(root))
     .insert_resource(GlobalAmbientLight { color: Color::WHITE, brightness: 600.0, ..default() })
-    .insert_resource(Time::<Fixed>::from_hz(PHYSICS_HZ))
-    .insert_resource(TimestepMode::Fixed { dt: 1.0 / PHYSICS_HZ as f32, substeps: 1 })
     .add_plugins((
-        RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule(),
-        interp::InterpPlugin,
         StreamPlugin,
         PlayerPlugin,
         VehiclePlugin,

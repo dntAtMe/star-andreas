@@ -10,7 +10,6 @@ sa-formats.workspace = true
 sa-physics = { path = "../sa-physics", features = ["bevy"] }
 anyhow.workspace = true
 bevy.workspace = true
-bevy_rapier3d.workspace = true
 sc2-bevy = { path = "../sc2-bevy", optional = true, default-features = false }
 
 [features]

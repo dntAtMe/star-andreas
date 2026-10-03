@@ -1,5 +1,5 @@
-//! On-foot player: skinned ped model, IFP animation playback, Rapier
-//! kinematic character controller and a third-person orbit camera.
+//! On-foot player: skinned ped model, IFP animation playback, movement on the
+//! ported SA ped physics (`sa_physics::ped`) and a third-person orbit camera.
 //!
 //! The ped skeleton lives in GTA space (Z-up) under a single "model root"
 //! entity rotated -90° about X, so animation keys apply untouched.
@@ -19,24 +19,21 @@ use bevy::{
     transform::TransformSystems,
     window::{CursorGrabMode, CursorOptions},
 };
-use bevy_rapier3d::prelude::*;
 use sa_formats::{dff, ifp, txd};
+use sa_physics::{
+    physical::ef,
+    ped::{JumpKind, PedLogic, ped_col_model, ped_physical},
+    world::EntityId,
+};
 
 use crate::{
-    interp::Interp,
+    saphys::{SaBody, SaPhys, SaPhysExt, gta_matrix},
     stream::{Streamer, convert_texture, make_image},
-    world::{WorldRes, g2b},
+    world::{WorldRes, b2g, g2b},
 };
 
 const PED_MODEL: &str = "fam1";
-const CAPSULE_HALF: f32 = 0.5;
-const CAPSULE_RADIUS: f32 = 0.35;
-const GRAVITY: f32 = 18.0;
-const JUMP_SPEED: f32 = 6.0;
 const BLEND_TIME: f32 = 0.18;
-const WALK_SPEED: f32 = 1.6;
-const RUN_SPEED: f32 = 4.2;
-const SPRINT_SPEED: f32 = 7.5;
 
 const ANIM_IDLE: &str = "idle_stance";
 const ANIM_WALK: &str = "walk_player";
@@ -52,11 +49,11 @@ impl Plugin for PlayerPlugin {
         app.insert_resource(if fly { Mode::Fly } else { Mode::Walk })
             .insert_resource(MouseLock(!fly))
             .add_systems(Startup, spawn_player)
-            // Ped movement is computed per frame and *accumulated* into the kinematic
-            // controller; the next fixed physics step applies all of it. (bevy_rapier
-            // applies the controller by editing Transform, which only sticks for the
-            // first physics step of a frame, so per-step movement would be lost.)
-            .add_systems(Update, (toggle_mode, cursor_lock, player_control, animate_ped).chain())
+            .add_systems(
+                Update,
+                (toggle_mode, cursor_lock, player_control).chain().before(crate::saphys::SaStep),
+            )
+            .add_systems(Update, animate_ped.after(crate::saphys::SaStep))
             .add_systems(
                 PostUpdate,
                 orbit_camera
@@ -95,22 +92,50 @@ pub struct OrbitCam {
 
 #[derive(Component)]
 pub struct Ped {
+    /// The ped's body in the SA physics world.
+    pub sa: EntityId,
     /// Bone entity per DFF frame.
     bones: Vec<Entity>,
     /// Local bind pose per frame.
     bind: Vec<Transform>,
-    /// Frame whose horizontal translation is root motion (stripped).
+    /// Frame whose horizontal translation is root motion (stripped; the
+    /// physics moves the ped from the clip's root velocity instead).
     root_bone: Option<usize>,
-    vel_y: f32,
+    /// Move blend ratio (CPlayerData +0x14): 0 still, 1 walk, 2 run.
+    mbr: f32,
     air_time: f32,
     pub grounded: bool,
     pub frozen: bool,
     anim: AnimPlayer,
 }
 
-impl Ped {
-    pub fn set_velocity_y(&mut self, v: f32) {
-        self.vel_y = v;
+/// Put the player ped's SA body into (or take it out of) a vehicle: while
+/// inside it doesn't collide or move on its own.
+pub fn ped_set_in_vehicle(sa: &mut SaPhys, id: EntityId, inside: bool) {
+    if let Some(b) = sa.world.body_mut(id) {
+        if inside {
+            b.phys.eflags = (b.phys.eflags | ef::IS_STATIC) & !ef::USES_COLLISION;
+        } else {
+            b.phys.eflags = (b.phys.eflags & !ef::IS_STATIC) | ef::USES_COLLISION;
+        }
+        b.phys.move_speed = Vec3::ZERO;
+    }
+    if let Some(ped) = sa.logic_mut::<PedLogic>(id) {
+        ped.standing = false;
+        ped.anim_velocity = Vec2::ZERO;
+    }
+}
+
+/// Teleport the ped's SA body (Bevy-space position, Bevy yaw).
+pub fn ped_teleport(sa: &mut SaPhys, id: EntityId, pos: Vec3, yaw: Option<f32>) {
+    if let Some(b) = sa.world.body_mut(id) {
+        b.phys.matrix.pos = Vec3::from(b2g(pos));
+        b.phys.move_speed = Vec3::ZERO;
+    }
+    if let (Some(yaw), Some(ped)) = (yaw, sa.logic_mut::<PedLogic>(id)) {
+        // Bevy yaw about +Y (0 = facing -Z = GTA north) equals the GTA heading.
+        ped.cur_rot = yaw;
+        ped.aim_rot = yaw;
     }
 }
 
@@ -137,6 +162,8 @@ impl AnimPlayer {
 struct Clip {
     duration: f32,
     frames: Vec<Option<Vec<ifp::Key>>>,
+    /// Average root-bone velocity over the clip, ped-local (x right, y forward), m/s.
+    root_velocity: Vec2,
 }
 
 #[derive(Resource)]
@@ -157,6 +184,7 @@ fn spawn_player(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    mut sa: ResMut<SaPhys>,
 ) -> Result<(), BevyError> {
     let world = &world.0;
     let clump = dff::parse(world.file(&format!("{PED_MODEL}.dff")).context("ped dff")?)?;
@@ -177,10 +205,8 @@ fn spawn_player(
         .context("no HAnim hierarchy")?;
     let frame_of_node = |id: i32| clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == id));
 
-    // Skeleton.
-    let min_z = geo.positions.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
-    let feet = -(CAPSULE_HALF + CAPSULE_RADIUS) - min_z;
-    let model_base = Transform::from_xyz(0.0, feet, 0.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2));
+    // Skeleton. The SA ped origin (1.0 above the feet) is also the model origin.
+    let model_base = Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2));
     let model_root = commands.spawn((model_base, Visibility::default())).id();
     let bind: Vec<Transform> = clump.frames.iter().map(frame_transform).collect();
     let bones: Vec<Entity> = clump
@@ -256,6 +282,7 @@ fn spawn_player(
 
     // Animations, retargeted onto this skeleton's frames.
     let anims = ifp::parse(&std::fs::read(root.0.join("anim/ped.ifp")).context("ped.ifp")?)?;
+    let root_bone = frame_of_node(0).or_else(|| clump.frames.iter().position(|f| f.name.eq_ignore_ascii_case("root")));
     let mut clips = HashMap::new();
     for a in anims {
         let mut frames: Vec<Option<Vec<ifp::Key>>> = vec![None; clump.frames.len()];
@@ -269,7 +296,13 @@ fn spawn_player(
                 }
             }
         }
-        clips.insert(a.name.to_ascii_lowercase(), Clip { duration: a.duration, frames });
+        let root_velocity = root_bone
+            .and_then(|r| frames[r].as_ref())
+            .and_then(|k| Some((k.first()?.pos?, k.last()?.pos?)))
+            .filter(|_| a.duration > 0.0)
+            .map(|(p0, p1)| Vec2::new(p1[0] - p0[0], p1[1] - p0[1]) / a.duration)
+            .unwrap_or(Vec2::ZERO);
+        clips.insert(a.name.to_ascii_lowercase(), Clip { duration: a.duration, frames, root_velocity });
     }
     for name in [ANIM_IDLE, ANIM_WALK, ANIM_RUN, ANIM_SPRINT, ANIM_FALL] {
         if !clips.contains_key(name) {
@@ -278,7 +311,6 @@ fn spawn_player(
     }
     commands.insert_resource(Clips(clips));
 
-    let root_bone = frame_of_node(0).or_else(|| clump.frames.iter().position(|f| f.name.eq_ignore_ascii_case("root")));
     let spawn: Vec<f32> =
         std::env::var("SA_PLAYER").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
     // SA_PLAYER=x,y,z[,heading]: GTA coords; heading in degrees, 0 = north, 90 = west.
@@ -287,37 +319,29 @@ fn spawn_player(
         [x, y, z, hd] => (g2b([x, y, z]), hd),
         _ => (g2b([2495.0, -1682.0, 14.5]), 180.0), // outside CJ's house
     };
+    let tf = Transform::from_translation(spawn).with_rotation(Quat::from_rotation_y(f32::to_radians(heading)));
+    let m = gta_matrix(&tf);
+    // Frozen (static) until the collision around the spawn point has streamed in.
+    let mut phys = ped_physical(m);
+    phys.eflags |= ef::IS_STATIC;
+    let id = sa.world.add_body(phys, ped_col_model(), Box::new(PedLogic::new(true, f32::to_radians(heading))));
     commands
         .spawn((
-            Transform::from_translation(spawn).with_rotation(Quat::from_rotation_y(f32::to_radians(heading))),
+            tf,
             Visibility::default(),
-            RigidBody::KinematicPositionBased,
-            Collider::capsule_y(CAPSULE_HALF, CAPSULE_RADIUS),
-            KinematicCharacterController {
-                offset: CharacterLength::Absolute(0.03),
-                up: Vec3::Y,
-                max_slope_climb_angle: 50f32.to_radians(),
-                min_slope_slide_angle: 55f32.to_radians(),
-                autostep: Some(CharacterAutostep {
-                    max_height: CharacterLength::Absolute(0.45),
-                    min_width: CharacterLength::Absolute(0.15),
-                    include_dynamic_bodies: false,
-                }),
-                snap_to_ground: Some(CharacterLength::Absolute(0.35)),
-                ..default()
-            },
             Ped {
+                sa: id,
                 bones,
                 bind,
                 root_bone,
-                vel_y: 0.0,
+                mbr: 0.0,
                 air_time: 0.0,
                 grounded: false,
                 frozen: true,
                 anim: AnimPlayer { cur: ANIM_IDLE, time: 0.0, prev: None, blend: 1.0 },
             },
             CamFollow { height: 0.6, dist: 3.5 },
-            Interp::new(model_root, model_base, Transform::from_translation(spawn)),
+            SaBody::new(id, m),
         ))
         .add_child(model_root);
     Ok(())
@@ -332,13 +356,13 @@ fn toggle_mode(
     mut sa: ResMut<crate::saphys::SaPhys>,
     driving: Res<crate::vehicle::Driving>,
     cam: Single<(&Transform, &mut crate::FlyCam, &mut OrbitCam), Without<Ped>>,
-    ped: Single<(Entity, &mut Transform, &mut Ped)>,
+    ped: Single<(Entity, &Ped)>,
 ) -> Result<(), BevyError> {
     if !keys.just_pressed(KeyCode::F2) || driving.0.is_some() {
         return Ok(());
     }
     let (cam_tf, mut fly, mut orbit) = cam.into_inner();
-    let (ped_e, mut ped_tf, mut ped) = ped.into_inner();
+    let (ped_e, ped) = *ped;
     let (yaw, pitch, _) = cam_tf.rotation.to_euler(EulerRot::YXZ);
     match *mode {
         Mode::Walk => {
@@ -349,8 +373,8 @@ fn toggle_mode(
         Mode::Fly => {
             // Drop the player onto whatever is below the camera (SA line of sight).
             if let Some(hit) = sa.cast_ray(cam_tf.translation, -Vec3::Y, 500.0, false, Some(ped_e)) {
-                ped_tf.translation = cam_tf.translation - Vec3::Y * (hit.toi - 1.2);
-                ped.vel_y = 0.0;
+                let pos = cam_tf.translation - Vec3::Y * (hit.toi - 1.2);
+                ped_teleport(&mut sa, ped.sa, pos, None);
             }
             *mode = Mode::Walk;
             lock.0 = true;
@@ -387,47 +411,32 @@ fn player_control(
     mode: Res<Mode>,
     st: Res<Streamer>,
     driving: Res<crate::vehicle::Driving>,
+    clips: Option<Res<Clips>>,
     cam: Single<&OrbitCam>,
-    mut probe: Local<Option<(Vec3, f32, std::time::Instant)>>,
-    ped: Single<(
-        &mut Ped,
-        &mut KinematicCharacterController,
-        Option<&KinematicCharacterControllerOutput>,
-        &mut Transform,
-    )>,
+    mut sa: ResMut<SaPhys>,
+    mut ped: Single<&mut Ped>,
 ) {
     let dt = time.delta_secs();
-    let (mut ped, mut kcc, out, mut tf) = ped.into_inner();
+    let ts = dt * 50.0;
+    let id = ped.sa;
     let s = st.stats;
     if ped.frozen {
         // Wait for collision around the spawn point before enabling gravity.
         if s.pending == 0 && s.models_loading == 0 && s.spawned > 0 && time.elapsed_secs() > 1.0 {
             ped.frozen = false;
+            if let Some(b) = sa.world.body_mut(id) {
+                b.phys.eflags &= !ef::IS_STATIC;
+            }
         }
-        kcc.translation = None;
         return;
     }
     if driving.0.is_some() {
-        kcc.translation = None;
         ped.anim.play(ANIM_IDLE);
         return;
     }
+    let Some(clips) = clips else { return };
 
     let auto_walk = std::env::var("SA_AUTOWALK").is_ok();
-    // Debug probe: distance covered in the first 5 simulated seconds of movement.
-    if auto_walk {
-        let (start, t, wall) = probe.get_or_insert((tf.translation, 0.0, std::time::Instant::now()));
-        let before = *t;
-        *t += dt;
-        if before < 5.0 && *t >= 5.0 {
-            let d = (tf.translation - *start).with_y(0.0).length();
-            info!(
-                "ped probe: {d:.2} m in 5.0 sim s ({:.2} m/s), wall {:.2} s",
-                d / 5.0,
-                wall.elapsed().as_secs_f32()
-            );
-        }
-    }
     let active = *mode == Mode::Walk;
     let pressed = |k: KeyCode| active && keys.pressed(k);
     let mut input = Vec2::ZERO;
@@ -449,36 +458,56 @@ fn player_control(
     let right = Vec3::new(cy, 0.0, -sy);
     let dir = forward * input.y + right * input.x;
 
-    let (speed, gait) = if dir == Vec3::ZERO {
-        (0.0, ANIM_IDLE)
-    } else if pressed(KeyCode::AltLeft) {
-        (WALK_SPEED, ANIM_WALK)
-    } else if pressed(KeyCode::ShiftLeft) {
-        (SPRINT_SPEED, ANIM_SPRINT)
+    // PlayerControlZelda: move blend ratio follows the stick (keyboard = full
+    // deflection, 128/60), ramping 0.07*ts per frame; release stops at once.
+    let walk = pressed(KeyCode::AltLeft);
+    let sprint = pressed(KeyCode::ShiftLeft);
+    let target = if dir == Vec3::ZERO { 0.0 } else if walk { 1.0 } else { 128.0 / 60.0 };
+    if target == 0.0 {
+        ped.mbr = 0.0;
     } else {
-        (RUN_SPEED, ANIM_RUN)
+        let step = ts * 0.07;
+        ped.mbr = if target - ped.mbr > step { ped.mbr + step } else if target - ped.mbr < -step { ped.mbr - step } else { target };
+    }
+
+    // Anim selection and its root velocity (SetRealMoveAnim, summarised).
+    let clip_vel = |n: &str| clips.0.get(n).map(|c| c.root_velocity).unwrap_or(Vec2::ZERO);
+    let (gait, vel) = if ped.mbr == 0.0 {
+        (ANIM_IDLE, Vec2::ZERO)
+    } else if sprint && ped.mbr >= 1.0 {
+        (ANIM_SPRINT, clip_vel(ANIM_SPRINT))
+    } else if ped.mbr < 1.0 {
+        (ANIM_WALK, clip_vel(ANIM_WALK))
+    } else if ped.mbr < 2.0 {
+        let k = ped.mbr - 1.0;
+        (ANIM_RUN, clip_vel(ANIM_WALK) * (1.0 - k) + clip_vel(ANIM_RUN) * k)
+    } else {
+        (ANIM_RUN, clip_vel(ANIM_RUN))
     };
 
-    ped.grounded = out.is_some_and(|o| o.grounded);
-    if ped.grounded {
-        ped.air_time = 0.0;
-        ped.vel_y = ped.vel_y.max(-1.0);
-        if pressed(KeyCode::Space) {
-            ped.vel_y = JUMP_SPEED;
-            ped.grounded = false;
-        }
-    } else {
-        ped.air_time += dt;
-    }
-    ped.vel_y = (ped.vel_y - GRAVITY * dt).max(-50.0);
-    let step = dir * speed * dt + Vec3::Y * ped.vel_y * dt;
-    kcc.translation = Some(kcc.translation.unwrap_or(Vec3::ZERO) + step);
-
+    let jump = pressed(KeyCode::Space);
+    let mbr = ped.mbr;
+    let Some(logic) = sa.logic_mut::<PedLogic>(id) else { return };
     if dir != Vec3::ZERO {
-        let target = Quat::from_rotation_y((-dir.x).atan2(-dir.z));
-        tf.rotation = tf.rotation.slerp(target, 1.0 - (-12.0 * dt).exp());
+        // Heading h faces (-sin h, cos h) in GTA space.
+        let d = b2g(dir);
+        logic.aim_rot = (-d[0]).atan2(d[1]);
     }
-    let anim = if ped.air_time > 0.25 { ANIM_FALL } else { gait };
+    // Root motion in m/s -> units per 1/50 s frame.
+    logic.anim_velocity = vel / 50.0;
+    if jump && logic.standing {
+        let hs = if sprint && mbr >= 1.0 { 0.22 } else if mbr >= 1.0 { 0.17 } else { 0.1 };
+        logic.jump_request = Some(JumpKind::Speed(hs));
+    }
+    let standing = logic.standing;
+    let knocked = logic.knocked_down;
+    if knocked > 75.0 {
+        logic.knocked_down = 0.0;
+    }
+
+    ped.grounded = standing;
+    ped.air_time = if standing { 0.0 } else { ped.air_time + dt };
+    let anim = if knocked > 0.0 || ped.air_time > 0.25 { ANIM_FALL } else { gait };
     ped.anim.play(anim);
 }
 
@@ -551,19 +580,17 @@ fn animate_ped(
 
 fn orbit_camera(
     time: Res<Time>,
-    fixed: Res<Time<Fixed>>,
     lock: Res<MouseLock>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     mut sa: ResMut<crate::saphys::SaPhys>,
     mut zoom: Local<Option<f32>>,
     mut idle: Local<f32>,
-    target: Single<(Entity, &Transform, &CamFollow, Option<&crate::vehicle::Vehicle>, Option<&Interp>)>,
+    target: Single<(Entity, &Transform, &CamFollow, Option<&crate::vehicle::Vehicle>)>,
     cam: Single<(&mut Transform, &mut OrbitCam), Without<CamFollow>>,
 ) {
-    let (target_e, body_tf, follow, car, interp) = *target;
-    // Follow the rendered (interpolated) pose, not the raw physics step.
-    let target_tf = &interp.map(|i| i.pose(fixed.overstep_fraction())).unwrap_or(*body_tf);
+    // The target's Transform is already the interpolated SA pose (SaSync).
+    let (target_e, target_tf, follow, car) = *target;
     let (mut tf, mut oc) = cam.into_inner();
     let dt = time.delta_secs();
     let moved = lock.0 && motion.delta != Vec2::ZERO;

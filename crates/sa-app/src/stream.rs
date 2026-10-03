@@ -25,7 +25,6 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     tasks::AsyncComputeTaskPool,
 };
-use bevy_rapier3d::prelude::{Collider, RigidBody};
 use sa_formats::{col, dff, objdat::ObjectPhysics, txd};
 use sa_physics::{
     collision::ColModel as SaColModel,
@@ -109,9 +108,7 @@ struct Model {
 /// Collision for one model.
 #[derive(Default)]
 struct ColSet {
-    /// Rapier colliders (ped / camera): primitive compound and/or triangle mesh.
-    fixed: Vec<Collider>,
-    /// The same model for the SA physics world (GTA space).
+    /// The model's collision for the SA physics world (GTA space).
     sa: Option<Arc<SaColModel>>,
     /// object.dat physics for knockable props.
     prop: Option<ObjectPhysics>,
@@ -177,7 +174,6 @@ fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
                 let mut cols = ColSet::default();
                 if let Some(c) = world.col(&obj.model) {
                     let m = col::parse_model(c)?;
-                    cols.fixed = build_colliders(&m);
                     cols.sa = Some(Arc::new(SaColModel::from_col(&m)));
                     cols.prop = world.physics.get(&obj.model).filter(|p| !p.is_static()).copied();
                 }
@@ -265,36 +261,6 @@ fn build_parts(clump: &dff::Clump) -> Result<Vec<PartCpu>> {
         }
     }
     Ok(parts)
-}
-
-/// Collision shapes in Bevy space: spheres, boxes and the triangle mesh.
-fn build_colliders(m: &col::ColModel) -> Vec<Collider> {
-    let mut out = Vec::new();
-    let mut shapes: Vec<(Vec3, Quat, Collider)> = Vec::new();
-    for s in &m.spheres {
-        shapes.push((g2b(s.center), Quat::IDENTITY, Collider::ball(s.radius)));
-    }
-    for b in &m.boxes {
-        let (lo, hi) = (g2b(b.min), g2b(b.max));
-        let half = ((hi - lo).abs() * 0.5).max(Vec3::splat(0.01));
-        shapes.push(((lo + hi) * 0.5, Quat::IDENTITY, Collider::cuboid(half.x, half.y, half.z)));
-    }
-    if !m.faces.is_empty() {
-        let verts: Vec<Vec3> = m.vertices.iter().map(|&v| g2b(v)).collect();
-        let tris: Vec<[u32; 3]> = m
-            .faces
-            .iter()
-            .map(|f| f.v)
-            .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
-            .collect();
-        if let Ok(c) = Collider::trimesh(verts, tris) {
-            out.push(c);
-        }
-    }
-    if !shapes.is_empty() {
-        out.push(Collider::compound(shapes));
-    }
-    out
 }
 
 /// Noon ambient added to lit geometry (stand-in for timecyc `AmbientObj`).
@@ -577,11 +543,7 @@ fn stream_instances(
                 let tf = Transform::from_translation(inst.pos).with_rotation(inst.rot);
                 let mut ec = commands.spawn((tf, Visibility::default()));
                 // Only full-detail instances collide; LODs are visual only.
-                let collide = inst.near == 0.0 && !model.cols.fixed.is_empty();
-                if collide {
-                    // Props can move (SA physics), so their Rapier proxy follows the transform.
-                    ec.insert(if model.cols.prop.is_some() { RigidBody::KinematicPositionBased } else { RigidBody::Fixed });
-                }
+                let collide = inst.near == 0.0;
                 // SA physics: props are static bodies that can be knocked loose, the rest is geometry.
                 if let (true, Some(sa_col)) = (collide, &model.cols.sa) {
                     let m = gta_matrix(&tf);
@@ -603,11 +565,6 @@ fn stream_instances(
                 }
                 let e = ec
                     .with_children(|c| {
-                        if collide {
-                            for col in &model.cols.fixed {
-                                c.spawn((Transform::default(), col.clone()));
-                            }
-                        }
                         for p in model.parts.iter() {
                             c.spawn((Mesh3d(p.mesh.clone()), MeshMaterial3d(p.material.clone()), range.clone()));
                         }

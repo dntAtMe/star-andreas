@@ -2,8 +2,7 @@
 //! physics (`sa_physics::automobile`).
 //!
 //! The model hierarchy stays in GTA space (Z-up) under a model root rotated
-//! -90° about X. The car entity's transform follows its SA body; a kinematic
-//! Rapier proxy keeps the (still Rapier-based) ped from walking through it.
+//! -90° about X. The car entity's transform follows its SA body.
 
 use std::{collections::HashMap, f32::consts::FRAC_PI_2};
 
@@ -13,7 +12,6 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
 };
-use bevy_rapier3d::prelude::*;
 use sa_formats::{
     col, dff, txd,
     vehicle::{self, CarColors, Handling, VehicleDef},
@@ -26,7 +24,7 @@ use sa_physics::{
 };
 
 use crate::{
-    player::{CamFollow, GameRoot, Mode, Ped, frame_transform},
+    player::{CamFollow, GameRoot, Mode, Ped, frame_transform, ped_set_in_vehicle, ped_teleport},
     saphys::{SaBody, SaPhys, SaPhysExt, SaStep, gta_matrix},
     stream::{convert_texture, make_image},
     world::{WorldRes, g2b},
@@ -277,17 +275,7 @@ fn spawn_vehicle(
         wheels.push(Wheel { dummy: dummy.into(), sa_index, front, pivot });
     }
 
-    // Rapier proxy (ped / camera only): the COL spheres in Bevy space.
     let raw_col = clump.collision.as_deref().map(col::parse_model).transpose()?;
-    let mut shapes: Vec<(Vec3, Quat, Collider)> = Vec::new();
-    if let Some(cm) = &raw_col {
-        for s in &cm.spheres {
-            shapes.push((g2b(s.center), Quat::IDENTITY, Collider::ball(s.radius)));
-        }
-    }
-    if shapes.is_empty() {
-        shapes.push((Vec3::new(0.0, 0.3, 0.0), Quat::IDENTITY, Collider::cuboid(1.0, 0.6, 2.3)));
-    }
 
     let seat = clump
         .frames
@@ -329,8 +317,6 @@ fn spawn_vehicle(
         .spawn((
             tf,
             Visibility::default(),
-            RigidBody::KinematicPositionBased,
-            Collider::compound(shapes),
             SaBody::new(id, m),
             Vehicle { name: def.game_name.clone(), sa: id, wheels, speed: 0.0, seat },
         ))
@@ -395,11 +381,13 @@ fn auto_drive(
     }
     *done = true;
     let yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
-    match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, &name, tf.translation + Vec3::Y, yaw, 0) {
+    let pos = tf.translation + Vec3::Y;
+    match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, &name, pos, yaw, 0) {
         Ok(car) => {
             info!("SA_DRIVE: spawned {name} as {car:?}");
             driving.0 = Some(car);
-            commands.entity(ped_e).insert((ColliderDisabled, Visibility::Hidden)).remove::<CamFollow>();
+            ped_set_in_vehicle(&mut sa, p.sa, true);
+            commands.entity(ped_e).insert(Visibility::Hidden).remove::<CamFollow>();
             commands.entity(car).insert(CamFollow { height: 1.2, dist: 7.0 });
         }
         Err(e) => warn!("SA_DRIVE {name}: {e:#}"),
@@ -411,24 +399,26 @@ fn enter_exit(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     mut driving: ResMut<Driving>,
-    mut ped: Single<(Entity, &mut Transform, &mut Ped), Without<Vehicle>>,
+    mut sa: ResMut<SaPhys>,
+    ped: Single<(Entity, &Transform, &Ped), Without<Vehicle>>,
     cars: Query<(Entity, &Transform, &Vehicle)>,
 ) {
-    let (ped_e, ped_tf, ped_c) = &mut *ped;
+    let (ped_e, ped_tf, ped) = *ped;
     if let Some(car) = driving.0 {
         let Ok((_, car_tf, v)) = cars.get(car) else {
             warn!("driven car {car:?} has no Vehicle; leaving it");
             driving.0 = None;
+            ped_set_in_vehicle(&mut sa, ped.sa, false);
             return;
         };
         // Keep the hidden driver in the seat so the world streams around the car.
-        ped_tf.translation = car_tf.transform_point(v.seat);
+        ped_teleport(&mut sa, ped.sa, car_tf.transform_point(v.seat), None);
         if keys.just_pressed(KeyCode::KeyF) && *mode == Mode::Walk {
             let left = car_tf.rotation * Vec3::NEG_X;
-            ped_tf.translation = car_tf.translation + left * 2.0 + Vec3::Y * 0.6;
-            ped_tf.rotation = Quat::from_rotation_y(car_tf.rotation.to_euler(EulerRot::YXZ).0);
-            ped_c.set_velocity_y(0.0);
-            commands.entity(*ped_e).remove::<ColliderDisabled>().insert((Visibility::Inherited, CamFollow { height: 0.6, dist: 3.5 }));
+            let yaw = car_tf.rotation.to_euler(EulerRot::YXZ).0;
+            ped_set_in_vehicle(&mut sa, ped.sa, false);
+            ped_teleport(&mut sa, ped.sa, car_tf.translation + left * 2.0 + Vec3::Y * 0.6, Some(yaw));
+            commands.entity(ped_e).insert((Visibility::Inherited, CamFollow { height: 0.6, dist: 3.5 }));
             commands.entity(car).remove::<CamFollow>();
             driving.0 = None;
         }
@@ -444,7 +434,8 @@ fn enter_exit(
         .min_by(|a, b| a.1.total_cmp(&b.1));
     if let Some((car, _)) = nearest {
         driving.0 = Some(car);
-        commands.entity(*ped_e).insert((ColliderDisabled, Visibility::Hidden)).remove::<CamFollow>();
+        ped_set_in_vehicle(&mut sa, ped.sa, true);
+        commands.entity(ped_e).insert(Visibility::Hidden).remove::<CamFollow>();
         commands.entity(car).insert(CamFollow { height: 1.2, dist: 7.0 });
     }
 }
