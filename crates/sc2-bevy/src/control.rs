@@ -7,10 +7,10 @@
 use std::collections::HashSet;
 
 use bevy::{prelude::*, window::{CursorGrabMode, CursorOptions, PrimaryWindow}};
-use bevy_rapier3d::prelude::*;
+use sa_physics::bevy_api::SaPhysics;
 use sc2_api::sim::{Alliance, Command};
 
-use crate::{Sc2Link, Sc2Settings, units::Sc2Unit};
+use crate::{Sc2Link, Sc2Settings, anim::Dying, units::Sc2Unit};
 
 pub(crate) struct ControlPlugin;
 
@@ -75,14 +75,12 @@ impl Pointer<'_> {
         self.camera.world_to_viewport(self.cam_tf, w).ok()
     }
 
-    /// World point under the cursor: Rapier hit, else the anchor's ground plane.
-    fn ground(&self, rapier: &ReadRapierContext, plane_y: f32) -> Option<Vec3> {
+    /// World point under the cursor: SA map hit, else the anchor's ground plane.
+    fn ground(&self, phys: Option<&mut SaPhysics>, plane_y: f32) -> Option<Vec3> {
         let ray = self.camera.viewport_to_world(self.cam_tf, self.cursor()?).ok()?;
         let dir = ray.direction.as_vec3();
-        if let Ok(ctx) = rapier.single()
-            && let Some((_, t)) = ctx.cast_ray(ray.origin, dir, 3000.0, true, QueryFilter::only_fixed())
-        {
-            return Some(ray.origin + dir * t);
+        if let Some(hit) = phys.and_then(|ph| ph.cast_ray(ray.origin, dir, 3000.0, true, None)) {
+            return Some(hit.point);
         }
         let t = ray.intersect_plane(Vec3::new(0.0, plane_y, 0.0), InfinitePlane3d::new(Vec3::Y))?;
         Some(ray.get_point(t))
@@ -121,7 +119,7 @@ fn select(
     settings: Res<Sc2Settings>,
     window: Single<(&Window, &CursorOptions), With<PrimaryWindow>>,
     cam: Single<(&Camera, &GlobalTransform), With<Camera3d>>,
-    units: Query<(&Sc2Unit, &Transform)>,
+    units: Query<(&Sc2Unit, &Transform), Without<Dying>>,
     mut boxq: Single<&mut Node, With<SelectBox>>,
     mut drag: Local<Option<Vec2>>,
 ) {
@@ -173,10 +171,10 @@ fn order(
     ctl: Res<Sc2Control>,
     link: Option<Res<Sc2Link>>,
     settings: Res<Sc2Settings>,
-    rapier: ReadRapierContext,
+    mut phys: Option<ResMut<SaPhysics>>,
     window: Single<(&Window, &CursorOptions), With<PrimaryWindow>>,
     cam: Single<(&Camera, &GlobalTransform), With<Camera3d>>,
-    units: Query<(&Sc2Unit, &Transform)>,
+    units: Query<(&Sc2Unit, &Transform), Without<Dying>>,
     mut press: Local<Option<(Vec2, f32)>>,
     time: Res<Time>,
 ) {
@@ -200,7 +198,7 @@ fn order(
         return;
     }
     let plane_y = settings.anchor[2];
-    let Some(hit) = p.ground(&rapier, plane_y) else { return };
+    let Some(hit) = p.ground(phys.as_deref_mut(), plane_y) else { return };
     let to = settings.to_map(info, hit);
     let sel: Vec<u64> = ctl.selected.iter().copied().collect();
     let queue = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -224,10 +222,10 @@ fn keys(
     mut ctl: ResMut<Sc2Control>,
     link: Option<Res<Sc2Link>>,
     settings: Res<Sc2Settings>,
-    rapier: ReadRapierContext,
+    mut phys: Option<ResMut<SaPhysics>>,
     window: Single<&Window, With<PrimaryWindow>>,
     cam: Single<(&Camera, &GlobalTransform), With<Camera3d>>,
-    units: Query<&Sc2Unit>,
+    units: Query<&Sc2Unit, Without<Dying>>,
 ) {
     let Some(link) = link else { return };
     let Some(info) = link.ready() else { return };
@@ -247,7 +245,7 @@ fn keys(
     let p = Pointer { window: &window, camera: cam.0, cam_tf: cam.1 };
     for (key, unit_type, own, count) in SPAWNS {
         if keys.just_pressed(key)
-            && let Some(hit) = p.ground(&rapier, settings.anchor[2])
+            && let Some(hit) = p.ground(phys.as_deref_mut(), settings.anchor[2])
         {
             let owner = if own { info.player_id as i32 } else { 3 - info.player_id as i32 };
             link.send(Command::Spawn { unit_type, owner, at: settings.to_map(info, hit), count });
@@ -255,7 +253,7 @@ fn keys(
     }
 }
 
-fn draw_selection(mut gizmos: Gizmos, ctl: Res<Sc2Control>, settings: Res<Sc2Settings>, units: Query<(&Sc2Unit, &Transform)>) {
+fn draw_selection(mut gizmos: Gizmos, ctl: Res<Sc2Control>, settings: Res<Sc2Settings>, units: Query<(&Sc2Unit, &Transform), Without<Dying>>) {
     for (u, tf) in &units {
         if ctl.selected.contains(&u.tag) {
             let iso = Isometry3d::new(tf.translation + Vec3::Y * 0.05, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
@@ -264,7 +262,7 @@ fn draw_selection(mut gizmos: Gizmos, ctl: Res<Sc2Control>, settings: Res<Sc2Set
     }
 }
 
-fn update_hud(link: Option<Res<Sc2Link>>, mut ctl: ResMut<Sc2Control>, units: Query<&Sc2Unit>, mut hud: Single<&mut Text, With<Hud>>) {
+fn update_hud(link: Option<Res<Sc2Link>>, mut ctl: ResMut<Sc2Control>, units: Query<&Sc2Unit, Without<Dying>>, mut hud: Single<&mut Text, With<Hud>>) {
     let Some(link) = link else { return };
     // Forget dead units.
     let alive: HashSet<u64> = units.iter().map(|u| u.tag).collect();

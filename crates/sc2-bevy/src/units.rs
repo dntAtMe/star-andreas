@@ -3,16 +3,14 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
-use bevy_rapier3d::prelude::*;
+use sa_physics::bevy_api::SaPhysics;
 use sc2_api::sim::Alliance;
 
 use crate::{
     Sc2Link, Sc2Settings, SnapshotArrived,
+    anim::{Dying, Rig, spawn_model},
     models::{ModelState, Models},
 };
-
-/// M3 models face -Y (Bevy +Z after the axis swap); turn them to SC2 facing 0 (+X).
-const MODEL_YAW: f32 = std::f32::consts::FRAC_PI_2;
 
 pub(crate) struct UnitsPlugin;
 
@@ -53,6 +51,11 @@ pub struct Sc2Unit {
 impl Sc2Unit {
     pub fn map_pos(&self) -> [f32; 2] {
         self.curr.0
+    }
+
+    /// Ground speed over the last step, cells per second.
+    pub fn speed_cells(&self, step_secs: f32) -> f32 {
+        Vec2::from_array(self.curr.0).distance(Vec2::from_array(self.prev.0)) / step_secs.max(1e-3)
     }
 }
 
@@ -96,7 +99,7 @@ fn apply_snapshots(
     mut commands: Commands,
     mut arrived: MessageReader<SnapshotArrived>,
     mut tags: ResMut<TagMap>,
-    mut units: Query<&mut Sc2Unit>,
+    mut units: Query<(&mut Sc2Unit, Option<&Rig>)>,
     link: Option<Res<Sc2Link>>,
     settings: Res<Sc2Settings>,
     assets: Res<UnitAssets>,
@@ -113,7 +116,7 @@ fn apply_snapshots(
         seen.insert(u.tag);
         let pos = ([u.pos[0], u.pos[1]], u.facing);
         if let Some(&e) = tags.0.get(&u.tag)
-            && let Ok(mut c) = units.get_mut(e)
+            && let Ok((mut c, _)) = units.get_mut(e)
         {
             c.prev = c.curr;
             c.curr = pos;
@@ -178,7 +181,15 @@ fn apply_snapshots(
     tags.0.retain(|tag, e| {
         let keep = seen.contains(tag);
         if !keep {
-            commands.entity(*e).despawn();
+            // Units with a death animation stay to play it (anim.rs despawns them).
+            match units.get_mut(*e) {
+                Ok((mut c, Some(rig))) if rig.has_death() => {
+                    c.prev = c.curr;
+                    c.engaged = None;
+                    commands.entity(*e).insert(Dying { elapsed: 0.0 });
+                }
+                _ => commands.entity(*e).despawn(),
+            }
         }
         keep
     });
@@ -197,21 +208,14 @@ fn attach_models(
         match models.get(u.unit_type, &u.name) {
             ModelState::Pending => continue,
             ModelState::Failed => {}
-            ModelState::Ready(parts, height) => {
+            ModelState::Ready(asset) => {
                 for c in children.iter().filter(|c| placeholders.contains(*c)) {
                     commands.entity(c).despawn();
                 }
-                let s = settings.scale;
-                u.height = height * s;
-                commands.entity(e).with_children(|p| {
-                    for (mesh, mat) in parts {
-                        p.spawn((
-                            Mesh3d(mesh.clone()),
-                            MeshMaterial3d(mat.clone()),
-                            Transform::from_rotation(Quat::from_rotation_y(MODEL_YAW)).with_scale(Vec3::splat(s)),
-                        ));
-                    }
-                });
+                u.height = asset.height * settings.scale;
+                if let Some(rig) = spawn_model(&mut commands, e, asset, settings.scale) {
+                    commands.entity(e).insert(rig);
+                }
             }
         }
         commands.entity(e).remove::<NeedsModel>();
@@ -222,13 +226,12 @@ fn place_units(
     time: Res<Time>,
     link: Option<Res<Sc2Link>>,
     settings: Res<Sc2Settings>,
-    rapier: ReadRapierContext,
+    mut phys: Option<ResMut<SaPhysics>>,
     mut units: Query<(&mut Sc2Unit, &mut Transform)>,
 ) {
     let Some(link) = link else { return };
     let Some(info) = link.ready() else { return };
     let alpha = ((time.elapsed_secs() - link.snapshot_at) / link.step_secs).clamp(0.0, 1.0);
-    let ctx = rapier.single().ok();
 
     for (mut u, mut tf) in &mut units {
         let p = [
@@ -238,17 +241,19 @@ fn place_units(
         let w = settings.to_world(info, p);
         let xz = Vec2::new(w.x, w.z);
 
-        // Re-probe the ground only after moving a bit. Cast from just above the
-        // last known ground so roofs and bridges overhead are skipped.
+        // Re-probe the ground only after moving ~1 m. Cast from just above the
+        // last known ground so roofs and bridges overhead are skipped, and keep
+        // rays short (SA line-of-sight cost grows with length); only the first
+        // probe searches far down.
         let ground = match u.ground {
-            Some((at, y)) if at.distance_squared(xz) < 0.25 * 0.25 => y,
+            Some((at, y)) if at.distance_squared(xz) < 1.0 => y,
             _ => {
-                let y = ctx
-                    .as_ref()
-                    .and_then(|c| {
-                        let base = u.ground.map_or(w.y, |g| g.1);
+                let y = phys
+                    .as_deref_mut()
+                    .and_then(|ph| {
+                        let (base, reach) = u.ground.map_or((w.y, 200.0), |g| (g.1, 8.0));
                         let from = Vec3::new(w.x, base + 2.5, w.z);
-                        c.cast_ray(from, -Vec3::Y, 200.0, true, QueryFilter::only_fixed()).map(|(_, t)| from.y - t)
+                        ph.cast_ray(from, -Vec3::Y, reach, true, None).map(|h| h.point.y)
                     })
                     .or(u.ground.map(|g| g.1))
                     .unwrap_or(w.y);
@@ -270,7 +275,7 @@ fn draw_bars(
     mut gizmos: Gizmos,
     settings: Res<Sc2Settings>,
     cam: Query<&GlobalTransform, With<Camera3d>>,
-    units: Query<(&Sc2Unit, &Transform)>,
+    units: Query<(&Sc2Unit, &Transform), Without<Dying>>,
 ) {
     let Some(cam) = cam.iter().next() else { return };
     let right = cam.right().as_vec3();
@@ -295,3 +300,4 @@ fn draw_bars(
         }
     }
 }
+

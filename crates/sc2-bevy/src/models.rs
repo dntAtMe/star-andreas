@@ -2,6 +2,9 @@
 //! CASC storage and hands back renderer-ready buffers; the main thread turns
 //! them into meshes/materials and swaps out the placeholder capsules.
 //!
+//! Geometry stays in the model's native Z-up space; [`model_root_transform`]
+//! turns it upright, so skeleton and animation keys apply untouched.
+//!
 //! Unit type -> model is a name heuristic for now (`Marine` ->
 //! `.../assets/units/<race>/marine/marine.m3`); the proper chain is
 //! UnitData -> ActorData -> ModelData in the game data catalogs.
@@ -10,7 +13,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        Mutex,
+        Arc, Mutex,
         mpsc::{Receiver, Sender, channel},
     },
 };
@@ -19,7 +22,7 @@ use anyhow::{Context, Result};
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
-    mesh::{Indices, PrimitiveTopology},
+    mesh::{Indices, PrimitiveTopology, VertexAttributeValues, skinning::SkinnedMeshInverseBindposes},
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
@@ -38,18 +41,79 @@ impl Plugin for ModelsPlugin {
     }
 }
 
+/// M3 models face -Y; this yaw turns them to SC2 facing 0 (+X) once upright.
+const MODEL_YAW: f32 = std::f32::consts::FRAC_PI_2;
+
+/// Model space (Z-up, facing -Y) -> unit space (Y-up, facing +X), scaled.
+pub fn model_root_transform(scale: f32) -> Transform {
+    Transform::from_rotation(Quat::from_rotation_y(MODEL_YAW) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+        .with_scale(Vec3::splat(scale))
+}
+
 /// Model state per SC2 unit type.
 pub enum ModelState {
     Pending,
-    Ready(Vec<(Handle<Mesh>, Handle<StandardMaterial>)>, f32),
+    Ready(Arc<ModelAsset>),
     Failed,
+}
+
+pub struct ModelAsset {
+    pub parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    /// Present when the model has a skeleton; parts are then skinned.
+    pub skin: Option<Handle<SkinnedMeshInverseBindposes>>,
+    pub bones: Vec<BoneRest>,
+    pub sequences: Vec<m3::Sequence>,
+    pub clips: Clips,
+    /// Bind-pose height in model units.
+    pub height: f32,
+}
+
+pub struct BoneRest {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub rest: Transform,
+}
+
+/// Sequence indices for the unit states we animate.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Clips {
+    pub stand: Option<usize>,
+    pub walk: Option<usize>,
+    pub attack: Option<usize>,
+    pub death: Option<usize>,
+}
+
+impl Clips {
+    fn pick(seqs: &[m3::Sequence]) -> Self {
+        // "Walk" beats "Walk 01"; other suffixes ("Walk Fast", "Stand Work") are different states.
+        let find = |base: &str| {
+            seqs.iter()
+                .enumerate()
+                .filter(|(_, s)| !s.layered)
+                .filter_map(|(i, s)| {
+                    let n = s.name.to_ascii_lowercase();
+                    let rest = n.strip_prefix(base)?;
+                    let rank = if rest.is_empty() {
+                        0
+                    } else if rest.starts_with(' ') && rest.trim().chars().all(|c| c.is_ascii_digit()) {
+                        1
+                    } else {
+                        return None;
+                    };
+                    Some((rank, n.len(), i))
+                })
+                .min()
+                .map(|(_, _, i)| i)
+        };
+        Self { stand: find("stand"), walk: find("walk"), attack: find("attack"), death: find("death") }
+    }
 }
 
 #[derive(Resource)]
 pub struct Models {
     tx: Sender<(u32, String)>,
     rx: Mutex<Receiver<(u32, Result<ModelCpu>)>>,
-    pub types: HashMap<u32, ModelState>,
+    types: HashMap<u32, ModelState>,
     textures: HashMap<String, Handle<Image>>,
 }
 
@@ -63,10 +127,12 @@ impl Models {
     }
 }
 
-/// One drawable region, already in Bevy space (Y-up).
+/// One drawable region, in model space (Z-up).
 struct MeshCpu {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    joints: Vec<[u16; 4]>,
+    weights: Vec<[f32; 4]>,
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
     texture: Option<String>,
@@ -76,6 +142,8 @@ struct MeshCpu {
 
 pub struct ModelCpu {
     meshes: Vec<MeshCpu>,
+    bones: Vec<m3::Bone>,
+    sequences: Vec<m3::Sequence>,
     /// Newly decoded textures by path (each sent once).
     textures: Vec<(String, TexCpu)>,
     height: f32,
@@ -174,10 +242,7 @@ fn load(lib: &mut Library, unit: &str) -> Result<ModelCpu> {
         if m.hidden || m.indices.is_empty() || mat.is_some_and(|mt| mt.kind != 1 || mt.blend_mode > 1) {
             continue;
         }
-        // SC2 is Z-up like GTA: (x, y, z) -> Bevy (x, z, -y).
-        let positions: Vec<[f32; 3]> = m.positions.iter().map(|p| [p[0], p[2], -p[1]]).collect();
-        top = positions.iter().fold(top, |t, p| t.max(p[1]));
-        let normals = m.normals.iter().map(|n| [n[0], n[2], -n[1]]).collect();
+        top = m.positions.iter().fold(top, |t, p| t.max(p[2]));
         let texture = mat.and_then(|mt| mt.diffuse.as_deref()).map(|p| p.replace('\\', "/").to_ascii_lowercase());
         if let Some(t) = &texture
             && !lib.sent_textures.contains(t)
@@ -189,8 +254,10 @@ fn load(lib: &mut Library, unit: &str) -> Result<ModelCpu> {
             }
         }
         meshes.push(MeshCpu {
-            positions,
-            normals,
+            positions: m.positions.clone(),
+            normals: m.normals.clone(),
+            joints: m.joints.clone(),
+            weights: m.weights.clone(),
             uvs: m.uvs.clone(),
             indices: m.indices.clone(),
             texture,
@@ -199,7 +266,7 @@ fn load(lib: &mut Library, unit: &str) -> Result<ModelCpu> {
         });
     }
     anyhow::ensure!(!meshes.is_empty(), "{path}: no drawable regions");
-    Ok(ModelCpu { meshes, textures, height: top })
+    Ok(ModelCpu { meshes, bones: model.bones, sequences: model.sequences, textures, height: top })
 }
 
 fn read_texture(lib: &Library, package: &str, path: &str) -> Result<TexCpu> {
@@ -227,7 +294,7 @@ fn to_gpu(d: &Dds) -> Result<TexCpu> {
         Format::Bgra8 => TextureFormat::Bgra8UnormSrgb,
         f => anyhow::bail!("unsupported format {f:?}"),
     };
-    anyhow::ensure!(!d.format.is_compressed() || (d.width % 4 == 0 && d.height % 4 == 0), "BC texture not block aligned");
+    anyhow::ensure!(!d.format.is_compressed() || (d.width.is_multiple_of(4) && d.height.is_multiple_of(4)), "BC texture not block aligned");
     // Keep mips down to 4x4: wgpu wants every BC mip block-aligned in practice.
     let mips: Vec<_> = d.mips().into_iter().take_while(|(w, h, _)| !d.format.is_compressed() || (*w >= 4 && *h >= 4)).collect();
     anyhow::ensure!(!mips.is_empty(), "no mips");
@@ -266,6 +333,7 @@ fn receive_models(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
 ) {
     let Some(mut models) = models else { return };
     let results: Vec<_> = models.rx.lock().map(|rx| rx.try_iter().collect()).unwrap_or_default();
@@ -276,6 +344,7 @@ fn receive_models(
                     let h = images.add(make_image(tex));
                     models.textures.insert(path, h);
                 }
+                let skinned = !cpu.bones.is_empty();
                 let parts = cpu
                     .meshes
                     .into_iter()
@@ -287,6 +356,10 @@ fn receive_models(
                         }
                         if !m.uvs.is_empty() {
                             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, m.uvs);
+                        }
+                        if skinned && !m.joints.is_empty() {
+                            mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(m.joints));
+                            mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, m.weights);
                         }
                         mesh.insert_indices(Indices::U32(m.indices));
                         let texture = m.texture.and_then(|p| models.textures.get(&p).cloned());
@@ -302,7 +375,33 @@ fn receive_models(
                         (meshes.add(mesh), mat)
                     })
                     .collect();
-                ModelState::Ready(parts, cpu.height)
+                let skin = skinned.then(|| {
+                    bindposes.add(SkinnedMeshInverseBindposes::from(
+                        cpu.bones.iter().map(|b| Mat4::from_cols_array_2d(&b.inverse_bind)).collect::<Vec<_>>(),
+                    ))
+                });
+                let bones = cpu
+                    .bones
+                    .iter()
+                    .map(|b| BoneRest {
+                        name: b.name.clone(),
+                        parent: b.parent,
+                        rest: Transform {
+                            translation: Vec3::from_array(b.rest_translation),
+                            rotation: Quat::from_array(b.rest_rotation).normalize(),
+                            scale: Vec3::from_array(b.rest_scale),
+                        },
+                    })
+                    .collect();
+                let clips = Clips::pick(&cpu.sequences);
+                ModelState::Ready(Arc::new(ModelAsset {
+                    parts,
+                    skin,
+                    bones,
+                    sequences: cpu.sequences,
+                    clips,
+                    height: cpu.height,
+                }))
             }
             Err(e) => {
                 warn!("sc2 models: {e:#}");

@@ -424,7 +424,7 @@ fn translate(cmd: Command, dbg: &mut Vec<proto::DebugCommand>, mut route: impl F
                     ability_id: Some(ability),
                     unit_tags,
                     queue_command: Some(queue),
-                    target: target.clone(),
+                    target,
                 })),
             }),
             ..Default::default()

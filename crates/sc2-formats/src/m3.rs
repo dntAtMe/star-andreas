@@ -23,16 +23,23 @@
 //!   bones' default (un-animated) values: a valid pose, but not necessarily the
 //!   bind pose (rotations often differ; skinning with them gives the default pose).
 //!
-//! Animations are not decoded yet. For the record: `MODL.sequences` (SEQS @+16:
-//! name, ms range, flags) pairs 1:1 with `MODL.sequence_transformation_groups`
-//! (STG_ @+40: list of STC_ indices into `MODL.sequence_transformation_collections`
-//! @+28). Each STC_ holds parallel arrays `anim_ids` (u32) and `anim_refs` (u32:
-//! track type in the high 16 bits indexing `[sdev, sd2v, sd3v, sd4q, sdcc, sdr3,
-//! sdu8, sds6, sdu6, sds3, sdu3, sdfg, sdmb]`, entry index in the low 16); e.g. an
-//! SD3V/SD4Q entry has `frames` (i32 ms) and `keys` (VEC3/QUAT). A bone's
-//! location/rotation/scale animation references (BONE +24/+60/+104: header
-//! `interpolation u16, flags u16, id u32`, then the default value) are found by
-//! matching the header `id` against `anim_ids`.
+//! Models face **-Y** (weapons, heads and attack lunges point to -Y).
+//!
+//! Animations ([`Model::sequences`]): `MODL.sequences` (SEQS @+16) pairs 1:1 with
+//! `MODL.sequence_transformation_groups` (STG_ @+40: list of STC_ indices into
+//! `MODL.sequence_transformation_collections` @+28). Each STC_ holds parallel
+//! arrays `anim_ids` (u32) and `anim_refs` (u32: track type in the high 16 bits
+//! indexing `[sdev, sd2v, sd3v, sd4q, sdcc, sdr3, sdu8, sds6, sdu6, sds3, sdu3,
+//! sdfg, sdmb]`, entry index in the low 16); an SD3V/SD4Q entry has `frames`
+//! (i32 ms) and `keys` (VEC3/QUAT). A bone's location/rotation/scale animation
+//! references (BONE +24/+60/+104: header `interpolation u16, flags u16, id u32`,
+//! then the default value) are found by matching the header `id` against
+//! `anim_ids`. Only bone TRS tracks are decoded (events, material/light/particle
+//! tracks are skipped). A group usually has one `<name>_full` STC_; several only
+//! for "concurrent" partial layers (see [`Sequence::layered`]), merged here by
+//! STC_ priority. Frame times share the SEQS time base (m3studio places both on
+//! one timeline); every sequence in the 5.0.16 data starts at 0 anyway, and
+//! [`Track::times_ms`] are returned relative to `start_ms`.
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -51,6 +58,7 @@ pub struct Model {
     pub materials: Vec<Material>,
     /// `(min, max)` of the model bounding box.
     pub bounds: ([f32; 3], [f32; 3]),
+    pub sequences: Vec<Sequence>,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +148,7 @@ pub fn parse(data: &[u8]) -> Result<Model> {
     let bounds = (vec3(m, 136), vec3(m, 148));
 
     let bones = parse_bones(&f, at(80)?, at(bone_rests)?).context("bones")?;
+    let sequences = parse_sequences(&f, m, at(80)?).context("sequences")?;
     let bone_lookup = f.u16s(at(124)?).context("bone lookup")?;
     let materials = parse_materials(&f, m, v, mats_base).context("materials")?;
 
@@ -166,7 +175,7 @@ pub fn parse(data: &[u8]) -> Result<Model> {
         }
     }
 
-    Ok(Model { version: v, vertex_flags, vertex_size: fmt.size, bones, meshes, materials, bounds })
+    Ok(Model { version: v, vertex_flags, vertex_size: fmt.size, bones, meshes, materials, bounds, sequences })
 }
 
 // ---- file / references ----------------------------------------------------
@@ -257,6 +266,10 @@ impl<'a> File<'a> {
         Ok(self.items(r, b"U16_")?.bytes().as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect())
     }
 
+    fn u32s(&self, r: Ref, tag: &[u8; 4]) -> Result<Vec<u32>> {
+        Ok(self.items(r, tag)?.bytes().as_chunks::<4>().0.iter().map(|&c| u32::from_le_bytes(c)).collect())
+    }
+
     fn string(&self, r: Ref) -> Result<String> {
         let b = self.items(r, b"CHAR")?.bytes();
         let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
@@ -275,6 +288,14 @@ fn elem_size(tag: &[u8; 4], v: u32) -> Option<usize> {
     Some(match (tag, v) {
         (b"CHAR" | b"U8__", _) => 1,
         (b"U16_", _) => 2,
+        (b"I32_" | b"U32_", _) => 4,
+        (b"VEC3", _) => 12,
+        (b"QUAT", _) => 16,
+        (b"SEQS", 1) => 96,
+        (b"SEQS", 2) => 92,
+        (b"STG_", 0) => 24,
+        (b"STC_", 4) => 204,
+        (b"SD3V" | b"SD4Q", 0) => 32,
         (b"MODL", 20) => 748,
         (b"MODL", 21) => 760,
         (b"MODL", 23) => 784,
@@ -352,6 +373,199 @@ fn parse_bones(f: &File, bones: Ref, irefs: Ref) -> Result<Vec<Bone>> {
             })
         })
         .collect()
+}
+
+// ---- animations ------------------------------------------------------------
+
+/// One animation: SEQS plus the bone tracks of its STG_ group.
+#[derive(Clone, Debug, Default)]
+pub struct Sequence {
+    /// `<Base> [<Modifiers>] [NN]`, e.g. `Stand`, `Walk`, `Attack 01`, `Stand Work`.
+    /// Numbered names are alternatives of the same animation (weighted by
+    /// `frequency`); modifier words (`Work`, `Spell`, `Gather`, `Fly`, `Cover`,
+    /// `Left`/`Right` turns, `Dance`, `Victory`, ...) are situational variants the
+    /// game picks via actor animation properties.
+    pub name: String,
+    /// As stored in SEQS. Track times are relative to `start_ms`.
+    pub start_ms: i32,
+    pub end_ms: i32,
+    /// `SEQS.flags & 0x1 == 0` (bit 0x1 = "not looping").
+    pub looping: bool,
+    /// Every STC_ of the group is "concurrent": a partial layer (e.g. marine
+    /// `Cover` shield, `Stand Left Ready` legs) meant to play on top of another
+    /// sequence; such SEQS also have flag 0x4 set.
+    pub layered: bool,
+    /// SEQS `frequency`: relative weight among same-named alternatives
+    /// (`Stand`, `Stand 01`, ...); usually 100.
+    pub frequency: u32,
+    /// Ground speed the animation was authored for (walk cycles), in game units
+    /// per 100 s, i.e. game speed * 100 (marine `Walk`: 225 = 2.25); else 0.
+    pub movement_speed: f32,
+    /// Indexed like [`Model::bones`]; a `None` channel keeps the bone's `rest_*` value.
+    pub bones: Vec<BoneTrack>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BoneTrack {
+    pub translation: Option<Track<[f32; 3]>>,
+    /// Quaternions, xyzw.
+    pub rotation: Option<Track<[f32; 4]>>,
+    pub scale: Option<Track<[f32; 3]>>,
+}
+
+impl BoneTrack {
+    pub fn is_empty(&self) -> bool {
+        self.translation.is_none() && self.rotation.is_none() && self.scale.is_none()
+    }
+}
+
+/// Keyframes (never empty) with times relative to the sequence start,
+/// non-decreasing; may contain duplicate times (steps) and keys past the end.
+#[derive(Clone, Debug, Default)]
+pub struct Track<T> {
+    pub times_ms: Vec<i32>,
+    pub keys: Vec<T>,
+    /// From the bone's animation reference header: 0 constant (step), 1 linear.
+    pub interpolation: u16,
+}
+
+impl<T: Copy> Track<T> {
+    /// The keys around `t_ms` and the blend factor between them, clamped at both ends.
+    pub fn locate(&self, t_ms: f32) -> (T, T, f32) {
+        let i = self.times_ms.partition_point(|&x| x as f32 <= t_ms);
+        if i == 0 || i == self.keys.len() {
+            let k = self.keys[i.saturating_sub(1)];
+            return (k, k, 0.0);
+        }
+        let (t0, t1) = (self.times_ms[i - 1] as f32, self.times_ms[i] as f32);
+        let s = if self.interpolation == 0 || t1 <= t0 { 0.0 } else { (t_ms - t0) / (t1 - t0) };
+        (self.keys[i - 1], self.keys[i], s)
+    }
+}
+
+/// Linear interpolation (or step, see [`Track::interpolation`]), clamped at the ends.
+pub fn sample_vec3(track: &Track<[f32; 3]>, t_ms: f32) -> [f32; 3] {
+    let (a, b, s) = track.locate(t_ms);
+    std::array::from_fn(|k| a[k] + (b[k] - a[k]) * s)
+}
+
+/// Normalized lerp along the shorter arc (keys are dense, so nlerp ~ slerp).
+pub fn sample_quat(track: &Track<[f32; 4]>, t_ms: f32) -> [f32; 4] {
+    let (a, mut b, s) = track.locate(t_ms);
+    if (0..4).map(|k| a[k] * b[k]).sum::<f32>() < 0.0 {
+        b = b.map(|x| -x);
+    }
+    let q: [f32; 4] = std::array::from_fn(|k| a[k] + (b[k] - a[k]) * s);
+    let n = q.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n > 0.0 { q.map(|x| x / n) } else { [0.0, 0.0, 0.0, 1.0] }
+}
+
+impl Sequence {
+    pub fn duration_ms(&self) -> i32 {
+        self.end_ms - self.start_ms
+    }
+
+    /// Local `(translation, rotation xyzw, scale)` of every bone at `t_ms` (relative
+    /// to the sequence start); un-animated channels use the bone's `rest_*` value.
+    pub fn local_pose(&self, bones: &[Bone], t_ms: f32) -> Vec<([f32; 3], [f32; 4], [f32; 3])> {
+        bones
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let tr = self.bones.get(i);
+                (
+                    tr.and_then(|t| t.translation.as_ref()).map_or(b.rest_translation, |t| sample_vec3(t, t_ms)),
+                    tr.and_then(|t| t.rotation.as_ref()).map_or(b.rest_rotation, |t| sample_quat(t, t_ms)),
+                    tr.and_then(|t| t.scale.as_ref()).map_or(b.rest_scale, |t| sample_vec3(t, t_ms)),
+                )
+            })
+            .collect()
+    }
+}
+
+/// SEQS[i] pairs with STG_[i]; each STG_ lists STC_ collections whose `anim_ids`
+/// are matched against the BONE animation reference header ids.
+fn parse_sequences(f: &File, modl: &[u8], bones: Ref) -> Result<Vec<Sequence>> {
+    let seqs = f.items(f.reference_in(modl, 16)?, b"SEQS")?;
+    let stcs = f.items(f.reference_in(modl, 28)?, b"STC_")?;
+    let stgs = f.items(f.reference_in(modl, 40)?, b"STG_")?;
+    ensure!(stgs.n == seqs.n, "{} STG_ for {} SEQS", stgs.n, seqs.n);
+    let bones = f.items(bones, b"BONE")?;
+    // Animation id -> (bone, channel 0 T / 1 R / 2 S, interpolation). Each channel is
+    // an animation reference: header (interpolation u16, flags u16, id u32) + values.
+    let mut ids = std::collections::HashMap::new();
+    for i in 0..bones.n {
+        let b = bones.get(i);
+        for (c, o) in [24, 60, 104].into_iter().enumerate() {
+            let id = u32_at(b, o + 4);
+            if id != 0 {
+                ids.insert(id, (i, c, u16_at(b, o)));
+            }
+        }
+    }
+    (0..seqs.n)
+        .map(|s| {
+            let q = seqs.get(s);
+            let (start_ms, end_ms) = (u32_at(q, 20) as i32, u32_at(q, 24) as i32);
+            let mut seq = Sequence {
+                name: f.string(f.reference_in(q, 8)?)?,
+                start_ms,
+                end_ms,
+                looping: u32_at(q, 32) & 1 == 0,
+                layered: false,
+                frequency: u32_at(q, 36),
+                movement_speed: f32_at(q, 28),
+                bones: vec![BoneTrack::default(); bones.n],
+            };
+            // Concurrent STCs are partial layers (e.g. `_Legs2` over `_full`); apply
+            // them by ascending priority so the highest priority wins per channel.
+            let mut group: Vec<usize> =
+                f.u32s(f.reference_in(stgs.get(s), 12)?, b"U32_")?.into_iter().map(|i| i as usize).collect();
+            ensure!(group.iter().all(|&i| i < stcs.n), "STC_ index out of range");
+            seq.layered = !group.is_empty() && group.iter().all(|&i| u16_at(stcs.get(i), 12) != 0);
+            group.sort_by_key(|&i| u16_at(stcs.get(i), 14));
+            for c in group {
+                let c = stcs.get(c);
+                let aids = f.u32s(f.reference_in(c, 20)?, b"U32_")?;
+                let refs = f.u32s(f.reference_in(c, 32)?, b"U32_")?;
+                let (sd3v, sd4q) = (f.items(f.reference_in(c, 72)?, b"SD3V")?, f.items(f.reference_in(c, 84)?, b"SD4Q")?);
+                for (id, r) in aids.iter().zip(&refs) {
+                    let Some(&(bone, ch, interp)) = ids.get(id) else { continue };
+                    // Track type (index into sdev, sd2v, sd3v, sd4q, ...) and entry index.
+                    let (ty, ix) = (r >> 16, (r & 0xffff) as usize);
+                    let t = &mut seq.bones[bone];
+                    match (ch, ty) {
+                        (1, 3) => t.rotation = track(f, &sd4q, ix, b"QUAT", interp, start_ms)?,
+                        (0, 2) => t.translation = track(f, &sd3v, ix, b"VEC3", interp, start_ms)?,
+                        (2, 2) => t.scale = track(f, &sd3v, ix, b"VEC3", interp, start_ms)?,
+                        _ => bail!("bone {bone} channel {ch} animated by track type {ty}"),
+                    }
+                }
+            }
+            Ok(seq)
+        })
+        .collect()
+}
+
+/// Reads entry `ix` of an SD3V/SD4Q list (frames: I32_ ref @0, keys ref @20).
+fn track<const N: usize>(
+    f: &File,
+    list: &Items,
+    ix: usize,
+    tag: &[u8; 4],
+    interpolation: u16,
+    start_ms: i32,
+) -> Result<Option<Track<[f32; N]>>> {
+    ensure!(ix < list.n, "track {ix} of {}", list.n);
+    let e = list.get(ix);
+    let times = f.u32s(f.reference_in(e, 0)?, b"I32_")?;
+    let keys = f.items(f.reference_in(e, 20)?, tag)?;
+    let n = times.len().min(keys.n);
+    Ok((n > 0).then(|| Track {
+        times_ms: times[..n].iter().map(|&t| t as i32 - start_ms).collect(),
+        keys: (0..n).map(|i| std::array::from_fn(|k| f32_at(keys.get(i), k * 4))).collect(),
+        interpolation,
+    }))
 }
 
 // ---- materials -------------------------------------------------------------

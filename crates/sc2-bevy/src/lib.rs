@@ -2,13 +2,14 @@
 //!
 //! The SC2 simulation (`sc2_api::sim`) runs on its own thread; this plugin
 //! mirrors its unit snapshots into entities, interpolates them between game
-//! steps, snaps them to the ground via Rapier ray casts, and turns RTS-style
+//! steps, snaps them to the ground via SA line-of-sight casts (when `SaPhysics` is present), and turns RTS-style
 //! input into SC2 commands.
 //!
 //! SC2 map cells map onto GTA metres around [`Sc2Settings::anchor`]; one cell
 //! is [`Sc2Settings::scale`] metres. Bevy space follows sa-app: GTA (x, y, z)
 //! is Bevy (x, z, -y).
 
+mod anim;
 mod control;
 mod demo;
 mod models;
@@ -116,7 +117,7 @@ impl Plugin for Sc2Plugin {
             .add_systems(Startup, start_sim)
             .add_systems(PreUpdate, pump_events)
             .add_systems(Update, demo::demo)
-            .add_plugins((units::UnitsPlugin, control::ControlPlugin, models::ModelsPlugin));
+            .add_plugins((units::UnitsPlugin, control::ControlPlugin, models::ModelsPlugin, anim::AnimPlugin));
     }
 }
 

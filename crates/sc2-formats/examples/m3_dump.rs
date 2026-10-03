@@ -1,6 +1,7 @@
 //! Parses an `.m3` model from CASC, prints stats + validation, optionally writes OBJ.
-//! `cargo run -p sc2-formats --example m3_dump --release -- [name substring | m3 path | --all [substring]] [sc2 dir]`
-//! `M3_OBJ=out.obj` writes the geometry (one `o` per region) as Wavefront OBJ.
+//! `cargo run -p sc2-formats --example m3_dump --release -- [name substring | m3 path | --all [substring]] [--pose <seq> <t_ms>] [sc2 dir]`
+//! `M3_OBJ=out.obj` writes the geometry (one `o` per region) as Wavefront OBJ, skinned
+//! into the `--pose` sequence/time if given (bind pose otherwise).
 
 use std::{collections::BTreeMap, fmt::Write as _};
 
@@ -13,12 +14,18 @@ use sc2_formats::{
 const MARINE: &str = "mods/liberty.sc2mod/base.sc2assets/assets/units/terran/marine/marine.m3";
 
 fn main() -> anyhow::Result<()> {
-    let arg = std::env::args().nth(1).filter(|s| !s.is_empty()).unwrap_or_else(|| MARINE.into());
-    let dir = std::env::args().nth(if arg == "--all" { 3 } else { 2 }).unwrap_or_else(|| r"G:\SC 2\StarCraft II".into());
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let pose = args.iter().position(|a| a == "--pose").map(|i| {
+        let v: Vec<String> = args.drain(i..(i + 3).min(args.len())).skip(1).collect();
+        (v.first().cloned().unwrap_or_default(), v.get(1).and_then(|t| t.parse::<f32>().ok()).unwrap_or(0.0))
+    });
+    let all = args.first().is_some_and(|a| a == "--all");
+    let arg = args.first().filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| MARINE.into());
+    let dir = args.get(if all { 2 } else { 1 }).cloned().unwrap_or_else(|| r"G:\SC 2\StarCraft II".into());
     let st = Storage::open(dir.as_ref())?;
     let root = Root::parse(&st.read_ckey(&parse_key(st.config_value("root", 0)?)?)?)?;
-    if arg == "--all" {
-        return scan_all(&st, &root, std::env::args().nth(2).unwrap_or_default().to_ascii_lowercase());
+    if all {
+        return scan_all(&st, &root, args.get(1).cloned().unwrap_or_default().to_ascii_lowercase());
     }
 
     let name = resolve(&root, &arg).ok_or_else(|| anyhow::anyhow!("no .m3 matching {arg:?}"))?;
@@ -70,11 +77,125 @@ fn main() -> anyhow::Result<()> {
     }
 
     validate(&model);
+    animations(&model);
     if let Ok(path) = std::env::var("M3_OBJ") {
-        std::fs::write(&path, to_obj(&model))?;
+        let posed = match &pose {
+            Some((seq, t)) => {
+                let q = model.sequences.iter().find(|q| q.name.eq_ignore_ascii_case(seq));
+                let q = q.ok_or_else(|| anyhow::anyhow!("no sequence {seq:?}"))?;
+                println!("posing {:?} at {t} ms", q.name);
+                Some(skin(&model, &world_from(&model, &pose_locals(&model, q, *t, false))))
+            }
+            None => None,
+        };
+        std::fs::write(&path, to_obj(&model, posed.as_deref()))?;
         println!("wrote {path}");
     }
     Ok(())
+}
+
+/// Sequence list, key sanity and posed bounds of Stand / mid-Walk / mid-Attack.
+fn animations(m: &m3::Model) {
+    println!("sequences ({}):", m.sequences.len());
+    let (mut quat_err, mut unsorted, mut past_end, mut tracks) = (0f32, 0, 0, 0);
+    for q in &m.sequences {
+        let animated = q.bones.iter().filter(|b| !b.is_empty()).count();
+        println!(
+            "  {:24} {:>5}..{:<5} ms {:8} freq {:3} speed {:6.1} bones {animated:3}{}",
+            format!("{:?}", q.name),
+            q.start_ms,
+            q.end_ms,
+            if q.looping { "loop" } else { "once" },
+            q.frequency,
+            q.movement_speed,
+            if q.layered { " layered" } else { "" },
+        );
+        for b in &q.bones {
+            if let Some(t) = &b.rotation {
+                quat_err = t.keys.iter().map(|k| (k.iter().map(|x| x * x).sum::<f32>().sqrt() - 1.0).abs()).fold(quat_err, f32::max);
+            }
+            let times = [b.translation.as_ref().map(|t| &t.times_ms), b.rotation.as_ref().map(|t| &t.times_ms), b.scale.as_ref().map(|t| &t.times_ms)];
+            for t in times.into_iter().flatten() {
+                tracks += 1;
+                unsorted += t.windows(2).any(|w| w[1] < w[0]) as usize;
+                past_end += (t.last().is_some_and(|&l| l > q.duration_ms()) || t[0] < 0) as usize;
+            }
+        }
+    }
+    println!("  {tracks} tracks: max |quat|-1 = {quat_err:.2e}, {unsorted} with unsorted times, {past_end} with keys outside 0..=duration");
+
+    let r = |b: ([f32; 3], [f32; 3])| b.0.iter().chain(&b.1).map(|x| format!("{x:6.2}")).collect::<Vec<_>>().join(" ");
+    let bounds = |p: &[Skinned]| {
+        let mut bb = bbox();
+        p.iter().zip(&m.meshes).filter(|(_, mesh)| !mesh.hidden).flat_map(|(p, _)| &p.0).for_each(|&v| grow(&mut bb, v));
+        bb
+    };
+    let bind: Vec<_> = m.meshes.iter().map(|mesh| (mesh.positions.clone(), vec![])).collect();
+    println!("  posed bounds (min xyz, max xyz):");
+    println!("    {:34} {}", "bind", r(bounds(&bind)));
+    let pick = |pre: &str| {
+        let named = m.sequences.iter().filter(|q| !q.layered && q.name.to_ascii_lowercase().starts_with(pre));
+        named.clone().find(|q| q.name.eq_ignore_ascii_case(pre)).or_else(|| named.clone().next())
+    };
+    for (pre, frac) in [("stand", 0.0), ("walk", 0.5), ("attack", 0.5)] {
+        let Some(q) = pick(pre) else { continue };
+        let t = q.duration_ms() as f32 * frac;
+        for bind_fallback in [false, true] {
+            let p = skin(m, &world_from(m, &pose_locals(m, q, t, bind_fallback)));
+            let label = format!("{:?} @{t:.0}{}", q.name, if bind_fallback { " (untracked=bind)" } else { "" });
+            println!("    {label:34} {}", r(bounds(&p)));
+        }
+    }
+}
+
+/// Local matrices at `t_ms`. Untracked bones use `rest_*` (or, for comparison, the
+/// bind-relative transform `IREF(parent) * inverse(IREF(bone))`).
+fn pose_locals(m: &m3::Model, q: &m3::Sequence, t_ms: f32, bind_fallback: bool) -> Vec<M4> {
+    q.local_pose(&m.bones, t_ms)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (t, r, s))| {
+            let b = &m.bones[i];
+            if bind_fallback && q.bones[i].is_empty() {
+                let bind = inverse_affine(&b.inverse_bind);
+                b.parent.map_or(bind, |p| mul(&m.bones[p].inverse_bind, &bind))
+            } else {
+                trs(t, r, s)
+            }
+        })
+        .collect()
+}
+
+/// Skinned positions and normals per mesh for the given bone world matrices.
+fn skin(m: &m3::Model, world: &[M4]) -> Vec<Skinned> {
+    let mats: Vec<M4> = world.iter().zip(&m.bones).map(|(w, b)| mul(w, &b.inverse_bind)).collect();
+    let xf = |s: &M4, p: [f32; 3], w: f32| -> [f32; 3] { std::array::from_fn(|a| s[0][a] * p[0] + s[1][a] * p[1] + s[2][a] * p[2] + s[3][a] * w) };
+    let blend = |j: &[u16; 4], w: &[f32; 4], p: [f32; 3], h: f32| {
+        if mats.is_empty() {
+            return p;
+        }
+        (0..4).filter(|&k| w[k] > 0.0).fold([0.0; 3], |acc, k| {
+            let v = xf(&mats[j[k] as usize], p, h);
+            [acc[0] + w[k] * v[0], acc[1] + w[k] * v[1], acc[2] + w[k] * v[2]]
+        })
+    };
+    m.meshes
+        .iter()
+        .map(|mesh| {
+            let pos = mesh.positions.iter().enumerate().map(|(i, &p)| blend(&mesh.joints[i], &mesh.weights[i], p, 1.0)).collect();
+            let nrm = mesh
+                .normals
+                .iter()
+                .enumerate()
+                .map(|(i, &n)| {
+                    let v = blend(&mesh.joints[i], &mesh.weights[i], n, 0.0);
+                    let l = len(v).max(1e-9);
+                    v.map(|x| x / l)
+                })
+                .collect();
+            (pos, nrm)
+        })
+        .collect()
 }
 
 /// Exact path, else the `.m3` whose file name is `<arg>.m3` (preferring Liberty base), else a substring match.
@@ -186,23 +307,12 @@ fn validate(m: &m3::Model) {
         }
     }
     // Skin with the default pose: world(default) * IREF, and compare bounds.
-    let world = world_matrices(m);
-    let skin: Vec<M4> = world.iter().zip(&m.bones).map(|(w, b)| mul(w, &b.inverse_bind)).collect();
+    let rest: Vec<M4> = m.bones.iter().map(|b| trs(b.rest_translation, b.rest_rotation, b.rest_scale)).collect();
+    let posed = skin(m, &world_from(m, &rest));
     let (mut bind_bb, mut pose_bb) = (bbox(), bbox());
-    for mesh in m.meshes.iter().filter(|m| !m.hidden) {
-        for ((p, j), w) in mesh.positions.iter().zip(&mesh.joints).zip(&mesh.weights) {
-            grow(&mut bind_bb, *p);
-            let mut q = [0f32; 3];
-            for k in 0..4 {
-                if w[k] > 0.0 && !skin.is_empty() {
-                    let s = &skin[j[k] as usize];
-                    for (a, qa) in q.iter_mut().enumerate() {
-                        *qa += w[k] * (s[0][a] * p[0] + s[1][a] * p[1] + s[2][a] * p[2] + s[3][a]);
-                    }
-                }
-            }
-            grow(&mut pose_bb, if skin.is_empty() { *p } else { q });
-        }
+    for (mesh, p) in m.meshes.iter().zip(&posed).filter(|(m, _)| !m.hidden) {
+        mesh.positions.iter().for_each(|&v| grow(&mut bind_bb, v));
+        p.0.iter().for_each(|&v| grow(&mut pose_bb, v));
     }
     let r = |b: ([f32; 3], [f32; 3])| b.0.iter().chain(&b.1).map(|x| format!("{x:.2}")).collect::<Vec<_>>().join(" ");
 
@@ -225,23 +335,24 @@ fn validate(m: &m3::Model) {
 }
 
 type M4 = [[f32; 4]; 4];
+/// Per-mesh skinned positions and normals.
+type Skinned = (Vec<[f32; 3]>, Vec<[f32; 3]>);
 
-fn world_matrices(m: &m3::Model) -> Vec<M4> {
-    let mut out: Vec<Option<M4>> = vec![None; m.bones.len()];
-    fn get(m: &m3::Model, out: &mut Vec<Option<M4>>, i: usize, depth: usize) -> M4 {
+/// World matrices from per-bone local matrices (parents are not necessarily first).
+fn world_from(m: &m3::Model, local: &[M4]) -> Vec<M4> {
+    fn get(m: &m3::Model, local: &[M4], out: &mut Vec<Option<M4>>, i: usize, depth: usize) -> M4 {
         if let Some(w) = out[i] {
             return w;
         }
-        let b = &m.bones[i];
-        let local = trs(b.rest_translation, b.rest_rotation, b.rest_scale);
-        let w = match b.parent {
-            Some(p) if depth < m.bones.len() => mul(&get(m, out, p, depth + 1), &local),
-            _ => local,
+        let w = match m.bones[i].parent {
+            Some(p) if depth < m.bones.len() => mul(&get(m, local, out, p, depth + 1), &local[i]),
+            _ => local[i],
         };
         out[i] = Some(w);
         w
     }
-    (0..m.bones.len()).map(|i| get(m, &mut out, i, 0)).collect()
+    let mut out = vec![None; m.bones.len()];
+    (0..m.bones.len()).map(|i| get(m, local, &mut out, i, 0)).collect()
 }
 
 fn bbox() -> ([f32; 3], [f32; 3]) {
@@ -300,15 +411,16 @@ fn len(a: [f32; 3]) -> f32 {
 
 /// OBJ (Z-up as stored; OBJ viewers assume Y-up, so expect the model lying on its back
 /// unless the viewer has a Z-up option). V is flipped to OBJ's bottom-left convention.
-fn to_obj(m: &m3::Model) -> String {
+fn to_obj(m: &m3::Model, posed: Option<&[Skinned]>) -> String {
     let mut s = String::from("# m3_dump\n");
     let mut base = 1;
     for (r, mesh) in m.meshes.iter().enumerate() {
         let _ = writeln!(s, "o region{r}{}", mesh.material.map(|i| format!("_{}", m.materials[i].name)).unwrap_or_default());
-        for p in &mesh.positions {
+        let (pos, nrm) = posed.map_or((&mesh.positions, &mesh.normals), |p| (&p[r].0, &p[r].1));
+        for p in pos {
             let _ = writeln!(s, "v {} {} {}", p[0], p[1], p[2]);
         }
-        for n in &mesh.normals {
+        for n in nrm {
             let _ = writeln!(s, "vn {} {} {}", n[0], n[1], n[2]);
         }
         for t in &mesh.uvs {
@@ -339,6 +451,8 @@ fn scan_all(st: &Storage, root: &Root, filter: String) -> anyhow::Result<()> {
         root.names().filter(|(n, _)| n.ends_with(".m3") && n.contains(&filter)).map(|(n, k)| (n.to_string(), k)).collect();
     let (mut versions, mut flags, mut errors) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::<String, Vec<String>>::new());
     let (mut ok, mut read_fail, mut unbatched, mut verts) = (0, 0, 0, 0usize);
+    let (mut seqs, mut layered, mut offset, mut quat_err) = (0, 0, BTreeMap::<&str, usize>::new(), 0f32);
+    let mut seq_versions = BTreeMap::new();
     let t = std::time::Instant::now();
     for (n, k) in &names {
         let Ok(d) = st.read_ckey(k) else {
@@ -352,6 +466,25 @@ fn scan_all(st: &Storage, root: &Root, filter: String) -> anyhow::Result<()> {
                 *flags.entry(m.vertex_flags).or_insert(0) += 1;
                 unbatched += m.meshes.iter().filter(|m| m.hidden).count();
                 verts += m.meshes.iter().map(|m| m.positions.len()).sum::<usize>();
+                *seq_versions.entry(m.sequences.len().min(1)).or_insert(0) += 1;
+                for q in &m.sequences {
+                    seqs += 1;
+                    layered += q.layered as usize;
+                    let times = q.bones.iter().flat_map(|b| {
+                        [b.translation.as_ref().map(|t| &t.times_ms), b.rotation.as_ref().map(|t| &t.times_ms), b.scale.as_ref().map(|t| &t.times_ms)]
+                    });
+                    let (lo, hi) = times.flatten().fold((i32::MAX, i32::MIN), |(lo, hi), t| (lo.min(t[0]), hi.max(*t.last().unwrap())));
+                    // Times are stored minus start: classify where they land.
+                    if q.start_ms != 0 && lo <= hi {
+                        let k = if lo >= 0 { "start!=0, keys within 0..(after rebasing)" } else if lo >= -q.start_ms { "start!=0, keys before start (stored relative?)" } else { "start!=0, other" };
+                        *offset.entry(k).or_insert(0) += 1;
+                    }
+                    for b in &q.bones {
+                        if let Some(t) = &b.rotation {
+                            quat_err = t.keys.iter().map(|k| (k.iter().map(|x| x * x).sum::<f32>().sqrt() - 1.0).abs()).fold(quat_err, f32::max);
+                        }
+                    }
+                }
             }
             Err(e) => {
                 let key = format!("{e:#}");
@@ -364,6 +497,7 @@ fn scan_all(st: &Storage, root: &Root, filter: String) -> anyhow::Result<()> {
     println!("MODL versions: {versions:?}");
     println!("vertex flags: {:?}", flags.iter().map(|(f, c)| format!("{f:#x}:{c}")).collect::<Vec<_>>());
     println!("hidden/unbatched regions: {unbatched}, total vertices {verts}");
+    println!("models without/with sequences: {seq_versions:?}; {seqs} sequences, {layered} layered; max |quat|-1 {quat_err:.2e}; {offset:?}");
     for (e, files) in &errors {
         println!("{} x {e}\n    e.g. {:?}", files.len(), &files[..files.len().min(3)]);
     }
