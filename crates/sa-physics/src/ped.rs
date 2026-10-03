@@ -1,0 +1,381 @@
+//! `CPed` physics: the shared ped collision model, movement from animation
+//! root motion (CalculateNewOrientation/Velocity, UpdatePosition), jumping,
+//! and the ped's own entity-collision (ground line) state.
+//!
+//! The ped's origin is 1.0 above its feet. Ground contact comes only from a
+//! vertical line probe (see `World::ped_entity_collision`), never from a
+//! contact point.
+//!
+//! Not ported: aiming col model (Ped2 sensors), riding moving ground entities
+//! (their velocity is not added), buoyancy, fall damage, steep-surface slide,
+//! NPC turn ramping details beyond the documented formula.
+
+use std::f32::consts::{PI, TAU};
+
+use glam::{Vec2, Vec3};
+
+use crate::{
+    Ctx,
+    collision::{ColLine, ColModel, ColSphere, Surf},
+    physical::{EntityType, Matrix, Physical, pf},
+    world::{BodyLogic, EntityId, LineHits},
+};
+
+pub const PED_MASS: f32 = 70.0;
+pub const PED_TURN_MASS: f32 = 100.0;
+pub const PED_AIR_RESISTANCE: f32 = 0.4 / 70.0;
+pub const PED_ELASTICITY: f32 = 0.05;
+/// Surface type of peds (material 62).
+pub const SURFACE_PED: u8 = 62;
+pub const NO_CEILING: f32 = 99999.99;
+
+/// `ms_colModelPed1` (0x968DF0): three 0.35 spheres; the lines are added per call.
+pub fn ped_col_model() -> ColModel {
+    let s = |z: f32, piece: u8| ColSphere {
+        center: Vec3::new(0.0, 0.0, z),
+        radius: 0.35,
+        surf: Surf { material: SURFACE_PED, piece, lighting: 0 },
+    };
+    ColModel {
+        bbox_min: Vec3::new(-0.35, -0.35, -1.0),
+        bbox_max: Vec3::new(0.35, 0.35, 0.95),
+        bound_center: Vec3::ZERO,
+        bound_radius: 1.0,
+        spheres: vec![s(-0.2, 0), s(0.200_000_05, 1), s(0.6, 2)],
+        ..Default::default()
+    }
+}
+
+/// A Physical configured like the CPed constructor (0x5E8030).
+pub fn ped_physical(matrix: Matrix) -> Physical {
+    let mut p = Physical::new(EntityType::Ped, matrix);
+    p.flags |= pf::DISABLE_TURN_FORCE | pf::KEEP_COLLISION_RECORDS;
+    p.mass = PED_MASS;
+    p.turn_mass = PED_TURN_MASS;
+    p.air_resistance = PED_AIR_RESISTANCE;
+    p.elasticity = PED_ELASTICITY;
+    p
+}
+
+/// `CGeneral::LimitRadianAngle` (0x53CB50).
+pub fn limit_radian_angle(mut a: f32) -> f32 {
+    a = a.clamp(-25.0, 25.0);
+    while a > PI {
+        a -= TAU;
+    }
+    while a < -PI {
+        a += TAU;
+    }
+    a
+}
+
+/// Ped state the physics reads/writes (the CPed fields of the notes).
+pub struct PedLogic {
+    pub is_player: bool,
+    /// m_fCurrentRotation / m_fAimedRotation (heading h faces (-sin h, cos h)).
+    pub cur_rot: f32,
+    pub aim_rot: f32,
+    /// Heading change rate, degrees per frame (pedstats; default 15).
+    pub turn_rate: f32,
+    turn_factor: f32,
+    /// Root-motion velocity of the playing animations, ped-local
+    /// (x right, y forward), units per 1/50 s frame.
+    pub anim_velocity: Vec2,
+    pub standing: bool,
+    pub was_standing: bool,
+    pub ground_normal: Vec3,
+    pub ground_surface: u8,
+    /// Ground entity (vehicle/object) the ped stands on, if any.
+    pub ground_entity: Option<EntityId>,
+    pub ceiling_z: f32,
+    /// Player ceiling probe enable (ped+0x478 & 0x100).
+    pub ceiling_probe: bool,
+    /// Set by the app to request a jump; consumed by ProcessControl.
+    pub jump_request: Option<JumpKind>,
+    /// Frames since knocked down by a vehicle (0 = not knocked down).
+    pub knocked_down: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JumpKind {
+    /// Horizontal launch speed: 0.1 walk, 0.17 run, 0.22 sprint (units/frame).
+    Speed(f32),
+}
+
+impl PedLogic {
+    pub fn new(is_player: bool, heading: f32) -> Self {
+        Self {
+            is_player,
+            cur_rot: heading,
+            aim_rot: heading,
+            turn_rate: 15.0,
+            turn_factor: 0.1,
+            anim_velocity: Vec2::ZERO,
+            standing: false,
+            was_standing: false,
+            ground_normal: Vec3::Z,
+            ground_surface: 0,
+            ground_entity: None,
+            ceiling_z: NO_CEILING,
+            ceiling_probe: false,
+            jump_request: None,
+            knocked_down: 0.0,
+        }
+    }
+
+    /// First half of 0x5E4C50: turn `cur_rot` towards `aim_rot`.
+    fn calculate_new_orientation(&mut self, ts: f32) {
+        let lim = self.turn_rate * 0.017_453_292 * ts;
+        self.cur_rot = limit_radian_angle(self.cur_rot);
+        let mut a = limit_radian_angle(self.aim_rot);
+        if self.cur_rot + PI < a {
+            a -= TAU;
+        } else if self.cur_rot - PI > a {
+            a += TAU;
+        }
+        let d = a - self.cur_rot;
+        if self.is_player {
+            self.turn_factor = 1.0;
+        } else if d >= 0.0 && self.turn_factor < 0.0 {
+            self.turn_factor = 0.1;
+        } else if d < 0.0 && self.turn_factor > 0.0 {
+            self.turn_factor = -0.1;
+        }
+        let step = self.turn_factor.abs() * lim;
+        if d > step {
+            self.cur_rot += step;
+            self.turn_factor = (self.turn_factor + ts * 0.1).min(1.0);
+        } else if d < -step {
+            self.cur_rot -= step;
+            self.turn_factor = (self.turn_factor - ts * 0.1).max(-1.0);
+        } else if !self.is_player && d.abs() > 0.1 * lim {
+            self.cur_rot += 0.5 * d;
+            self.turn_factor *= 0.5;
+        } else {
+            self.cur_rot += d;
+            self.turn_factor = (d.abs() / lim.max(1e-9)).max(0.1);
+        }
+    }
+
+    /// Second half of 0x5E4C50: slope-corrected anim velocity in world xy.
+    fn anim_world_velocity(&self, m: &Matrix) -> Vec2 {
+        let nf = self.ground_normal.dot(m.fwd);
+        let nr = self.ground_normal.dot(m.right);
+        let sf = (1.0 - nf * nf).max(0.0).sqrt();
+        let sr = (1.0 - nr * nr).max(0.0).sqrt();
+        let f = Vec2::new(m.fwd.x, m.fwd.y);
+        let r = Vec2::new(m.right.x, m.right.y);
+        f * (sf * self.anim_velocity.y) + r * (sr * self.anim_velocity.x)
+    }
+
+    /// `CTaskSimpleJump::Launch` (0x679B80).
+    fn launch_jump(&mut self, p: &mut Physical, hs: f32) {
+        let up = if self.is_player { 8.5 } else { 4.5 };
+        p.apply_move_force(Vec3::new(0.0, 0.0, up));
+        let mv = Vec2::new(p.move_speed.x, p.move_speed.y);
+        if mv.length_squared() < hs * hs || self.ground_entity.is_some() {
+            p.move_speed.x = -self.cur_rot.sin() * hs;
+            p.move_speed.y = self.cur_rot.cos() * hs;
+        }
+        self.standing = false;
+    }
+}
+
+/// Rotate the matrix to heading `h` about Z, keeping position (`CMatrix::SetRotateZOnly`-style).
+pub fn set_heading(m: &mut Matrix, h: f32) {
+    let (s, c) = h.sin_cos();
+    m.right = Vec3::new(c, s, 0.0);
+    m.fwd = Vec3::new(-s, c, 0.0);
+    m.up = Vec3::Z;
+}
+
+impl BodyLogic for PedLogic {
+    /// CPed::ProcessControl (0x5E8CD0), the physics-relevant steps.
+    fn process_control(&mut self, p: &mut Physical, _col: &mut ColModel, ctx: &Ctx, _lines: &LineHits) {
+        let ts = ctx.ts;
+        self.was_standing = false;
+        self.ceiling_z = NO_CEILING;
+        if self.knocked_down > 0.0 {
+            self.knocked_down += ts;
+        }
+
+        // Jump task (from the intelligence step).
+        if let Some(JumpKind::Speed(hs)) = self.jump_request.take() {
+            if self.standing {
+                self.launch_jump(p, hs);
+            }
+        }
+
+        // Step 12: rising cap.
+        if !self.standing && p.move_speed.z > 0.25 {
+            if self.is_player {
+                p.move_speed.z = 0.25;
+            } else {
+                p.move_speed *= 0.95f32.powf(ts);
+            }
+        }
+
+        // Step 13: CPhysical::ProcessControl (NPC zero-speed skip not needed for the player).
+        p.process_control(ctx);
+
+        // Step 15: orientation and anim velocity.
+        self.calculate_new_orientation(ts);
+        let anim_vel = self.anim_world_velocity(&p.matrix);
+
+        // Step 16: UpdatePosition (0x5E1B10), static-ground path.
+        if self.standing {
+            set_heading(&mut p.matrix, self.cur_rot);
+            // On static ground the horizontal velocity is exactly the anim velocity.
+            p.move_speed.x = anim_vel.x;
+            p.move_speed.y = anim_vel.y;
+        }
+        // CPlayerPed::ProcessControl enables the ceiling probe afterwards.
+        self.ceiling_probe = self.is_player;
+    }
+
+    /// 0x5E3E90 SpecialEntityCalcCollisionSteps.
+    fn collision_steps(&self, p: &Physical, ts: f32) -> (u8, bool) {
+        let d = p.move_speed.length() * ts;
+        if !self.is_player {
+            if d * d < 0.09 {
+                return (1, false);
+            }
+            return ((d * 5.0).ceil().clamp(1.0, 255.0) as u8, false);
+        }
+        let steps = if self.ground_entity.is_some() {
+            (d * 6.666_666_5).ceil().max(4.0)
+        } else {
+            (d * 3.333_333_3).ceil().max(2.0)
+        };
+        (steps.min(255.0) as u8, false)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// The two probe lines for one entity-collision call (model space).
+pub fn ped_lines(was_standing: bool, ceiling_probe: bool, ts: f32) -> Vec<ColLine> {
+    let k = ts * -0.15;
+    let mut l0 = ColLine { start: Vec3::ZERO, end: Vec3::new(0.0, 0.0, -1.0) };
+    if was_standing {
+        l0.end.z += k;
+    }
+    let mut out = vec![l0];
+    if ceiling_probe {
+        let top = 0.6 + 0.35;
+        let t = -0.2 - 0.35 + 1.0;
+        out.push(ColLine { start: Vec3::new(0.0, 0.0, top - t), end: Vec3::new(0.0, 0.0, top + t) });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        collision::{ColBox, ColTriangle, TrianglePlane},
+        world::World,
+    };
+
+    fn ground() -> Arc<ColModel> {
+        let s = 100.0;
+        let verts = vec![Vec3::new(-s, -s, 0.0), Vec3::new(s, -s, 0.0), Vec3::new(s, s, 0.0), Vec3::new(-s, s, 0.0)];
+        let tris = vec![
+            ColTriangle { v: [0, 2, 1], material: 1, light: 0 },
+            ColTriangle { v: [0, 3, 2], material: 1, light: 0 },
+        ];
+        let planes = tris
+            .iter()
+            .map(|t| TrianglePlane::new(verts[t.v[0] as usize], verts[t.v[1] as usize], verts[t.v[2] as usize]))
+            .collect();
+        Arc::new(ColModel {
+            bbox_min: Vec3::new(-s, -s, -0.1),
+            bbox_max: Vec3::new(s, s, 0.1),
+            bound_radius: s * 1.5,
+            verts,
+            tris,
+            planes,
+            ..Default::default()
+        })
+    }
+
+    /// An axis-aligned block from y = y0 forward, `h` high.
+    fn block(y0: f32, h: f32) -> Arc<ColModel> {
+        let b = ColBox { min: Vec3::new(-10.0, y0, 0.0), max: Vec3::new(10.0, y0 + 10.0, h), surf: Surf::default() };
+        let c = (b.min + b.max) * 0.5;
+        Arc::new(ColModel {
+            bbox_min: b.min,
+            bbox_max: b.max,
+            bound_center: c,
+            bound_radius: (b.max - c).length(),
+            boxes: vec![b],
+            ..Default::default()
+        })
+    }
+
+    fn world_with_ped(z: f32) -> (World, crate::world::EntityId) {
+        let mut w = World::default();
+        w.add_building(Matrix::IDENTITY, ground());
+        let m = Matrix { pos: Vec3::new(0.0, 0.0, z), ..Matrix::IDENTITY };
+        let id = w.add_body(ped_physical(m), ped_col_model(), Box::new(PedLogic::new(true, 0.0)));
+        (w, id)
+    }
+
+    fn ped(w: &World, id: crate::world::EntityId) -> (&Physical, &PedLogic) {
+        let b = w.body(id).unwrap();
+        (&b.phys, b.logic.as_any().downcast_ref::<PedLogic>().unwrap())
+    }
+
+    #[test]
+    fn falls_and_stands_one_unit_above_ground() {
+        let (mut w, id) = world_with_ped(3.0);
+        for _ in 0..60 {
+            w.process(1.0);
+        }
+        let (p, s) = ped(&w, id);
+        assert!(s.standing);
+        assert!((p.matrix.pos.z - 1.0).abs() < 0.02, "z = {}", p.matrix.pos.z);
+    }
+
+    #[test]
+    fn walks_at_anim_speed_and_climbs_a_curb_but_not_a_wall() {
+        let (mut w, id) = world_with_ped(1.0);
+        w.add_building(Matrix::IDENTITY, block(3.0, 0.2)); // curb 3 m ahead
+        let set_anim = |w: &mut World| {
+            w.body_mut(id).unwrap().logic.as_any_mut().downcast_mut::<PedLogic>().unwrap().anim_velocity = Vec2::new(0.0, 0.1);
+        };
+        for _ in 0..10 {
+            w.process(1.0);
+        }
+        set_anim(&mut w);
+        for _ in 0..50 {
+            w.process(1.0);
+        }
+        let (p, s) = ped(&w, id);
+        // 0.1 units/frame forward (+Y) for 50 frames, up onto the 0.2 curb.
+        assert!(p.matrix.pos.y > 4.0, "y = {}", p.matrix.pos.y);
+        assert!(s.standing);
+        assert!((p.matrix.pos.z - 1.2).abs() < 0.05, "z = {}", p.matrix.pos.z);
+
+        let (mut w, id) = world_with_ped(1.0);
+        w.add_building(Matrix::IDENTITY, block(3.0, 2.0)); // wall 3 m ahead
+        for _ in 0..10 {
+            w.process(1.0);
+        }
+        set_anim(&mut w);
+        for _ in 0..80 {
+            w.process(1.0);
+        }
+        let (p, _) = ped(&w, id);
+        assert!(p.matrix.pos.y < 3.0 && p.matrix.pos.y > 2.3, "stopped at y = {}", p.matrix.pos.y);
+        assert!((p.matrix.pos.z - 1.0).abs() < 0.05);
+    }
+}

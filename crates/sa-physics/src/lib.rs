@@ -9,6 +9,7 @@ pub mod bevy_api;
 pub mod collision;
 pub mod colpoint;
 pub mod pair;
+pub mod ped;
 pub mod physical;
 pub mod surface;
 pub mod world;

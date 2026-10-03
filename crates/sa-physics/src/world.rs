@@ -20,7 +20,8 @@ use crate::{
     collision::{ColModel, MAX_COLPOINTS, process_col_models},
     colpoint::ColPoint,
     pair::{self, PairInfo},
-    physical::{EntityType, Matrix, Physical, Status, VehicleClass, ef, pf},
+    ped::{NO_CEILING, PedLogic, ped_lines},
+    physical::{EntityType, Matrix, Physical, Status, VehicleClass, ef, normalise, pf},
     surface::{SURFACE_WHEELBASE, SurfaceInfos},
 };
 
@@ -123,6 +124,7 @@ pub struct World {
     free_bodies: Vec<u32>,
     scan_code: u16,
     pub surfaces: SurfaceInfos,
+    last_ts: f32,
 }
 
 impl Default for World {
@@ -141,6 +143,7 @@ impl World {
             free_bodies: Vec::new(),
             scan_code: 0,
             surfaces,
+            last_ts: 1.0,
         }
     }
 
@@ -270,6 +273,7 @@ impl World {
 
     /// One physics frame with timestep `ts` (in 1/50 s frames).
     pub fn process(&mut self, ts: f32) {
+        self.last_ts = ts;
         let mut ctx = Ctx::new(ts);
         let moving: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))
@@ -385,7 +389,8 @@ impl World {
             && p.turn_speed == Vec3::ZERO
             && !p.has(pf::UNK_800)
             && p.status != Status::Player
-            && p.kind != EntityType::Vehicle;
+            && p.kind != EntityType::Vehicle
+            && p.kind != EntityType::Ped;
         if still {
             return self.mark_safe(i, saved_matrix.pos, saved_elasticity);
         }
@@ -480,6 +485,9 @@ impl World {
     /// 0x546D00 ProcessEntityCollision: contacts of body `i` against `other`
     /// (also accumulates `i`'s wheel-line hits).
     fn process_entity_collision(&mut self, i: usize, other: EntityId, cps: &mut [ColPoint; MAX_COLPOINTS]) -> usize {
+        if self.b(i).logic.as_any().is::<PedLogic>() {
+            return self.ped_entity_collision(i, other, cps, self.last_ts);
+        }
         let (other_mat, other_col): (Matrix, *const ColModel) = match other {
             EntityId::Building(bi) => {
                 let b = self.buildings[bi as usize].as_ref().unwrap();
@@ -524,6 +532,18 @@ impl World {
     /// 0x54D920 CheckCollision (+ ProcessCollisionSectorList for every candidate).
     fn check_collision(&mut self, i: usize, ctx: &Ctx) -> bool {
         self.bm(i).phys.eflags &= !ef::COLLISION_PROCESSED;
+        // Peds: forget the ground entity, standing -> was standing.
+        {
+            let b = self.bm(i);
+            let probe_like = b.phys.flags & (pf::PROBE | pf::IN_SHIFT | pf::UNK_1000) != 0;
+            if let (false, Some(ped)) = (probe_like, b.logic.as_any_mut().downcast_mut::<PedLogic>()) {
+                ped.ground_entity = None;
+                if ped.standing {
+                    ped.standing = false;
+                    ped.was_standing = true;
+                }
+            }
+        }
         let mut result = false;
         for other in self.candidates(i, false) {
             if self.collide(i, other, ctx) == Hit::Hard {
@@ -557,8 +577,15 @@ impl World {
         let static_path = match other {
             EntityId::Building(_) => true,
             EntityId::Body(j) => {
-                let o = &self.b(j as usize).phys;
-                o.has(pf::COLLIDE_AS_STATIC) || (o.is_static() && self.b(j as usize).logic.uproot_limit().is_none())
+                let ob = self.b(j as usize);
+                let o = &ob.phys;
+                let ped_vs_resting_prop = self.b(i).phys.kind == EntityType::Ped
+                    && o.kind == EntityType::Object
+                    && (ob.logic.uproot_limit().is_some_and(|u| u > 0.0) || o.has(pf::DISABLE_COLLISION_FORCE))
+                    && o.move_speed.abs().max_element() < 0.001;
+                o.has(pf::COLLIDE_AS_STATIC)
+                    || (o.is_static() && ob.logic.uproot_limit().is_none())
+                    || ped_vs_resting_prop
             }
         };
         if static_path {
@@ -690,6 +717,7 @@ impl World {
         let a_contacted = pa.has_e(ef::HAS_CONTACTED);
         let b_contacted = pb.has_e(ef::HAS_CONTACTED);
         let mut num_soft = 0usize;
+        let mut max_imp_b = 0f32;
         let info = PairInfo::default();
         if a_contacted && b_contacted {
             for cp in cps {
@@ -697,6 +725,7 @@ impl World {
                     if let Some((ia, ib)) = pair::apply_collision(ctx, pa, pb, cp, info, false) {
                         pa.set_damaged_piece_record(ia, cp, 1.0);
                         pb.set_damaged_piece_record(ib, cp, -1.0);
+                        max_imp_b = max_imp_b.max(ib.abs());
                     }
                 } else {
                     num_soft += 1;
@@ -725,6 +754,7 @@ impl World {
                     if let Some((ia, ib)) = pair::apply_collision(ctx, pa, pb, cp, info, false) {
                         pa.set_damaged_piece_record(ia, cp, 1.0);
                         pb.set_damaged_piece_record(ib, cp, -1.0);
+                        max_imp_b = max_imp_b.max(ib.abs());
                         let mut adh = surfaces.adhesive_limit(cp) / n as f32;
                         if pa.is_vehicle()
                             && pb.is_vehicle()
@@ -757,6 +787,16 @@ impl World {
         }
         if pb.status == Status::Simple {
             pb.status = Status::Physics;
+        }
+        // A vehicle hitting a ped (0x5F0360 KillPedWithCar).
+        if pa.is_vehicle() && pb.kind == EntityType::Ped && max_imp_b > 0.0 {
+            let hit_wall = pb.has_e(ef::HAS_HIT_WALL);
+            let fast = pa.move_speed.length_squared() > 0.0025;
+            if let Some(ped) = b.logic.as_any_mut().downcast_mut::<PedLogic>() {
+                if !ped.is_player || (hit_wall && fast) {
+                    kill_ped_with_car(pa, pb, ped, max_imp_b);
+                }
+            }
         }
         if n > num_soft { Hit::Hard } else { Hit::None }
     }
@@ -941,6 +981,140 @@ impl World {
         }
         best
     }
+}
+
+impl World {
+    /// 0x5E2530 CPed::ProcessEntityCollision (ground line, snap, ceiling probe,
+    /// wall-normal flattening). Ped2 sensors and slope-push contacts not ported.
+    fn ped_entity_collision(&mut self, i: usize, other: EntityId, cps: &mut [ColPoint; MAX_COLPOINTS], ts: f32) -> usize {
+        let (other_mat, other_col, other_kind, other_static_like): (Matrix, *const ColModel, EntityType, bool) = match other {
+            EntityId::Building(bi) => {
+                let b = self.buildings[bi as usize].as_ref().unwrap();
+                (b.matrix, Arc::as_ptr(&b.col), EntityType::Building, true)
+            }
+            EntityId::Body(j) => {
+                let b = self.b(j as usize);
+                let st = b.phys.is_static() || b.phys.has(pf::COLLIDE_AS_STATIC);
+                (b.phys.matrix, &b.col as *const ColModel, b.phys.kind, st)
+            }
+        };
+        // SAFETY: `other` is never body `i`; its model is only read during this call.
+        let other_col = unsafe { &*other_col };
+        let body = self.bodies[i].as_mut().unwrap();
+        let Body { phys, logic, col: base_col, .. } = body;
+        let ped = logic.as_any_mut().downcast_mut::<PedLogic>().unwrap();
+
+        let lines_on = phys.flags & (pf::PROBE | pf::IN_SHIFT | pf::UNK_1000) == 0 && other_kind != EntityType::Ped;
+        let mut col = base_col.clone();
+        let top = 0.95f32;
+        if lines_on {
+            col.lines = ped_lines(ped.was_standing, ped.ceiling_probe, ts);
+            col.bbox_min.z = col.lines[0].end.z;
+            if col.lines.len() == 2 {
+                col.bound_radius = col.lines[1].end.z;
+                col.bbox_max.z = col.lines[1].end.z;
+            } else {
+                col.bound_radius = col.lines[0].end.z.abs();
+            }
+        }
+        let nl = col.lines.len();
+        let mut lp = [ColPoint::default(); 2];
+        let mut lv = [1.0f32; 2];
+        let mut n = process_col_models(&phys.matrix, &col, &other_mat, other_col, cps, &mut lp[..nl], &mut lv[..nl], false);
+        let z_before = phys.matrix.pos.z;
+        let ceiling_ok = matches!(other_kind, EntityType::Building) || other_static_like;
+        if lines_on {
+            if lv[0] < 1.0 {
+                let gz = lp[0].point.z;
+                if !ped.standing || gz + 1.0 > phys.matrix.pos.z {
+                    let down_facing = cps[..n].iter().any(|c| c.normal.z < -0.867);
+                    if !ped.standing && matches!(other_kind, EntityType::Vehicle | EntityType::Object) {
+                        ped.ground_entity = Some(other);
+                    }
+                    if nl == 2 && lv[1] < 1.0 && lp[1].point.z < ped.ceiling_z && ceiling_ok {
+                        ped.ceiling_z = lp[1].point.z;
+                    }
+                    if !down_facing {
+                        if ped.ceiling_z >= NO_CEILING {
+                            phys.matrix.pos.z = gz + 1.0;
+                        } else {
+                            let mut z = gz + 1.0;
+                            if gz + top + 1.0 > ped.ceiling_z {
+                                z = z.min(ped.ceiling_z - top);
+                            }
+                            phys.matrix.pos.z = z;
+                        }
+                    }
+                    ped.ground_normal = lp[0].normal;
+                    ped.ground_surface = lp[0].surface_b;
+                }
+                ped.standing = true;
+                phys.move_speed.z = 0.0;
+                if z_before + 0.1 < phys.matrix.pos.z && ped.is_player {
+                    // Re-test the spheres at the stepped-up height.
+                    let mut plain = col.clone();
+                    plain.lines.clear();
+                    n = process_col_models(&phys.matrix, &plain, &other_mat, other_col, cps, &mut [], &mut [], false);
+                }
+            } else if nl == 2 && lv[1] < 1.0 && lp[1].point.z < ped.ceiling_z && ceiling_ok {
+                ped.ceiling_z = lp[1].point.z;
+                if ped.standing && top + phys.matrix.pos.z > lp[1].point.z {
+                    phys.matrix.pos.z = lp[1].point.z - top;
+                }
+            }
+        }
+        // Against static geometry, wall normals get a unit horizontal part (was standing only).
+        if other_static_like && ped.was_standing && n > 0 {
+            for cp in cps[..n].iter_mut() {
+                let mut nn = cp.normal;
+                let l = (nn.x * nn.x + nn.y * nn.y).sqrt();
+                if l != 0.0 {
+                    nn.x /= l;
+                    nn.y /= l;
+                }
+                cp.normal = normalise(nn);
+            }
+        }
+        if n > 0 || lv[0] < 1.0 {
+            phys.flags |= pf::COLLIDED;
+            if n > 0 && other_static_like {
+                phys.eflags |= ef::HAS_HIT_WALL;
+            }
+        }
+        n
+    }
+}
+
+/// 0x5F0360 CPed::KillPedWithCar (velocity assignment + braking impulse on the car).
+fn kill_ped_with_car(car: &mut Physical, ped: &mut Physical, state: &mut PedLogic, impulse: f32) {
+    let big = impulse > 12.0 && !state.is_player;
+    if !big {
+        let threshold = if state.is_player { 10.0 } else { 6.0 };
+        if impulse <= threshold && !(ped.last_collision_impact_velocity.z < -0.8 && impulse > 3.0) {
+            return;
+        }
+    }
+    let v = ped.matrix.pos - car.matrix.pos;
+    if big {
+        ped.move_speed = car.move_speed * 0.9;
+    } else if ped.has_e(ef::HAS_HIT_WALL) {
+        ped.move_speed = Vec3::ZERO;
+    } else {
+        ped.move_speed = car.move_speed * 0.75;
+    }
+    ped.move_speed.z = 0.0;
+    state.standing = false;
+    state.knocked_down = 1.0;
+    // Braking reaction on the car.
+    let up = car.matrix.up;
+    let vp = v - up * v.dot(up);
+    let mut n = normalise(vp);
+    let vd = n.dot(car.move_speed);
+    n.z -= 0.2;
+    let k = if car.vclass() == Some(VehicleClass::Bike) { -0.75 } else { -0.5 };
+    let m = car.mass.min(1600.0);
+    let j = n * (vd * k * m * (car.mass / 1600.0).min(1.0));
+    car.apply_force(j, vp * 0.25, true);
 }
 
 /// Segment vs AABB (slab test), inclusive.
