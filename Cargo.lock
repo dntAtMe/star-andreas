@@ -5155,6 +5155,7 @@ name = "sa-physics"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bevy",
  "glam 0.32.1",
  "sa-formats",
 ]

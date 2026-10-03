@@ -27,7 +27,7 @@ use sa_physics::{
 
 use crate::{
     player::{CamFollow, GameRoot, Mode, Ped, frame_transform},
-    saphys::{SaBody, SaPhys, SaStep, gta_matrix},
+    saphys::{SaBody, SaPhys, SaPhysExt, SaStep, gta_matrix},
     stream::{convert_texture, make_image},
     world::{WorldRes, g2b},
 };

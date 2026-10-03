@@ -886,9 +886,20 @@ impl World {
         let scan = self.next_scan();
         let mut best: Option<(EntityId, f32, ColPoint)> = None;
         let mut min_t = 1.0f32;
+        let seg = end - start;
+        let seg_len2 = seg.length_squared().max(1e-12);
         let mut test = |id: EntityId, mat: &Matrix, col: &ColModel, min_t: &mut f32| {
+            // Reject by bounding sphere (distance from its centre to the segment).
+            let c = mat.transform(col.bound_center);
+            let t0 = ((c - start).dot(seg) / seg_len2).clamp(0.0, 1.0);
+            if (start + seg * t0 - c).length_squared() > col.bound_radius * col.bound_radius {
+                return;
+            }
             let inv = mat.inverse();
             let l = ColLine { start: inv.transform(start), end: inv.transform(end) };
+            if !line_hits_box(l.start, l.end, col.bbox_min, col.bbox_max) {
+                return;
+            }
             let mut cp = ColPoint::default();
             let mut t = *min_t;
             for s in &col.spheres {
@@ -930,6 +941,31 @@ impl World {
         }
         best
     }
+}
+
+/// Segment vs AABB (slab test), inclusive.
+fn line_hits_box(a: Vec3, b: Vec3, min: Vec3, max: Vec3) -> bool {
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for k in 0..3 {
+        if d[k].abs() < 1e-9 {
+            if a[k] < min[k] || a[k] > max[k] {
+                return false;
+            }
+        } else {
+            let inv = 1.0 / d[k];
+            let (mut n, mut f) = ((min[k] - a[k]) * inv, (max[k] - a[k]) * inv);
+            if n > f {
+                std::mem::swap(&mut n, &mut f);
+            }
+            t0 = t0.max(n);
+            t1 = t1.min(f);
+            if t0 > t1 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn touching(c1: Vec3, r1: f32, c2: Vec3, r2: f32) -> bool {

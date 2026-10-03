@@ -59,7 +59,10 @@ impl Plugin for PlayerPlugin {
             .add_systems(Update, (toggle_mode, cursor_lock, player_control, animate_ped).chain())
             .add_systems(
                 PostUpdate,
-                orbit_camera.run_if(resource_equals(Mode::Walk)).before(TransformSystems::Propagate),
+                orbit_camera
+                    .run_if(resource_equals(Mode::Walk))
+                    .after(crate::saphys::SaSync)
+                    .before(TransformSystems::Propagate),
             );
     }
 }
@@ -326,7 +329,7 @@ fn toggle_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<Mode>,
     mut lock: ResMut<MouseLock>,
-    rapier: ReadRapierContext,
+    mut sa: ResMut<crate::saphys::SaPhys>,
     driving: Res<crate::vehicle::Driving>,
     cam: Single<(&Transform, &mut crate::FlyCam, &mut OrbitCam), Without<Ped>>,
     ped: Single<(Entity, &mut Transform, &mut Ped)>,
@@ -344,11 +347,9 @@ fn toggle_mode(
             fly.pitch = pitch;
         }
         Mode::Fly => {
-            // Drop the player onto whatever is below the camera.
-            let ctx = rapier.single()?;
-            let filter = QueryFilter::default().exclude_collider(ped_e);
-            if let Some((_, toi)) = ctx.cast_ray(cam_tf.translation, -Vec3::Y, 500.0, true, filter) {
-                ped_tf.translation = cam_tf.translation - Vec3::Y * (toi - 1.2);
+            // Drop the player onto whatever is below the camera (SA line of sight).
+            if let Some(hit) = sa.cast_ray(cam_tf.translation, -Vec3::Y, 500.0, false, Some(ped_e)) {
+                ped_tf.translation = cam_tf.translation - Vec3::Y * (hit.toi - 1.2);
                 ped.vel_y = 0.0;
             }
             *mode = Mode::Walk;
@@ -554,7 +555,7 @@ fn orbit_camera(
     lock: Res<MouseLock>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
-    rapier: ReadRapierContext,
+    mut sa: ResMut<crate::saphys::SaPhys>,
     mut zoom: Local<Option<f32>>,
     mut idle: Local<f32>,
     target: Single<(Entity, &Transform, &CamFollow, Option<&crate::vehicle::Vehicle>, Option<&Interp>)>,
@@ -592,11 +593,9 @@ fn orbit_camera(
     let target = target_tf.translation + Vec3::Y * follow.height;
     let back = rot * Vec3::Z;
     let mut dist = oc.dist;
-    if let Ok(ctx) = rapier.single() {
-        let filter = QueryFilter::default().exclude_rigid_body(target_e);
-        if let Some((_, toi)) = ctx.cast_ray(target, back, oc.dist, true, filter) {
-            dist = (toi - 0.25).max(0.4);
-        }
+    // Pull in when something is between the target and the camera (SA line of sight).
+    if let Some(hit) = sa.cast_ray(target, back, oc.dist, false, Some(target_e)) {
+        dist = (hit.toi - 0.25).max(0.4);
     }
     tf.translation = target + back * dist;
     tf.rotation = rot;

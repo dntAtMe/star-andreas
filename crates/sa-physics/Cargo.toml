@@ -5,9 +5,14 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+# Bevy resource + Bevy-space raycast API (bevy_api module).
+bevy = ["dep:bevy"]
+
 [dependencies]
 glam = "0.32"
 sa-formats.workspace = true
+bevy = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true

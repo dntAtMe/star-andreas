@@ -4,6 +4,8 @@
 //! speeds per 1/50 s frame, and a timestep `ts` measured in such frames.
 
 pub mod automobile;
+#[cfg(feature = "bevy")]
+pub mod bevy_api;
 pub mod collision;
 pub mod colpoint;
 pub mod pair;

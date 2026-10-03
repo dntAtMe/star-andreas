@@ -5,10 +5,14 @@
 
 use bevy::{prelude::*, transform::TransformSystems};
 use sa_physics::{
+    bevy_api::SaPhysics,
     physical::Matrix as GMatrix,
     surface::SurfaceInfos,
     world::{BodyLogic, EntityId, World as PhysWorld},
 };
+
+/// The shared SA physics resource (also used by other crates, e.g. sc2-bevy).
+pub type SaPhys = SaPhysics;
 
 use crate::{
     player::GameRoot,
@@ -25,33 +29,40 @@ impl Plugin for SaPhysPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PreStartup, init)
             .add_systems(Update, step.in_set(SaStep))
-            .add_systems(PostUpdate, sync_transforms.before(TransformSystems::Propagate))
+            .add_systems(PostUpdate, sync_transforms.in_set(SaSync).before(TransformSystems::Propagate))
+            .add_observer(add_building)
+            .add_observer(add_body)
             .add_observer(remove_building)
             .add_observer(remove_body);
     }
 }
 
+/// Copies interpolated SA body poses to Transforms (PostUpdate).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SaSync;
+
 /// Systems that feed inputs to SA bodies run `.before(SaStep)`.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SaStep;
 
-#[derive(Resource)]
-pub struct SaPhys {
-    pub world: PhysWorld,
-    acc: f32,
+/// Helpers on the shared resource.
+pub trait SaPhysExt {
+    /// Fraction of the way from the last physics step to the next.
+    fn alpha(&self) -> f32;
+    fn logic_mut<T: BodyLogic>(&mut self, id: EntityId) -> Option<&mut T>;
+    fn logic<T: BodyLogic>(&self, id: EntityId) -> Option<&T>;
 }
 
-impl SaPhys {
-    /// Fraction of the way from the last physics step to the next.
-    pub fn alpha(&self) -> f32 {
+impl SaPhysExt for SaPhys {
+    fn alpha(&self) -> f32 {
         (self.acc * SA_HZ).clamp(0.0, 1.0)
     }
 
-    pub fn logic_mut<T: BodyLogic>(&mut self, id: EntityId) -> Option<&mut T> {
+    fn logic_mut<T: BodyLogic>(&mut self, id: EntityId) -> Option<&mut T> {
         self.world.body_mut(id)?.logic.as_any_mut().downcast_mut::<T>()
     }
 
-    pub fn logic<T: BodyLogic>(&self, id: EntityId) -> Option<&T> {
+    fn logic<T: BodyLogic>(&self, id: EntityId) -> Option<&T> {
         self.world.body(id)?.logic.as_any().downcast_ref::<T>()
     }
 }
@@ -83,7 +94,7 @@ fn init(mut commands: Commands, root: Res<GameRoot>) {
             SurfaceInfos::default()
         }
     };
-    commands.insert_resource(SaPhys { world: PhysWorld::new(surfaces), acc: 0.0 });
+    commands.insert_resource(SaPhys::new(PhysWorld::new(surfaces)));
 }
 
 fn step(time: Res<Time>, mut sa: ResMut<SaPhys>, mut bodies: Query<&mut SaBody>) {
@@ -121,14 +132,28 @@ fn sync_transforms(sa: Res<SaPhys>, mut q: Query<(&SaBody, &mut Transform)>) {
     }
 }
 
+fn add_building(ev: On<Insert, SaBuilding>, q: Query<&SaBuilding>, sa: Option<ResMut<SaPhys>>) {
+    if let (Ok(b), Some(mut sa)) = (q.get(ev.entity), sa) {
+        sa.link(b.0, ev.entity);
+    }
+}
+
+fn add_body(ev: On<Insert, SaBody>, q: Query<&SaBody>, sa: Option<ResMut<SaPhys>>) {
+    if let (Ok(b), Some(mut sa)) = (q.get(ev.entity), sa) {
+        sa.link(b.id, ev.entity);
+    }
+}
+
 fn remove_building(ev: On<Remove, SaBuilding>, q: Query<&SaBuilding>, sa: Option<ResMut<SaPhys>>) {
     if let (Ok(b), Some(mut sa)) = (q.get(ev.entity), sa) {
+        sa.unlink(ev.entity);
         sa.world.remove(b.0);
     }
 }
 
 fn remove_body(ev: On<Remove, SaBody>, q: Query<&SaBody>, sa: Option<ResMut<SaPhys>>) {
     if let (Ok(b), Some(mut sa)) = (q.get(ev.entity), sa) {
+        sa.unlink(ev.entity);
         sa.world.remove(b.id);
     }
 }
