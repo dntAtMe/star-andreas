@@ -858,6 +858,7 @@ impl BodyLogic for Automobile {
     fn process_control(&mut self, p: &mut Physical, col: &mut ColModel, ctx: &Ctx, lines: &LineHits) {
         let ts = ctx.ts;
         self.burnout = false;
+        self.surfaces.wet_roads = ctx.wet_roads;
 
         // ProcessAI: centre of mass and control inputs.
         p.com = self.h.centre_of_mass;

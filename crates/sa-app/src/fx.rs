@@ -134,6 +134,8 @@ fn update_fx(
     let (cam_gt, frustum) = *camera;
     let cam = fx_camera(cam_gt, frustum);
     sa.world.camera_pos = cam.pos;
+    sa.world.camera_fwd = cam.at;
+    sa.world.camera_orientation = cam.at.x.atan2(cam.at.y);
 
     // Current (interpolated) matrices of the bodies FX are attached to.
     let parent_of = |sa: &SaPhys, id: EntityId| {
@@ -173,6 +175,7 @@ fn update_fx(
                     fx.man.set_vel_add(s, v);
                 }
             }
+            FxCmd::AddParticle(_) => {} // TODO: g_fx systems (sparks doc pending)
             FxCmd::SetOffsetPos(h, p) => {
                 if let Some(s) = live(fx, h, sa, &parent_of) {
                     fx.man.set_offset_pos(s, p);
@@ -185,7 +188,8 @@ fn update_fx(
     fx.slots.retain(|_, s| s.sys.is_none_or(|id| man.is_alive(id)));
 
     let dt = time.delta_secs().min(MAX_DT);
-    let env = Env::default(); // TODO: CWeather wind/rain once weather is ported
+    let w = &sa.world.weather;
+    let env = Env { wind_dir: w.wind_dir, wind: w.wind, rain: w.rain };
     fx.man.update(&cam, dt, &env, |key| {
         let id = if key >> 32 == 0 { EntityId::Body(key as u32) } else { EntityId::Building(key as u32) };
         parent_of(sa, id)
@@ -229,6 +233,7 @@ fn try_create(
 fn draw_fx(
     mut commands: Commands,
     fx: Option<ResMut<Fx>>,
+    sa: Res<SaPhys>,
     camera: Single<(&GlobalTransform, &Frustum), With<Camera3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -238,8 +243,9 @@ fn draw_fx(
     let fx = &mut *fx;
     let (cam_gt, frustum) = *camera;
     let cam = fx_camera(cam_gt, frustum);
-    // Noon: DNBalance 0 → brightness 1.0 (the world has no clock yet).
-    let batches = fx.man.render(&cam, 1.0);
+    // FxManager_c::Render: (1 - DNBalance) * 0.6 + 0.4.
+    let brightness = (1.0 - sa.world.clock.dn_balance()) * 0.6 + 0.4;
+    let batches = fx.man.render(&cam, brightness);
     // Vertices relative to the camera; the entities sit at the camera so every batch
     // sorts after the scene, and increasing depth bias keeps the original order.
     let origin = cam_gt.translation();

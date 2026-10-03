@@ -21,7 +21,9 @@ use glam::Vec3;
 
 use crate::{
     Ctx,
+    clock::Clock,
     damage::Rand,
+    weather::Weather,
     effects::{Effects, FrameFx, WorldRequest},
     explosion::{Explosion, MAX_EXPLOSIONS},
     fire::{Fire, MAX_FIRES},
@@ -150,8 +152,13 @@ pub struct World {
     pub now_ms: u32,
     time_ms: f64,
     pub frame: u32,
-    /// Camera position (fire removal distance), set by the app.
+    /// Camera position, look direction and heading (`TheCamera.m_fOrientation`,
+    /// atan2(fwd.x, fwd.y)), set by the app.
     pub camera_pos: Vec3,
+    pub camera_fwd: Vec3,
+    pub camera_orientation: f32,
+    pub clock: Clock,
+    pub weather: Weather,
     /// The CRT `rand()` shared by explosions and fires.
     pub rng: Rand,
     pub(crate) explosions: Vec<Explosion>,
@@ -182,6 +189,10 @@ impl World {
             time_ms: 0.0,
             frame: 0,
             camera_pos: Vec3::ZERO,
+            camera_fwd: Vec3::Y,
+            camera_orientation: 0.0,
+            clock: Clock::new(0),
+            weather: Weather::default(),
             rng: Rand::new(1),
             explosions: vec![Explosion::default(); MAX_EXPLOSIONS],
             fires: vec![Fire::default(); MAX_FIRES],
@@ -325,7 +336,10 @@ impl World {
         self.now_ms = self.time_ms as u32;
         self.frame = self.frame.wrapping_add(1);
         self.effects.lights.clear();
+        // CGame::Process: clock and weather before the world.
+        self.update_clock_and_weather(ts);
         let mut ctx = Ctx::new(ts);
+        ctx.wet_roads = self.weather.wet_roads;
         let moving: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))
             .collect();

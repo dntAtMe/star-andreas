@@ -3,6 +3,7 @@ mod player;
 mod saphys;
 mod stream;
 mod vehicle;
+mod weather;
 mod world;
 
 use std::{path::PathBuf, sync::Arc};
@@ -67,6 +68,7 @@ fn main() -> anyhow::Result<()> {
         VehiclePlugin,
         saphys::SaPhysPlugin,
         fx::FxPlugin,
+        weather::WeatherPlugin,
     ))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
@@ -185,6 +187,7 @@ fn update_hud(
     st: Res<Streamer>,
     mode: Res<Mode>,
     driving: Res<Driving>,
+    sa: Res<saphys::SaPhys>,
     cars: Query<&Vehicle>,
     cam: Single<(&Transform, &FlyCam)>,
     ped: Single<(&Transform, &Ped), Without<FlyCam>>,
@@ -198,6 +201,7 @@ fn update_hud(
         "pos {:.0} {:.0} {:.0}  speed {:.0}  fps {:.0}\n\
          instances {}  pending {}  models {} (+{} loading)  txds {}\n\
          mode {:?}{}{}{}  (F2 toggles walk/fly)\n\
+         {:02}:{:02}  {} -> {} ({:.0}%)  rain {:.2}  wind {:.2}  (N next weather, M release, B damage car)\n\
          walk: click grabs mouse, Esc releases, WASD, Shift sprint, Alt walk, Space jump, V spawn car, F enter/exit\n\
          drive: W throttle, S brake/reverse, A/D steer, Space handbrake\n\
          fly: RMB look, WASD/QE move, Shift fast, wheel speed",
@@ -219,6 +223,13 @@ fn update_hud(
             .and_then(|c| cars.get(c).ok())
             .map(|v| format!("  driving {} {:.0} km/h  health {:.0}", v.name, v.speed.abs() * 3.6, v.health))
             .unwrap_or_default(),
+        sa.world.clock.hours,
+        sa.world.clock.minutes,
+        sa_physics::weather::WEATHER_NAMES[sa.world.weather.old_type as usize],
+        sa_physics::weather::WEATHER_NAMES[sa.world.weather.new_type as usize],
+        sa.world.weather.interpolation * 100.0,
+        sa.world.weather.rain,
+        sa.world.weather.wind,
     );
 }
 

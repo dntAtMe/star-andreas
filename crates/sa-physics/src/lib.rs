@@ -4,6 +4,7 @@
 //! speeds per 1/50 s frame, and a timestep `ts` measured in such frames.
 
 pub mod automobile;
+pub mod clock;
 #[cfg(feature = "bevy")]
 pub mod bevy_api;
 pub mod collision;
@@ -16,6 +17,7 @@ pub mod pair;
 pub mod ped;
 pub mod physical;
 pub mod surface;
+pub mod weather;
 pub mod world;
 
 pub use glam::Vec3;
@@ -29,11 +31,13 @@ pub struct Ctx {
     pub later_collision_pass: bool,
     /// 0xB7CD6C: false only during the first ProcessShift pass.
     pub keep_going_after_hit: bool,
+    /// `CWeather::WetRoads` (tyre grip on wet surfaces).
+    pub wet_roads: f32,
 }
 
 impl Ctx {
     pub fn new(ts: f32) -> Self {
-        Self { ts, later_collision_pass: false, keep_going_after_hit: true }
+        Self { ts, later_collision_pass: false, keep_going_after_hit: true, wet_roads: 0.0 }
     }
 }
 

@@ -27,6 +27,37 @@ pub enum FxCmd {
     SetVelAdd(FxHandle, Vec3),
     /// 0x4AA660: move the system (world-positioned systems only).
     SetOffsetPos(FxHandle, Vec3),
+    /// `FxSystem_c::AddParticle` (0x4AA440) on one of the `Fx_c` (g_fx) systems, by name.
+    AddParticle(AddParticle),
+}
+
+/// `FxPrtMult_c` (0x4AB290): colour, size, spin and life multipliers.
+#[derive(Debug, Clone, Copy)]
+pub struct PrtMult {
+    pub rgba: [f32; 4],
+    pub size: f32,
+    pub ang_change: f32,
+    pub life: f32,
+}
+
+impl PrtMult {
+    pub fn new(r: f32, g: f32, b: f32, a: f32, size: f32, ang_change: f32, life: f32) -> Self {
+        Self { rgba: [r, g, b, a], size, ang_change, life }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AddParticle {
+    /// The g_fx member system, e.g. "prt_splash".
+    pub system: &'static str,
+    pub pos: Vec3,
+    pub vel: Vec3,
+    pub time_since: f32,
+    pub mult: PrtMult,
+    pub z_rot: f32,
+    pub light_mult: f32,
+    pub light_mult_limit: f32,
+    pub local: bool,
 }
 
 /// `CPointLights::AddLight` for one frame.
@@ -80,6 +111,33 @@ impl Effects {
 
     pub fn set_offset_pos(&mut self, h: FxHandle, p: Vec3) {
         self.cmds.push(FxCmd::SetOffsetPos(h, p));
+    }
+
+    /// `FxSystem_c::AddParticle(pos, vel, timeSince, mult, zRot, lightMult, lightMultLimit, local)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_particle(
+        &mut self,
+        system: &'static str,
+        pos: Vec3,
+        vel: Vec3,
+        time_since: f32,
+        mult: PrtMult,
+        z_rot: f32,
+        light_mult: f32,
+        light_mult_limit: f32,
+        local: bool,
+    ) {
+        self.cmds.push(FxCmd::AddParticle(AddParticle {
+            system,
+            pos,
+            vel,
+            time_since,
+            mult,
+            z_rot,
+            light_mult,
+            light_mult_limit,
+            local,
+        }));
     }
 
     pub fn add_light(&mut self, pos: Vec3, radius: f32, color: Vec3, shadows: bool) {
