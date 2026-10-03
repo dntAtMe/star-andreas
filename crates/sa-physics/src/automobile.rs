@@ -18,6 +18,7 @@ use crate::{
     collision::{ColLine, ColModel},
     damage::{CarDamage, init_doors},
     effects::{ExplosionType, FrameFx, FxHandle, WorldRequest},
+    fxhelpers::WheelVeh,
     colpoint::ColPoint,
     physical::{Physical, Status, normalise, pf},
     surface::{SURFACE_WHEELBASE, SurfaceInfos},
@@ -371,6 +372,8 @@ pub struct Automobile {
     /// (0,0,0) when the DFF lacks them. Set by the app.
     pub engine_pos: Vec3,
     pub headlights_pos: Vec3,
+    /// Primary paint colour (ms_vehicleColourTable[+0x434]), set by the app.
+    pub colour: [u8; 4],
     /// +0x578 engine smoke and +0x57C fire_car FX systems.
     smoke_fx: Option<FxHandle>,
     fire_fx: Option<FxHandle>,
@@ -456,6 +459,7 @@ impl Automobile {
             door_hinges: [None; 6],
             engine_pos: Vec3::ZERO,
             headlights_pos: Vec3::ZERO,
+            colour: [255; 4],
             smoke_fx: None,
             fire_fx: None,
             avg_move: Vec3::ZERO,
@@ -1069,6 +1073,32 @@ impl BodyLogic for Automobile {
                 cam_shake: -1.0,
                 no_damage: false,
             });
+        }
+
+        // VehicleDamage's collision particles.
+        if let Some((pos, force)) = self.damage.colliding_particles.take() {
+            f.car_colliding_particles(p.matrix.pos, col.bound_radius, p.move_speed, pos, force, true, self.colour, 1.0);
+        }
+        // PreRender: AddSingleWheelParticles for the four wheels (status PLAYER/SIMPLE/PHYSICS).
+        if matches!(p.status, Status::Player | Status::Simple | Status::Physics) && !matches!(self.model, 539 | 441) {
+            let v = WheelVeh {
+                model: self.model,
+                pos: p.matrix.pos,
+                move_speed: p.move_speed,
+                gas: self.gas,
+                subtype: 0,
+                lighting: 1.0,
+                player_driven: p.status == Status::Player,
+            };
+            let speed = p.move_speed.length();
+            let rear_skid = self.wheel_state[1] == WheelState::Skidding || self.wheel_state[3] == WheelState::Skidding;
+            for i in 0..4 {
+                let flags = if (i == 0 || i == 2) && !rear_skid { 4 } else { 0 };
+                let state = self.wheel_state[i] as u8;
+                let status = self.damage.dm.wheels[i];
+                let cp = self.wheel_cp[i];
+                f.single_wheel_particles(&v, p.matrix.fwd, state, status, self.comp_prev[i], speed, &cp, flags);
+            }
         }
 
         // fire_car at the engine, attached to the car.

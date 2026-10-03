@@ -18,6 +18,21 @@ pub struct SurfaceInfo {
     pub wet_grip: i8,
     /// 0 none, 1 sparks.
     pub friction_effect: u8,
+    /// SAND / WATER flags (flags1 bits 14, 15).
+    pub is_sand: bool,
+    pub is_water: bool,
+    /// W_GRASS, W_GRAVEL, W_MUD, W_DUST, W_SAND, W_SPRAY (flags2 bits 1..6).
+    pub wheel_fx: [bool; 6],
+}
+
+/// Indices into `SurfaceInfo::wheel_fx`.
+pub mod wheel_fx {
+    pub const GRASS: usize = 0;
+    pub const GRAVEL: usize = 1;
+    pub const MUD: usize = 2;
+    pub const DUST: usize = 3;
+    pub const SAND: usize = 4;
+    pub const SPRAY: usize = 5;
 }
 
 #[derive(Debug, Clone)]
@@ -61,17 +76,23 @@ impl SurfaceInfos {
             }
             let group = GROUP_NAMES.iter().position(|g| g.eq_ignore_ascii_case(t[1])).unwrap_or(0) as u8;
             let f = |i: usize| t[i].parse::<f32>().unwrap_or(0.0);
+            // Columns after FRICTION_EFFECT: SOFTLAND 6, SEE_THRO, SHOOT_T, SAND 9, WATER 10, ...,
+            // W_GRASS 26, W_GRAVEL, W_MUD, W_DUST, W_SAND, W_SPRAY 31.
+            let flag = |i: usize| t.get(i).is_some_and(|v| *v == "1");
             s.surfaces.push(SurfaceInfo {
                 adhesion_group: group,
                 tyre_grip: (f(2) * 10.0) as i8,
                 wet_grip: (f(3) * 100.0) as i8,
                 friction_effect: u8::from(t[5].eq_ignore_ascii_case("SPARKS")),
+                is_sand: flag(9),
+                is_water: flag(10),
+                wheel_fx: std::array::from_fn(|k| flag(26 + k)),
             });
         }
         s
     }
 
-    fn info(&self, id: u8) -> SurfaceInfo {
+    pub fn info(&self, id: u8) -> SurfaceInfo {
         self.surfaces.get(id as usize).copied().unwrap_or(SurfaceInfo { adhesion_group: 2, tyre_grip: 10, ..Default::default() })
     }
 

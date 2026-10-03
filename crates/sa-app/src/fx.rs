@@ -17,7 +17,7 @@ use bevy::{
     prelude::*,
     transform::TransformSystems,
 };
-use sa_fx::{BlendFactor, Camera as FxCamera, Env, FxManager, SysId};
+use sa_fx::{BlendFactor, Camera as FxCamera, Env, FxManager, PrtMult, SysId};
 use sa_physics::{
     effects::{FxCmd, FxHandle},
     world::EntityId,
@@ -40,8 +40,19 @@ pub struct FxPlugin;
 impl Plugin for FxPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init)
-            .add_systems(PostUpdate, (update_fx, draw_fx, update_lights).chain().after(SaSync).after(TransformSystems::Propagate));
+            .add_systems(
+                PostUpdate,
+                (update_fx, draw_fx.in_set(FxDrawn), update_lights).chain().after(SaSync).after(TransformSystems::Propagate),
+            );
     }
+}
+
+/// After the FX quads are built (heat_haze_needed is known).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FxDrawn;
+
+pub fn fx_camera_of(gt: &GlobalTransform, frustum: &Frustum) -> FxCamera {
+    fx_camera(gt, frustum)
 }
 
 /// A gameplay handle and what is needed to (re)create its system.
@@ -55,9 +66,32 @@ struct Slot {
     played: Option<bool>,
 }
 
+/// `Fx_c::InitStaticSystems` (0x49E660): created stopped at the origin, never played;
+/// containers for hand-added particles.
+const STATIC_SYSTEMS: [&str; 17] = [
+    "prt_blood",
+    "prt_boatsplash",
+    "prt_bubble",
+    "prt_cardebris",
+    "prt_collisionsmoke",
+    "prt_gunshell",
+    "prt_sand",
+    "prt_sand2",
+    "prt_smoke_huge",
+    "prt_smokeII_3_expand",
+    "prt_spark",
+    "prt_spark_2",
+    "prt_splash",
+    "prt_wake",
+    "prt_watersplash",
+    "prt_wheeldirt",
+    "prt_glass",
+];
+
 #[derive(Resource)]
-struct Fx {
-    man: FxManager,
+pub struct Fx {
+    pub man: FxManager,
+    statics: HashMap<&'static str, SysId>,
     slots: HashMap<FxHandle, Slot>,
     textures: HashMap<String, Handle<Image>>,
     /// Pooled batch entities and their meshes / materials.
@@ -78,9 +112,18 @@ fn init(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Assets<I
         Ok((man, textures))
     };
     match load() {
-        Ok((man, textures)) => {
+        Ok((mut man, textures)) => {
             info!("fx: {} systems, {} textures", man.bps.len(), textures.len());
-            commands.insert_resource(Fx { man, slots: HashMap::new(), textures, batches: Vec::new(), lights: Vec::new() });
+            let statics =
+                STATIC_SYSTEMS.iter().filter_map(|&n| man.create(n, Vec3::ZERO, None, true).map(|id| (n, id))).collect();
+            commands.insert_resource(Fx {
+                man,
+                statics,
+                slots: HashMap::new(),
+                textures,
+                batches: Vec::new(),
+                lights: Vec::new(),
+            });
         }
         Err(e) => warn!("fx disabled: {e:#}"),
     }
@@ -135,6 +178,8 @@ fn update_fx(
     let cam = fx_camera(cam_gt, frustum);
     sa.world.camera_pos = cam.pos;
     sa.world.camera_fwd = cam.at;
+    sa.world.camera_right = Vec3::from(b2g(cam_gt.right().as_vec3()));
+    sa.world.camera_planes = cam.planes;
     sa.world.camera_orientation = cam.at.x.atan2(cam.at.y);
 
     // Current (interpolated) matrices of the bodies FX are attached to.
@@ -175,7 +220,30 @@ fn update_fx(
                     fx.man.set_vel_add(s, v);
                 }
             }
-            FxCmd::AddParticle(_) => {} // TODO: g_fx systems (sparks doc pending)
+            FxCmd::AddParticle(a) => {
+                let Some(&id) = fx.statics.get(a.system) else { continue };
+                if let Some(k) = a.prim {
+                    for i in 0..4 {
+                        fx.man.enable_prim(id, i, i == k as usize);
+                    }
+                }
+                let m = a.mult;
+                let mult = PrtMult { rgba: m.rgba, size: m.size, ang_change: m.ang_change, life: m.life };
+                let w = &sa.world.weather;
+                let env = Env { wind_dir: w.wind_dir, wind: w.wind, rain: w.rain };
+                fx.man.add_particle(
+                    id,
+                    a.pos,
+                    a.vel,
+                    a.time_since,
+                    &mult,
+                    a.z_rot,
+                    a.light_mult,
+                    a.light_mult_limit,
+                    a.local,
+                    &env,
+                );
+            }
             FxCmd::SetOffsetPos(h, p) => {
                 if let Some(s) = live(fx, h, sa, &parent_of) {
                     fx.man.set_offset_pos(s, p);
@@ -303,7 +371,8 @@ fn draw_fx(
                 (true, _, BlendFactor::One) => AlphaMode::Add,
                 _ => AlphaMode::Blend,
             };
-            m.depth_bias = i as f32 * 0.01;
+            // After the static shadows (bias 0 / 0.5); positive only (see shadows.rs).
+            m.depth_bias = 1.0 + i as f32 * 0.01;
         }
     }
     for (e, ..) in fx.batches.iter().skip(batches.len()) {

@@ -58,6 +58,20 @@ pub struct AddParticle {
     pub light_mult: f32,
     pub light_mult_limit: f32,
     pub local: bool,
+    /// `EnablePrim`: only this prim enabled (AddDebris' round robin); None = leave as is.
+    pub prim: Option<u8>,
+}
+
+/// A corona registered for one frame (coronastar texture).
+#[derive(Debug, Clone, Copy)]
+pub struct Corona {
+    pub id: u64,
+    pub pos: Vec3,
+    pub color: [u8; 3],
+    pub radius: f32,
+    pub far_clip: f32,
+    pub near_clip: f32,
+    pub flare: u8,
 }
 
 /// `CPointLights::AddLight` for one frame.
@@ -77,8 +91,10 @@ pub struct Effects {
     pub lights: Vec<PointLight>,
     /// `TheCamera.CamShake(strength, pos)` requests.
     pub cam_shakes: Vec<(f32, Vec3)>,
-    /// Explosion scorch marks (`AddPermanentShadow`, 16x16 units, 30 s) at these points.
-    pub scorches: Vec<Vec3>,
+    /// `CCoronas::RegisterCorona` requests of the last frame (fire clusters).
+    pub coronas: Vec<Corona>,
+    /// `g_debrisPrim` (0xA9ADE4): AddDebris' round-robin prim.
+    pub debris_prim: u32,
 }
 
 impl Effects {
@@ -137,6 +153,7 @@ impl Effects {
             light_mult,
             light_mult_limit,
             local,
+            prim: None,
         }));
     }
 
@@ -181,10 +198,22 @@ pub enum ExplosionType {
     RcVehicle = 12,
 }
 
-/// Per-frame context handed to `BodyLogic::process_effects`.
+/// Per-frame context for code that adds particles (`BodyLogic::process_effects`, the
+/// `Fx_c` helpers in fxhelpers.rs).
 pub struct FrameFx<'a> {
     pub fx: &'a mut Effects,
     pub requests: &'a mut Vec<WorldRequest>,
-    /// `CTimer::m_snTimeInMilliseconds`.
+    /// `CTimer::m_snTimeInMilliseconds`, `m_FrameCounter`, `ms_fTimeStep`.
     pub now_ms: u32,
+    pub frame: u32,
+    pub ts: f32,
+    /// The global `rand()`.
+    pub rng: &'a mut crate::damage::Rand,
+    pub cam: Vec3,
+    /// Camera side planes (outward normal, d): a sphere is off screen if `n.c - d > r`.
+    pub cam_planes: [(Vec3, f32); 4],
+    pub wet_roads: f32,
+    /// `FindPlayerVehicle() != null`.
+    pub player_in_vehicle: bool,
+    pub surfaces: &'a crate::surface::SurfaceInfos,
 }

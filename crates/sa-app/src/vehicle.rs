@@ -439,6 +439,10 @@ fn spawn_vehicle(
         Vec3::from(p)
     };
     auto.engine_pos = structure_dummy("engine");
+    // ms_vehicleColourTable[primary] for collision debris (alpha 255 like carcols).
+    if let Some(c) = pair.and_then(|p| db.colors.palette.get(p.0)) {
+        auto.colour = [c[0], c[1], c[2], 255];
+    }
     auto.headlights_pos = structure_dummy("headlights");
     let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
     let m = gta_matrix(&tf);

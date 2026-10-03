@@ -264,6 +264,8 @@ pub struct CarDamage {
     pub blown_up: Option<Option<EntityId>>,
     /// ProcessCarOnFireAndExplode saw the car burning this frame (fire_car FX wanted).
     pub burning: bool,
+    /// dmgDrawCarCollidingParticles call of this frame: (contact point, force).
+    pub colliding_particles: Option<(Vec3, f32)>,
 }
 
 impl CarDamage {
@@ -286,6 +288,7 @@ impl CarDamage {
             bomb_owner: None,
             blown_up: None,
             burning: false,
+            colliding_particles: None,
         }
     }
 
@@ -423,6 +426,10 @@ impl CarDamage {
             return self.health_effects();
         }
         let speed2 = p.move_speed.length_squared();
+        if speed2 > 0.0004 {
+            // dmgDrawCarCollidingParticles(lastCollisionPos, 1 * dmg, 0x31 rammed).
+            self.colliding_particles = Some((pos, dmg));
+        }
         if p.matrix.up.z > 0.0 || speed2 > 0.3 {
             let d4 = dmg * 4.0;
             let mass = p.mass;

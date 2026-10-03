@@ -11,7 +11,8 @@ use glam::Vec3;
 
 use crate::{
     automobile::Automobile,
-    effects::FxHandle,
+    effects::{Corona, FxHandle},
+    shadows::ShadowTex,
     physical::{EntityType, normalise},
     world::{EntityId, World},
 };
@@ -188,11 +189,81 @@ impl World {
         }
     }
 
-    /// `CFireManager::Update` (0x53AF00), fire processing part.
+    /// `CFireManager::Update` (0x53AF00): ProcessFire, then the fire-cluster glow and coronas.
     pub(crate) fn update_fires(&mut self, ts: f32) {
         for i in 0..MAX_FIRES {
             if self.fires[i].active {
                 self.process_fire(i, ts);
+            }
+        }
+        self.fire_clusters();
+    }
+
+    /// Fire clusters (visualfx.md B.9): additive shad_exp glow under strong clusters,
+    /// plus four coronastar coronas above very strong ones.
+    fn fire_clusters(&mut self) {
+        let mut processed = [false; MAX_FIRES];
+        let mut n = self.fires.iter().filter(|f| f.active).count();
+        while n > 0 {
+            let mut best = None;
+            let mut m = -1.0;
+            for (i, f) in self.fires.iter().enumerate() {
+                if !processed[i] && f.active && f.strength > m {
+                    m = f.strength;
+                    best = Some(i);
+                }
+            }
+            let Some(best) = best else { break };
+            let bp = self.fires[best].pos;
+            let (mut sum, mut wsum) = (0.0f32, 0i32);
+            for (i, f) in self.fires.iter().enumerate() {
+                if !processed[i] && f.active && (f.pos - bp).truncate().length() < 6.0 {
+                    sum += f.strength;
+                    wsum += f.strength.ceil() as i32;
+                    n -= 1;
+                    processed[i] = true;
+                }
+            }
+            if sum > 4.0 && wsum != 0 {
+                let size = (sum - 6.0 + 3.0).min(7.0);
+                let k = self.rng.next() as f32 * (1.0 / 32767.0) * 0.4 + 0.6;
+                let rgb = [(64.0 * k) as i32 as u8, (50.0 * k) as i32 as u8, (32.0 * k) as i32 as u8];
+                let id = 0x2_0000_0000 | best as u64;
+                self.store_static_shadow(
+                    id,
+                    2,
+                    ShadowTex::Exp,
+                    bp + Vec3::new(0.0, 0.0, 5.0),
+                    glam::Vec2::new(size * 1.2, 0.0),
+                    glam::Vec2::new(0.0, size * -1.2),
+                    0,
+                    rgb,
+                    10.0,
+                    1.0,
+                    40.0,
+                    false,
+                    0.0,
+                );
+                if sum > 6.0 {
+                    let kc = 0.8 * k;
+                    let color = [(64.0 * kc) as i32 as u8, (50.0 * kc) as i32 as u8, (32.0 * kc) as i32 as u8];
+                    let p0 = bp + Vec3::new(0.0, 0.0, 2.6);
+                    let p1 = p0 + 3.5 * (self.camera_pos - p0).normalize_or_zero();
+                    let r = Vec3::new(self.camera_right.x, self.camera_right.y, 0.0).normalize_or_zero();
+                    for (j, (pos, flare)) in
+                        [(p1, 2), (p1 + Vec3::Z * 2.0, 0), (p1 + r * 2.0, 0), (p1 - r * 2.0, 0)].into_iter().enumerate()
+                    {
+                        self.effects.coronas.push(Corona {
+                            id: id * 4 + j as u64,
+                            pos,
+                            color,
+                            radius: size * 0.5,
+                            far_clip: 70.0,
+                            near_clip: 1.5,
+                            flare,
+                        });
+                    }
+                }
             }
         }
     }

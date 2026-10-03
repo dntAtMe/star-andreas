@@ -1,6 +1,8 @@
 mod fx;
+mod heat_haze;
 mod player;
 mod saphys;
+mod shadows;
 mod stream;
 mod vehicle;
 mod weather;
@@ -69,6 +71,8 @@ fn main() -> anyhow::Result<()> {
         saphys::SaPhysPlugin,
         fx::FxPlugin,
         weather::WeatherPlugin,
+        shadows::ShadowsPlugin,
+        heat_haze::HeatHazePlugin,
     ))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))

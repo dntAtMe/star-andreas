@@ -5,7 +5,7 @@
 //! yet), object damage / exploding objects, glass, the fire hydrant, the molotov ped/car
 //! /world ignition helpers, and water checks (there is no water yet).
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use crate::{
     automobile::Automobile,
@@ -14,6 +14,7 @@ use crate::{
     effects::ExplosionType,
     physical::{EntityType, ef, normalise, pf},
     ped::PedLogic,
+    shadows::ShadowTex,
     world::{EntityId, World},
 };
 
@@ -172,7 +173,19 @@ impl World {
             }
         }
 
-        self.effects.scorches.push(pos);
+        // Scorch: shad_heli, 16x16, 30 s (visualfx.md B.2).
+        self.add_permanent_shadow(
+            1,
+            ShadowTex::Heli,
+            pos + Vec3::new(0.0, 0.0, 5.0),
+            Vec2::new(8.0, 0.0),
+            Vec2::new(0.0, -8.0),
+            200,
+            [0, 0, 0],
+            10.0,
+            30_000,
+            1.0,
+        );
         let e = &self.explosions[slot];
         if e.force != 0.0 && e.trigger_time == 0 {
             let (r, f, pct) = (e.radius, e.force, e.dmg_pct);

@@ -165,6 +165,22 @@ pub struct Physical {
     pub damage_entity_kind: Option<EntityType>,
     /// Distance moved by the last successful ProcessCollision / ProcessShift.
     pub moving_speed: f32,
+    /// Static-friction contacts of this frame (ApplyFriction's spark inputs), drained
+    /// by the world's effects pass.
+    pub scrapes: Vec<Scrape>,
+}
+
+/// A static friction contact: what `CPhysical::ApplyFriction` (0x5454C0) feeds its sparks.
+#[derive(Debug, Clone, Copy)]
+pub struct Scrape {
+    pub point: Vec3,
+    pub normal: Vec3,
+    /// Tangential slip speed (units/tick) and its direction.
+    pub slip: f32,
+    pub dir: Vec3,
+    pub surface_a: u8,
+    pub surface_b: u8,
+    pub move_speed: Vec3,
 }
 
 impl Physical {
@@ -192,6 +208,7 @@ impl Physical {
             last_collision_impact_velocity: Vec3::ZERO,
             damage_entity_kind: None,
             moving_speed: 0.0,
+            scrapes: Vec::new(),
         }
     }
 
@@ -675,6 +692,17 @@ impl Physical {
         let m = self.eff_mass(r - com, dir);
         let imp = (-(m * s)).max(-adhesion);
         self.apply_friction_force(dir * imp, r);
+        if s > 0.1 {
+            self.scrapes.push(Scrape {
+                point: cp.point,
+                normal: n,
+                slip: s,
+                dir,
+                surface_a: cp.surface_a,
+                surface_b: cp.surface_b,
+                move_speed: self.move_speed,
+            });
+        }
         true
     }
 

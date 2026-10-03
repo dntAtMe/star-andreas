@@ -5,9 +5,9 @@
 //! Everything is in the game's Z-up space, in metres and seconds (`dt = ts * 0.02`).
 //! The renderer gets plain quads (`render`); textures and blending are its business.
 //!
-//! Not ported: audio (DoFxAudio), heat-haze drawing (those prims only flag
-//! `heat_haze_needed`), SMOKE secondary particles, TRAIL orientation (drawn as
-//! camera-facing), GROUNDCOLLIDE, and water (FLOAT is a no-op, UNDERWATER kills).
+//! Not ported: audio (DoFxAudio), SMOKE secondary particles, GROUNDCOLLIDE, and water
+//! (FLOAT is a no-op, UNDERWATER kills). Heat-haze prims are drawn by
+//! `render_heat_haze` for the post effect's mask.
 
 pub mod bp;
 
@@ -75,6 +75,22 @@ pub struct Env {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SysId(pub u32);
+
+/// `FxPrtMult_c` (0x4AB290): colour, size, spin and life multipliers.
+#[derive(Debug, Clone, Copy)]
+pub struct PrtMult {
+    pub rgba: [f32; 4],
+    pub size: f32,
+    pub ang_change: f32,
+    pub life: f32,
+}
+
+impl Default for PrtMult {
+    /// 0x4AB270: all 1.0.
+    fn default() -> Self {
+        Self { rgba: [1.0; 4], size: 1.0, ang_change: 1.0, life: 1.0 }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlayStatus {
@@ -229,6 +245,8 @@ struct RenderInfo {
     self_lit: bool,
     flat: Option<(Vec3, Vec3, Vec3)>,
     dir: Option<Vec3>,
+    /// TRAIL: (trail time, screen-space mode 2).
+    trail: Option<(f32, bool)>,
 }
 
 fn process_render(p: &PrimBp, time: f32, ratio: f32, len: f32) -> RenderInfo {
@@ -243,6 +261,7 @@ fn process_render(p: &PrimBp, time: f32, ratio: f32, len: f32) -> RenderInfo {
         self_lit: false,
         flat: None,
         dir: None,
+        trail: None,
     };
     for i in &p.infos[p.first_render..] {
         let tm = if i.prt { ratio } else { time / len };
@@ -279,6 +298,7 @@ fn process_render(p: &PrimBp, time: f32, ratio: f32, len: f32) -> RenderInfo {
                 r.tex_id = v(0) as i32;
             }
             ty::SELFLIT => r.self_lit = true,
+            ty::TRAIL => r.trail = Some((v(0), v(1) > 0.1)),
             _ => {}
         }
     }
@@ -399,6 +419,8 @@ pub struct FxManager {
     pub quality: u8,
     /// Set by render when a heat-haze prim has particles.
     pub heat_haze_needed: bool,
+    /// dt of the last update (screen-space trails use `ts * 0.02`).
+    last_dt: f32,
 }
 
 impl FxManager {
@@ -424,6 +446,7 @@ impl FxManager {
             camera: None,
             quality: 3,
             heat_haze_needed: false,
+            last_dt: 0.0,
         })
     }
 
@@ -596,6 +619,57 @@ impl FxManager {
         }
     }
 
+    /// `FxSystem_c::EnablePrim` (0x4AA610).
+    pub fn enable_prim(&mut self, id: SysId, prim: usize, on: bool) {
+        if let Some(e) = self.sys(id).and_then(|s| s.emitters.get_mut(prim)) {
+            e.0 = on;
+        }
+    }
+
+    /// `FxSystem_c::AddParticle` (0x4AA440) → `FxEmitter_c::AddParticle(pos)` (0x4A3EA0) on
+    /// every enabled prim: emission infos at time 0, `M = parent · translate(pos) · prim`,
+    /// explicit velocity, multipliers from `mult`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_particle(
+        &mut self,
+        id: SysId,
+        pos: Vec3,
+        vel: Vec3,
+        time_since: f32,
+        mult: &PrtMult,
+        z_rot: f32,
+        light_mult: f32,
+        light_mult_limit: f32,
+        local: bool,
+        env: &Env,
+    ) {
+        let q = ((self.rng.next() & 0xFFFF) as f32 * 3.051_757_8e-5 * 100.0) as i32;
+        if (self.quality == 0 && q < 50) || (self.quality == 1 && q < 25) {
+            return;
+        }
+        let brightness = if light_mult < light_mult_limit { (1.0 - light_mult_limit) + light_mult } else { 1.0 };
+        let Some(s) = self.systems.get(&id.0) else { return };
+        let bi = s.bp;
+        let parent = s.parent_mat.unwrap_or(Affine3A::IDENTITY);
+        let use_const = s.use_const;
+        let enabled: Vec<bool> = s.emitters.iter().map(|e| e.0).collect();
+        for (pi, on) in enabled.into_iter().enumerate() {
+            if !on {
+                continue;
+            }
+            let prim = &self.bps[bi].prims[pi];
+            let em = process_emission(prim, 0.0, 0.0, self.bps[bi].length, use_const);
+            let m = parent * Affine3A::from_translation(pos) * prim.matrix.unwrap_or(Affine3A::IDENTITY);
+            let created =
+                self.create_particle(id.0, bi, pi, &em, m, time_since, brightness, local, env, Some(vel), mult);
+            if created && z_rot >= 0.0 {
+                if let Some(p) = self.particles[bi][pi].last_mut() {
+                    p.forced_rot = (z_rot * 0.5) as i32 as u8;
+                }
+            }
+        }
+    }
+
     pub fn is_alive(&self, id: SysId) -> bool {
         self.systems.contains_key(&id.0)
     }
@@ -616,6 +690,7 @@ impl FxManager {
     /// resolves the parent keys given to `create` (None keeps the last matrix).
     pub fn update(&mut self, cam: &Camera, dt: f32, env: &Env, parents: impl Fn(u64) -> Option<Affine3A>) {
         self.camera = Some(*cam);
+        self.last_dt = dt;
         for s in self.systems.values_mut() {
             if let Some(m) = s.parent.and_then(&parents) {
                 s.parent_mat = Some(m);
@@ -763,7 +838,7 @@ impl FxManager {
         let n = accum as i32;
         for i in 0..n {
             let since = (i as f32 / accum) * dt;
-            self.create_particle(id, bi, pi, &em, m, since, 1.2, local, env);
+            self.create_particle(id, bi, pi, &em, m, since, 1.2, local, env, None, &PrtMult::default());
         }
         let s = self.systems.get_mut(&id).unwrap();
         s.emitters[pi].1 -= (s.emitters[pi].1 as i32) as f32;
@@ -782,12 +857,14 @@ impl FxManager {
         brightness: f32,
         local: bool,
         env: &Env,
-    ) {
+        vel_in: Option<Vec3>,
+        mult: &PrtMult,
+    ) -> bool {
         if self.live >= MAX_PARTICLES {
-            return; // no SetMustCreatePrts users here
+            return false; // no SetMustCreatePrts users here
         }
         let r = &mut self.rng;
-        let lifetime = r.r() * em.life_bias + em.life;
+        let lifetime = (r.r() * em.life_bias + em.life) * mult.life;
         let rnd = [0, 1, 2].map(|_| (r.u() * 255.0) as i32 as u8);
         let rotation = em.rot_min + (em.rot_max - em.rot_min) * r.u();
         let prim = &self.bps[bi].prims[pi];
@@ -807,25 +884,33 @@ impl FxManager {
             v * k * em.radius
         } + em.pos;
         let pos = m.transform_point3(o);
-        let theta = r.u() * 6.283_180_2;
-        let phi_min = em.angle_min * 0.017_453_279;
-        let phi = phi_min + (em.angle_max * 0.017_453_279 - phi_min) * r.u();
-        let speed_r = r.r();
-        let local_dir = Vec3::new(self.cos(theta) * self.sin(phi), self.cos(phi), self.sin(theta) * self.sin(phi));
-        let axis = if em.dir.x > 10.0 { pos } else { em.dir.normalize_or_zero() };
-        let axis = m.transform_vector3(axis);
-        let dir = align_to_axis(local_dir, axis);
+        let vel = match vel_in {
+            // An explicit velocity is copied as is: no cone, no rand().
+            Some(v) => v,
+            None => {
+                let theta = r.u() * 6.283_180_2;
+                let phi_min = em.angle_min * 0.017_453_279;
+                let phi = phi_min + (em.angle_max * 0.017_453_279 - phi_min) * r.u();
+                let speed_r = r.r();
+                let local_dir =
+                    Vec3::new(self.cos(theta) * self.sin(phi), self.cos(phi), self.sin(theta) * self.sin(phi));
+                let axis = if em.dir.x > 10.0 { pos } else { em.dir.normalize_or_zero() };
+                let axis = m.transform_vector3(axis);
+                align_to_axis(local_dir, axis) * (speed_r * em.speed_bias + em.speed)
+            }
+        };
         let s = &self.systems[&id];
-        let vel = dir * (speed_r * em.speed_bias + em.speed) + s.vel_add;
+        let vel = vel + s.vel_add;
+        let b = |x: f32| (x * 255.0) as i32 as u8;
         let mut p = Particle {
             sys: SysId(id),
             lifetime,
             age: 0.0,
             pos,
             vel,
-            colour_mult: [255; 4],
-            size_mult: 255,
-            spin_mult: 255,
+            colour_mult: mult.rgba.map(b),
+            size_mult: b(mult.size),
+            spin_mult: b(mult.ang_change),
             rnd,
             brightness: (brightness * 100.0) as i32 as u8,
             forced_rot: 0xFF,
@@ -836,6 +921,7 @@ impl FxManager {
         update_particle(&self.bps[bi].prims[pi], view, since, &mut p, env, &mut self.rng);
         self.particles[bi][pi].push(p);
         self.live += 1;
+        true
     }
 
     /// `FxManager_c::Render` (0x4A92A0), normal pass: quads in the original draw order.
@@ -845,18 +931,33 @@ impl FxManager {
         let mut out = Vec::new();
         for bi in (0..self.bps.len()).rev() {
             for pi in 0..self.bps[bi].prims.len() {
-                self.render_prim(bi, pi, cam, brightness, &mut out);
+                self.render_prim(bi, pi, cam, brightness, false, &mut out);
+            }
+        }
+        out
+    }
+
+    /// `FxManager_c::Render(cam, heatHazePass = true)`: only HEATHAZE prims, as black quads
+    /// with the render alpha (`RenderHeatHaze` 0x4A1940) for the heat-haze mask.
+    pub fn render_heat_haze(&mut self, cam: &Camera) -> Vec<Batch> {
+        let mut out = Vec::new();
+        for bi in (0..self.bps.len()).rev() {
+            for pi in 0..self.bps[bi].prims.len() {
+                if self.bps[bi].prims[pi].has_heat_haze {
+                    self.render_prim(bi, pi, cam, 1.0, true, &mut out);
+                }
             }
         }
         out
     }
 
     /// `FxEmitterBP_c::Render` (0x4A2C40).
-    fn render_prim(&mut self, bi: usize, pi: usize, cam: &Camera, mut brightness: f32, out: &mut Vec<Batch>) {
+    fn render_prim(&mut self, bi: usize, pi: usize, cam: &Camera, mut brightness: f32, haze: bool, out: &mut Vec<Batch>) {
         let bp = &self.bps[bi];
         let prim = &bp.prims[pi];
         let list = &mut self.particles[bi][pi];
-        if prim.has_heat_haze {
+        let dt = self.last_dt;
+        if prim.has_heat_haze && !haze {
             if !list.is_empty() {
                 self.heat_haze_needed = true;
             }
@@ -878,9 +979,18 @@ impl FxManager {
         for p in list.iter_mut().rev() {
             let Some(s) = self.systems.get(&p.sys.0) else { continue };
             let pos = if p.local { s.world().transform_point3(p.pos) } else { p.pos };
-            let ri = process_render(prim, s.curr_time, p.age / p.lifetime, bp.length);
+            let mut ri = process_render(prim, s.curr_time, p.age / p.lifetime, bp.length);
             // Orientation.
-            let (b_right, b_up, axis) = if let Some(dv) = ri.dir {
+            let (b_right, b_up, axis) = if let Some((time, screen)) = ri.trail {
+                // TRAIL (sparks.md 4.1). Mode 2's camera vector (TheCamera+0x9EC) is taken as camPos.
+                let trail = if screen { p.vel * dt * time } else { p.vel * time };
+                let d = if trail == Vec3::ZERO { Vec3::Z } else { trail.normalize() };
+                let v = (pos - cam.pos).normalize_or_zero();
+                let right = d.cross(v);
+                ri.rect[0] = trail.length();
+                ri.rect[1] = 0.0;
+                (right, d, d.cross(right))
+            } else if let Some(dv) = ri.dir {
                 let mut d = if dv.length() < 0.001 { p.vel } else { dv };
                 if d == Vec3::ZERO {
                     d = Vec3::Z;
@@ -940,7 +1050,7 @@ impl FxManager {
                 }
                 [(c[0] * brightness) as i32 as u8, (c[1] * brightness) as i32 as u8, (c[2] * brightness) as i32 as u8]
             };
-            let rgba = [rgb[0], rgb[1], rgb[2], c[3] as i32 as u8];
+            let rgba = if haze { [0, 0, 0, ri.c[3]] } else { [rgb[0], rgb[1], rgb[2], c[3] as i32 as u8] };
             // Texture.
             if ri.anim_tex {
                 let pick = |i: usize| prim.textures[i].clone().unwrap_or_else(|| tex0.clone());

@@ -23,6 +23,7 @@ use crate::{
     Ctx,
     clock::Clock,
     damage::Rand,
+    shadows::Shadows,
     weather::Weather,
     effects::{Effects, FrameFx, WorldRequest},
     explosion::{Explosion, MAX_EXPLOSIONS},
@@ -55,7 +56,7 @@ pub enum EntityId {
 pub struct Building {
     pub matrix: Matrix,
     pub col: Arc<ColModel>,
-    scan: u16,
+    pub(crate) scan: u16,
     sectors: Vec<u32>,
 }
 
@@ -156,9 +157,15 @@ pub struct World {
     /// atan2(fwd.x, fwd.y)), set by the app.
     pub camera_pos: Vec3,
     pub camera_fwd: Vec3,
+    /// Camera matrix right (TheCamera+0x9C4..), for the fire coronas.
+    pub camera_right: Vec3,
+    /// Camera side planes (outward normal, d), for on-screen tests.
+    pub camera_planes: [(Vec3, f32); 4],
     pub camera_orientation: f32,
     pub clock: Clock,
     pub weather: Weather,
+    /// Permanent and static shadows (scorch marks, fire glow).
+    pub shadows: Shadows,
     /// The CRT `rand()` shared by explosions and fires.
     pub rng: Rand,
     pub(crate) explosions: Vec<Explosion>,
@@ -190,9 +197,12 @@ impl World {
             frame: 0,
             camera_pos: Vec3::ZERO,
             camera_fwd: Vec3::Y,
+            camera_right: Vec3::X,
+            camera_planes: [(Vec3::ZERO, 1e9); 4],
             camera_orientation: 0.0,
             clock: Clock::new(0),
             weather: Weather::default(),
+            shadows: Shadows::new(),
             rng: Rand::new(1),
             explosions: vec![Explosion::default(); MAX_EXPLOSIONS],
             fires: vec![Fire::default(); MAX_FIRES],
@@ -291,6 +301,18 @@ impl World {
         self.bodies.iter().enumerate().filter(|(_, b)| b.is_some()).map(|(i, _)| EntityId::Body(i as u32)).collect()
     }
 
+    pub(crate) fn next_scan_code(&mut self) -> u16 {
+        self.next_scan()
+    }
+
+    pub(crate) fn sectors_ref(&self) -> &Vec<Vec<u32>> {
+        &self.sectors
+    }
+
+    pub(crate) fn building_mut(&mut self, i: u32) -> Option<&mut Building> {
+        self.buildings.get_mut(i as usize)?.as_mut()
+    }
+
     fn next_scan(&mut self) -> u16 {
         if self.scan_code == u16::MAX {
             for b in self.buildings.iter_mut().flatten() {
@@ -336,6 +358,7 @@ impl World {
         self.now_ms = self.time_ms as u32;
         self.frame = self.frame.wrapping_add(1);
         self.effects.lights.clear();
+        self.effects.coronas.clear();
         // CGame::Process: clock and weather before the world.
         self.update_clock_and_weather(ts);
         let mut ctx = Ctx::new(ts);
@@ -397,9 +420,39 @@ impl World {
     /// Body effect hooks, their world requests, then explosions and fires.
     fn process_effects(&mut self, ts: f32) {
         let mut requests: Vec<WorldRequest> = Vec::new();
+        let player_in_vehicle =
+            self.bodies.iter().flatten().any(|b| b.phys.kind == EntityType::Vehicle && b.phys.status == Status::Player);
         for (i, b) in self.bodies.iter_mut().enumerate() {
             let Some(b) = b else { continue };
-            let mut f = FrameFx { fx: &mut self.effects, requests: &mut requests, now_ms: self.now_ms };
+            let mut f = FrameFx {
+                fx: &mut self.effects,
+                requests: &mut requests,
+                now_ms: self.now_ms,
+                frame: self.frame,
+                ts,
+                rng: &mut self.rng,
+                cam: self.camera_pos,
+                cam_planes: self.camera_planes,
+                wet_roads: self.weather.wet_roads,
+                player_in_vehicle,
+                surfaces: &self.surfaces,
+            };
+            // CPhysical::ApplyFriction scrape sparks (sparks.md 3.2), 8 per contact.
+            for sc in std::mem::take(&mut b.phys.scrapes) {
+                let fe_a = f.surfaces.info(sc.surface_a).friction_effect;
+                let fe_b = f.surfaces.info(sc.surface_b).friction_effect;
+                if fe_b == 0 || !(fe_a == 1 || b.phys.kind == EntityType::Vehicle) {
+                    continue;
+                }
+                let sp = sc.dir * (sc.slip * 0.25);
+                let force = sc.slip * 12.5;
+                let d = sc.dir + sc.normal * 0.1;
+                let across = sc.normal.cross(sc.move_speed).normalize_or_zero();
+                for _ in 0..8 {
+                    let k = f.rng.rand01() * 0.4 - 0.2;
+                    f.add_sparks(sc.point + across * k, d, force, 1, sp, false, 0.1, 1.0);
+                }
+            }
             b.logic.process_effects(EntityId::Body(i as u32), &mut b.phys, &b.col, &mut f);
         }
         for r in requests {
@@ -415,6 +468,9 @@ impl World {
         self.update_explosions(ts);
         self.update_fires(ts);
         self.update_creeping();
+        self.update_permanent_shadows();
+        // Render-time UpdateStaticShadows: drop shadows not re-stored this frame.
+        self.update_static_shadows();
     }
 
     // ------------------------------------------------------------ ProcessCollision
@@ -1352,6 +1408,28 @@ mod tests {
             .collect();
         assert_eq!(names, ["fire_med", "fire"]);
         assert!(!w.fires[i].active);
+    }
+
+    #[test]
+    fn explosion_scorch_projects_onto_the_ground() {
+        use crate::effects::ExplosionType;
+        let mut w = World::default();
+        w.add_building(Matrix::IDENTITY, ground());
+        w.add_explosion(None, None, ExplosionType::Grenade, Vec3::new(1.0, 2.0, 0.5), 0, -1.0, true);
+        w.process(1.0);
+        let s: Vec<_> = w.shadows.statics.iter().flatten().collect();
+        assert_eq!(s.len(), 1, "one scorch");
+        let polys = &s[0].polys;
+        assert!(!polys.is_empty(), "polygons on the up-facing ground");
+        let area: f32 = polys
+            .iter()
+            .map(|p| {
+                let v = &p.verts;
+                (1..v.len() - 1).map(|k| (v[k].0 - v[0].0).cross(v[k + 1].0 - v[0].0).length() * 0.5).sum::<f32>()
+            })
+            .sum();
+        assert!((area - 256.0).abs() < 1.0, "16x16 scorch, area {area}");
+        assert!(polys.iter().all(|p| p.verts.iter().all(|v| v.0.z.abs() < 1e-3)));
     }
 
     #[test]
