@@ -341,7 +341,7 @@ fn ui(
                         t.gun.as_ref().map_or("-".to_string(), |g| format!("{:?}", g.last_cmd))
                     ));
                     ui.text("LMB fire, RMB aim, wheel / Q / E switch");
-                    for (i, &ty) in [22u32, 23, 24, 25, 26, 27, 28, 29, 32, 30, 31, 33, 38].iter().enumerate() {
+                    for (i, &ty) in [22u32, 23, 24, 25, 26, 27, 28, 29, 32, 30, 31, 33, 38, 16, 17, 18, 39, 35, 36, 37, 41, 42].iter().enumerate() {
                         if i % 4 != 0 {
                             ui.same_line();
                         }

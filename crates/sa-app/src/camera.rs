@@ -40,6 +40,8 @@ const VACC: f32 = 0.0015;
 pub enum CamMode {
     #[default]
     FollowPed = 4,
+    /// MODE_ROCKETLAUNCHER (and 51 the heat-seeker variant): `Process_Rocket` 0x511B50.
+    Rocket = 8,
     AimWeapon = 53,
 }
 
@@ -51,6 +53,8 @@ pub struct AimRequest {
     /// weapon.dat flag 0x2 (aim with arm): standing one-handed weapons don't turn the ped.
     pub aim_with_arm: bool,
     pub ducking: bool,
+    /// The requested mode (53 aim weapon, 8 / 51 rocket launcher).
+    pub mode: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -194,15 +198,28 @@ fn sa_camera(
 
     // SetNewPlayerWeaponMode from the player's weapon task (re-requested every frame).
     cam.request = sa.logic::<PedLogic>(ped.sa).and_then(|l| {
-        (l.tasks.cam_request == 53).then(|| {
+        (l.tasks.cam_request != 0).then(|| {
             let w = l.tasks.active_weapon().ty;
             let arm = l.tasks.info_of(w).is_some_and(|i| i.has(sa_physics::weapon::wf::AIMWITHARM));
-            AimRequest { weapon: w, aim_with_arm: arm, ducking: l.tasks.ducking_for_camera() }
+            AimRequest { weapon: w, aim_with_arm: arm, ducking: l.tasks.ducking_for_camera(), mode: l.tasks.cam_request }
         })
     });
 
     // Mode request → transition (StartTransition: alpha, beta and FOV carry over).
-    let want = if cam.request.is_some() { CamMode::AimWeapon } else { CamMode::FollowPed };
+    let want = match cam.request.map(|r| r.mode) {
+        Some(8 | 51) => CamMode::Rocket,
+        Some(_) => CamMode::AimWeapon,
+        None => CamMode::FollowPed,
+    };
+    // Into and out of the 1st-person rocket camera: a jump cut.
+    if want != cam.mode && (want == CamMode::Rocket || cam.mode == CamMode::Rocket) {
+        cam.mode = want;
+        cam.transition = None;
+        cam.prev_target = None;
+        if want == CamMode::Rocket {
+            cam.alpha = 0.0;
+        }
+    }
     if want != cam.mode {
         let (dur, c10, c14) = if want == CamMode::AimWeapon { (0.4, 0.0, 1.0) } else { (0.35, 0.1, 0.9) };
         cam.transition = Some(Transition {
@@ -268,6 +285,29 @@ fn sa_camera(
             let mut t = t;
             t.z += cam.duck_follow;
             (collide(cam, &mut sa, t, src, ped_e, ts, 0.2), t)
+        }
+        CamMode::Rocket => {
+            // Process_Rocket (0x511B50): FOV 70, eye at the head bone + 0.1 z.
+            cam.fov = 70.0;
+            cam.beta += mx * -3.0 * k * HACC;
+            cam.alpha += my * 4.0 * k * VACC;
+            cam.alpha = cam.alpha.clamp(-1.562_069_8, 1.047_197_6);
+            cam.front = front_of(cam.alpha, cam.beta);
+            let head = sa.logic::<PedLogic>(ped.sa).and_then(|l| {
+                let c = l.clump.as_deref()?;
+                let f = c.frame_of_tag(5)?;
+                let m = sa.world.body(ped.sa)?.phys.matrix;
+                Some(m.transform(c.ltm(f).w_axis.truncate()))
+            });
+            let eye = head.unwrap_or(ped_pos + Vec3::new(0.0, 0.0, 0.6)) + Vec3::new(0.0, 0.0, 0.1);
+            // The ped faces where the launcher points.
+            let h = cam.beta + FRAC_PI_2;
+            if let Some(logic) = sa.logic_mut::<PedLogic>(ped.sa) {
+                logic.cur_rot = h;
+                logic.aim_rot = h;
+                logic.tasks.pd.look_pitch = -cam.alpha;
+            }
+            (eye, eye)
         }
         CamMode::AimWeapon => {
             let req = cam.request.unwrap();

@@ -12,6 +12,7 @@ use crate::{
     Ctx,
     anim::{AnimManager, Clump, af, anim_id, group},
     bullet::InstantHit,
+    effects::WorldRequest,
     pedtask::{PedCore, PedTasks},
     weapon::{WeaponInfo, fire, wf, ws, wt},
     world::EntityId,
@@ -682,9 +683,42 @@ fn rotate_torso_for_arm(c: &mut PedCore, target: Vec3) {
 pub fn process_player_weapon(t: &mut PedTasks, c: &mut PedCore, ctx: &Ctx) {
     let Some(info) = t.active_info() else { return };
     let w = *t.active_weapon();
+    // 1. First-person weapons: the aim button switches to their camera (rocket launchers only
+    //    here; FireSniper / the camera weapon are not ported).
+    if info.has(wf::FIRSTPERSON) && t.pad.aim && matches!(w.ty, wt::RLAUNCHER | wt::RLAUNCHER_HS) {
+        t.cam_request = if w.ty == wt::RLAUNCHER { 8 } else { 51 };
+    }
+    // USE: the detonator on a fresh press.
+    if info.fire_type == fire::USE {
+        if t.pad.fire_just_down && w.ty == wt::DETONATOR && t.weapons[t.active_slot].can_fire(1) {
+            t.requests.push(WorldRequest::Detonate);
+            let slot = t.active_slot;
+            t.weapons[slot].total_ammo = 1;
+            t.weapons[slot].ammo_in_clip = 1;
+            t.weapons[slot].after_shot(ctx.now_ms, &info, 0, true, true);
+        }
+        return;
+    }
+    // Thrown weapons: CTaskSimpleThrowProjectile on a fresh press, released on button up.
+    if info.fire_type == fire::PROJECTILE && !matches!(w.ty, wt::RLAUNCHER | wt::RLAUNCHER_HS) {
+        if t.pad.fire && t.move_state != 7 && t.pd.chosen_slot == t.active_slot {
+            match &mut t.throw {
+                None => {
+                    if t.pad.fire_just_down && t.gun.is_none() {
+                        t.throw = Some(crate::pedtask::ThrowTask::new(ctx.now_ms));
+                    }
+                }
+                Some(th) => th.control_throw(t.pad.fire_just_down, ctx.now_ms),
+            }
+        } else if let Some(th) = &mut t.throw {
+            th.control_throw(true, ctx.now_ms);
+        }
+        return;
+    }
     // Fire held.
     if t.pad.fire && t.move_state != 7 && t.pd.chosen_slot == t.active_slot {
-        if matches!(info.fire_type, fire::INSTANT_HIT | fire::AREA_EFFECT) && !info.has(wf::FIRSTPERSON) {
+        let rocket = matches!(w.ty, wt::RLAUNCHER | wt::RLAUNCHER_HS) && t.cam_request != 0;
+        if rocket || (matches!(info.fire_type, fire::INSTANT_HIT | fire::AREA_EFFECT) && !info.has(wf::FIRSTPERSON)) {
             let mut cmd = Some(GunCmd::Fire);
             if w.state == ws::RELOADING {
                 cmd = (t.pad.aim || t.pd.free_aim).then_some(GunCmd::Aim);
@@ -735,6 +769,12 @@ pub fn process_player_weapon(t: &mut PedTasks, c: &mut PedCore, ctx: &Ctx) {
             None => t.gun = Some(UseGun::new(GunCmd::Aim)),
             Some(g) => g.control_gun(GunCmd::Aim),
         }
+    } else if t.pad.aim && t.cam_request != 0 {
+        // First-person aim (rocket camera): the gun task holds AIM.
+        match &mut t.gun {
+            None => t.gun = Some(UseGun::new(GunCmd::Aim)),
+            Some(g) => g.control_gun(GunCmd::Aim),
+        }
     } else {
         if let Some(g) = &mut t.gun {
             if !t.pad.fire && (t.pad.walk_ud.abs() > 50.0 || t.pad.walk_lr.abs() > 50.0) {
@@ -752,7 +792,7 @@ pub fn process_player_weapon(t: &mut PedTasks, c: &mut PedCore, ctx: &Ctx) {
 
 /// `CTaskSimpleUseGun::SetPedPosition` → `FireGun` (0x61EB10) → `CWeapon::Fire` (0x742300):
 /// returns the instant-hit shots of this frame and updates ammo / gun flash.
-pub fn fire_guns(t: &mut PedTasks, clump: &Clump, p: &crate::physical::Physical, owner: EntityId, now: u32) -> Vec<InstantHit> {
+pub fn fire_guns(t: &mut PedTasks, clump: &Clump, p: &crate::physical::Physical, owner: EntityId, now: u32) -> Vec<WorldRequest> {
     let mut out = Vec::new();
     let Some(g) = &mut t.gun else { return out };
     let bits = std::mem::take(&mut g.fire_bits);
@@ -770,28 +810,63 @@ pub fn fire_guns(t: &mut PedTasks, clump: &Clump, p: &crate::physical::Physical,
         let ty = t.weapons[slot].ty;
         let Some(infos) = t.infos.clone() else { continue };
         let std_clip = infos.get(ty, 1).ammo_clip;
+        // FireProjectile refuses rockets outside the 1st-person rocket cameras (no ammo used).
+        let rocket = matches!(ty, wt::RLAUNCHER | wt::RLAUNCHER_HS);
+        if rocket && !matches!(t.cam.mode, 34 | 7 | 8 | 51 | 42 | 39 | 40 | 52) {
+            continue;
+        }
         if !t.weapons[slot].can_fire(std_clip) {
             continue;
         }
-        let instant = matches!(ty, 22..=33 | 38);
-        if !instant {
-            continue;
-        }
-        let skill = t.weapon_skill(ty);
-        out.push(InstantHit {
-            owner,
-            ty,
-            skill,
-            origin,
-            effect,
-            is_player: true,
-            accuracy: t.accuracy,
-            ducking: t.ducking,
-            attack_counter: t.pd.attack_counter,
-            model_flash: t.weapon_model >= 0,
-        });
-        // Pistols, SMGs and rifles on foot: the anim sets the rate.
-        let set_time = matches!(ty, 25..=27);
+        let set_time = match ty {
+            22..=24 | 28..=33 | 38 => {
+                out.push(WorldRequest::FireInstantHit(InstantHit {
+                    owner,
+                    ty,
+                    skill: t.weapon_skill(ty),
+                    origin,
+                    effect,
+                    is_player: true,
+                    accuracy: t.accuracy,
+                    ducking: t.ducking,
+                    attack_counter: t.pd.attack_counter,
+                    model_flash: t.weapon_model >= 0,
+                }));
+                false // the anim sets the rate on foot
+            }
+            25..=27 => {
+                out.push(WorldRequest::FireInstantHit(InstantHit {
+                    owner,
+                    ty,
+                    skill: t.weapon_skill(ty),
+                    origin,
+                    effect,
+                    is_player: true,
+                    accuracy: t.accuracy,
+                    ducking: t.ducking,
+                    attack_counter: t.pd.attack_counter,
+                    model_flash: t.weapon_model >= 0,
+                }));
+                true
+            }
+            wt::RLAUNCHER | wt::RLAUNCHER_HS => {
+                // Muzzle = hand bone · fireOffset (FireGun passes the muzzle as the effect point).
+                let muzzle = p.matrix.transform(ltm.transform_point3(info.fire_offset));
+                out.push(WorldRequest::FireProjectile { owner, ty, effect: muzzle, force: 0.0, cam: Some((t.cam.front, t.cam.up)) });
+                true
+            }
+            wt::FTHROWER | wt::SPRAYCAN | wt::EXTINGUISHER => {
+                out.push(WorldRequest::FireAreaEffect {
+                    owner,
+                    ty,
+                    src: effect,
+                    mouse_cam: t.cam.mode == 4,
+                    look_pitch: Some(t.pd.look_pitch),
+                });
+                false
+            }
+            _ => continue,
+        };
         let reload = infos.reload_time(&info);
         t.weapons[slot].after_shot(now, &info, reload, true, set_time);
         if t.weapons[slot].state == ws::FIRING {

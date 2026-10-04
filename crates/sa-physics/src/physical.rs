@@ -158,6 +158,10 @@ pub struct Physical {
     pub bound_radius: f32,
     // Damage bookkeeping (`SetDamagedPieceRecord`).
     pub damage_intensity: f32,
+    /// `m_pEntityIgnoredCollision` (+0x128): no collision with this entity.
+    pub ignored: Option<crate::world::EntityId>,
+    /// The entity of the last hard contact this frame (collision record 0).
+    pub last_hit: Option<crate::world::EntityId>,
     pub damage_piece: u8,
     pub last_collision_pos: Vec3,
     pub last_collision_impact_velocity: Vec3,
@@ -203,6 +207,8 @@ impl Physical {
             vehicle: None,
             bound_radius: 1.0,
             damage_intensity: 0.0,
+            ignored: None,
+            last_hit: None,
             damage_piece: 0,
             last_collision_pos: Vec3::ZERO,
             last_collision_impact_velocity: Vec3::ZERO,
@@ -448,6 +454,7 @@ impl Physical {
             return;
         }
         self.flags &= !(pf::COLLIDED | pf::DOOR_HIT_LIMIT);
+        self.last_hit = None;
         self.damage_piece = 0;
         self.damage_intensity = 0.0;
         self.damage_entity_kind = None;

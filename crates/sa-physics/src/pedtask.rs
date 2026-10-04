@@ -14,6 +14,8 @@ use glam::{Vec2, Vec3};
 
 use crate::{
     Ctx,
+    effects::WorldRequest,
+    world::EntityId,
     anim::{AnimManager, Clump, af, anim_id, group},
     gun::{GunCmd, UseGun},
     physical::Physical,
@@ -103,6 +105,104 @@ pub enum AirTask {
     Land { anim: Option<u32>, anim_id: i16, first: bool, finished: bool },
 }
 
+/// `CTaskSimpleThrowProjectile` (0x61F660), player version (no target).
+#[derive(Debug, Clone, Default)]
+pub struct ThrowTask {
+    pub finished: bool,
+    start_done: bool,
+    released: bool,
+    anim: Option<u32>,
+    /// Start time; after the release or the throw, the hold duration in ms.
+    time: u32,
+}
+
+impl ThrowTask {
+    pub fn new(now: u32) -> Self {
+        Self { time: now, ..Default::default() }
+    }
+
+    /// `ControlThrow(release, ...)` (0x61F810).
+    pub fn control_throw(&mut self, release: bool, now: u32) {
+        if self.finished {
+            return;
+        }
+        if release && !self.released {
+            self.time = now.wrapping_sub(self.time);
+            self.released = true;
+        }
+    }
+
+    /// `ProcessPed` (0x62AF50) with StartAnim (0x6259E0). Returns true when done.
+    fn process(&mut self, t: &mut PedTasks, c: &mut PedCore, m: &AnimManager, now: u32) -> bool {
+        // FinishAnimThrowCB (0x61F890).
+        if let Some(u) = self.anim {
+            if c.clump.finished.contains(&u) || c.clump.by_uid(u).is_none() {
+                self.anim = None;
+                if !self.start_done {
+                    self.start_done = true;
+                } else {
+                    self.finished = true;
+                }
+            }
+        }
+        let w = *t.active_weapon();
+        let Some(info) = t.info_of(w.ty).cloned() else { return true };
+        if self.finished || !info.has(wf::THROW) {
+            return true;
+        }
+        let Some(u) = self.anim else {
+            let (id, delta) = if !self.start_done {
+                (228, 16.0)
+            } else {
+                let over_arm = !self.released && w.ty != wt::SATCHEL_CHARGE;
+                (if over_arm { 230 } else { 229 }, 1000.0)
+            };
+            self.anim = c.clump.blend_animation(m, info.anim_group, id, delta).map(|i| {
+                c.clump.assocs[i].finish_cb = true;
+                c.clump.assocs[i].uid
+            });
+            if self.anim.is_none() {
+                return true;
+            }
+            return false;
+        };
+        let Some(a) = c.clump.by_uid(u) else { return false };
+        if a.id != 229 && a.id != 230 {
+            return false;
+        }
+        let f = if a.id == 230 { info.anim2_loop_fire } else { info.anim_loop_fire };
+        let (tt, dt) = (a.time, a.time_step());
+        if !(f < tt) || !(tt - dt <= f) || !a.has(af::PLAYING) {
+            return false;
+        }
+        if !self.released {
+            self.time = now.wrapping_sub(self.time);
+        }
+        let hold = self.time.min(533);
+        t.pd.attack_counter = hold as f32 * 0.05;
+        // The hand: right hand bone · fireOffset ((0,0,0) for the thrown weapons).
+        let Some(hand) = c.clump.frame_of_tag(crate::gun::bone::R_HAND) else { return false };
+        let pos = c.p.matrix.transform(c.clump.ltm(hand).transform_point3(info.fire_offset));
+        let slot = t.active_slot;
+        if t.weapons[slot].can_fire(info.ammo_clip) {
+            let force = t.pd.attack_counter * 0.0375;
+            t.requests.push(WorldRequest::FireProjectile { owner: EntityId::Body(u32::MAX), ty: w.ty, effect: pos, force, cam: None });
+            let reload = t.infos.as_deref().map_or(1000, |i| i.reload_time(&info));
+            t.weapons[slot].after_shot(now, &info, reload, true, true);
+            if w.ty == wt::SATCHEL_CHARGE {
+                // Fire(39): give the detonator; switch to it when no satchels are left.
+                let left = t.weapons[slot].total_ammo;
+                let ds = t.give_weapon(wt::DETONATOR, 1);
+                if left <= 1 {
+                    t.weapons[ds].state = crate::weapon::ws::READY;
+                    t.set_current_weapon(ds);
+                }
+            }
+        }
+        false
+    }
+}
+
 /// `CPedIK` (ped+0x50C): the torso angles.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PedIk {
@@ -125,6 +225,13 @@ pub struct PedTasks {
     /// ped+0x71A (100 for the player).
     pub accuracy: u8,
     pub gun: Option<UseGun>,
+    /// `CTaskSimpleThrowProjectile` (also secondary slot 0).
+    pub throw: Option<ThrowTask>,
+    /// World requests of this step (shots from the throw task, the detonator); the ped's
+    /// owner id is filled in when they are sent.
+    pub requests: Vec<crate::effects::WorldRequest>,
+    /// TheCamera as of this step.
+    pub cam: crate::CamInfo,
     /// `CTaskSimpleDuck` in secondary slot 1.
     pub duck: Option<crate::duck::DuckTask>,
     /// ped+0x46C & 0x4000000 bIsDucking.
@@ -167,6 +274,9 @@ impl Default for PedTasks {
             active_slot: 0,
             accuracy: 100,
             gun: None,
+            throw: None,
+            requests: Vec::new(),
+            cam: crate::CamInfo::default(),
             duck: None,
             ducking: false,
             air: AirTask::None,
@@ -410,6 +520,7 @@ impl PedTasks {
         let Some(m) = self.anims.clone() else { return };
         self.cam_request = 0;
         self.now_ms = ctx.now_ms;
+        self.cam = ctx.cam;
         if !matches!(self.air, AirTask::None) {
             self.process_air(c, ctx, &m);
         } else {
@@ -429,7 +540,13 @@ impl PedTasks {
                 self.player_on_foot(c, ctx, &m);
             }
         }
-        // Secondary tasks: slot 0 the use-gun task, slot 1 the duck.
+        // Secondary tasks: slot 0 the use-gun or throw task, slot 1 the duck.
+        if let Some(mut th) = self.throw.take() {
+            let done = th.process(self, c, &m, ctx.now_ms);
+            if !done {
+                self.throw = Some(th);
+            }
+        }
         if let Some(mut g) = self.gun.take() {
             let done = g.process_ped(self, c, ctx, &m);
             if !done {

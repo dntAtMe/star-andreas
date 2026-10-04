@@ -17,6 +17,10 @@ pub enum FxCmd {
     /// `FxManager_c::CreateFxSystem(name, pos, attach, ignoreBounding)` (0x4A9BE0). With
     /// `attach`, `offset` is in that body's model space and the system follows it.
     Create { h: FxHandle, name: &'static str, offset: Vec3, attach: Option<EntityId>, ignore_bounding: bool },
+    /// A world system with `Fx_c::CreateMatFromVec(pos, dir)` as its matrix (local +Y = dir).
+    CreateDir { h: FxHandle, name: &'static str, pos: Vec3, dir: Vec3 },
+    /// Re-aim a `CreateDir` system.
+    SetDir(FxHandle, Vec3, Vec3),
     Play(FxHandle),
     /// Play, then free the system once it has finished.
     PlayAndKill(FxHandle),
@@ -97,6 +101,17 @@ impl Effects {
         let h = FxHandle(self.next);
         self.cmds.push(FxCmd::Create { h, name, offset, attach, ignore_bounding });
         h
+    }
+
+    pub fn create_dir(&mut self, name: &'static str, pos: Vec3, dir: Vec3) -> FxHandle {
+        self.next += 1;
+        let h = FxHandle(self.next);
+        self.cmds.push(FxCmd::CreateDir { h, name, pos, dir });
+        h
+    }
+
+    pub fn set_dir(&mut self, h: FxHandle, pos: Vec3, dir: Vec3) {
+        self.cmds.push(FxCmd::SetDir(h, pos, dir));
     }
 
     pub fn play(&mut self, h: FxHandle) {
@@ -212,6 +227,12 @@ pub enum WorldRequest {
     },
     /// `CWeapon::Fire` of an instant-hit gun (FireInstantHit needs the whole world).
     FireInstantHit(crate::bullet::InstantHit),
+    /// `CWeapon::Fire` of a thrown weapon or a rocket launcher; `cam` = (front, up) for rockets.
+    FireProjectile { owner: EntityId, ty: u32, effect: Vec3, force: f32, cam: Option<(Vec3, Vec3)> },
+    /// `CWeapon::FireAreaEffect`.
+    FireAreaEffect { owner: EntityId, ty: u32, src: Vec3, mouse_cam: bool, look_pitch: Option<f32> },
+    /// `CWorld::UseDetonator`.
+    Detonate,
 }
 
 /// `eExplosionType`.

@@ -55,6 +55,8 @@ pub fn fx_camera_of(gt: &GlobalTransform, frustum: &Frustum) -> FxCamera {
 /// A gameplay handle and what is needed to (re)create its system.
 struct Slot {
     sys: Option<SysId>,
+    /// World matrix for `CreateDir` systems.
+    mat: Option<bevy::math::Affine3A>,
     name: &'static str,
     offset: Vec3,
     attach: Option<EntityId>,
@@ -187,9 +189,24 @@ fn update_fx(
     for c in cmds {
         match c {
             FxCmd::Create { h, name, offset, attach, ignore_bounding } => {
-                let mut slot = Slot { sys: None, name, offset, attach, ignore_bb: ignore_bounding, played: None };
+                let mut slot = Slot { sys: None, mat: None, name, offset, attach, ignore_bb: ignore_bounding, played: None };
                 try_create(&mut fx.man, &mut slot, sa, &parent_of);
                 fx.slots.insert(h, slot);
+            }
+            FxCmd::CreateDir { h, name, pos, dir } => {
+                let m = mat_from_vec(pos, dir);
+                let mut slot = Slot { sys: None, mat: Some(m), name, offset: pos, attach: None, ignore_bb: false, played: None };
+                try_create(&mut fx.man, &mut slot, sa, &parent_of);
+                fx.slots.insert(h, slot);
+            }
+            FxCmd::SetDir(h, pos, dir) => {
+                let m = mat_from_vec(pos, dir);
+                if let Some(slot) = fx.slots.get_mut(&h) {
+                    slot.mat = Some(m);
+                    if let Some(s) = slot.sys {
+                        fx.man.set_local_matrix(s, m);
+                    }
+                }
             }
             FxCmd::Play(h) | FxCmd::PlayAndKill(h) => {
                 let and_kill = matches!(c, FxCmd::PlayAndKill(_));
@@ -274,6 +291,15 @@ fn live(
     slot.sys
 }
 
+/// `Fx_c::CreateMatFromVec` (0x49E950): up (local +Y) = normalize(dir), right = up × Z (not
+/// normalised), at = right × up.
+fn mat_from_vec(pos: Vec3, dir: Vec3) -> bevy::math::Affine3A {
+    let up = dir.normalize_or(Vec3::Y);
+    let right = Vec3::new(up.y, -up.x, 0.0);
+    let at = right.cross(up);
+    bevy::math::Affine3A::from_cols(right.into(), up.into(), at.into(), pos.into())
+}
+
 fn try_create(
     man: &mut FxManager,
     slot: &mut Slot,
@@ -287,7 +313,10 @@ fn try_create(
         },
         None => None,
     };
-    slot.sys = man.create(slot.name, slot.offset, parent, slot.ignore_bb);
+    slot.sys = match slot.mat {
+        Some(m) => man.create_mat(slot.name, m, parent, slot.ignore_bb),
+        None => man.create(slot.name, slot.offset, parent, slot.ignore_bb),
+    };
     if let (Some(s), Some(and_kill)) = (slot.sys, slot.played) {
         if and_kill { man.play_and_kill(s) } else { man.play(s) }
     }

@@ -443,6 +443,9 @@ fn player_control(
     let auto_fire = std::env::var("SA_AUTOFIRE").is_ok();
     pad.aim = (mouse && buttons.pressed(MouseButton::Right)) || std::env::var("SA_AUTOAIM").is_ok();
     pad.fire = (mouse && buttons.pressed(MouseButton::Left)) || auto_fire;
+    if auto_fire && (time.elapsed_secs() % 3.0) < time.delta_secs() {
+        pad.fire_just_down = true;
+    }
     pad.fire_just_down |= mouse && buttons.just_pressed(MouseButton::Left);
     pad.duck_just_down |= just(KeyCode::KeyC);
     // SA_AUTODUCK=1: crouch once (debug).

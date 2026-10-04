@@ -191,6 +191,8 @@ pub struct World {
     pub weapon_infos: Option<Arc<crate::weapon::WeaponInfos>>,
     /// `CBulletTraces`.
     pub bullet_traces: crate::bullet::BulletTraces,
+    /// `CProjectileInfo` and `CShotInfo`.
+    pub projectiles: crate::projectile::Projectiles,
     /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
     pub(crate) gun_fx_toggle: u8,
 }
@@ -236,6 +238,7 @@ impl World {
             creeping: [[0; 32]; 32],
             weapon_infos: None,
             bullet_traces: Default::default(),
+            projectiles: Default::default(),
             gun_fx_toggle: 0,
         }
     }
@@ -509,10 +512,20 @@ impl World {
                     self.store_car_light_shadow(car, id, tex, pos, front, side, rgb, max_view_angle);
                 }
                 WorldRequest::FireInstantHit(h) => self.fire_instant_hit(h),
+                WorldRequest::FireProjectile { owner, ty, effect, force, cam } => {
+                    self.fire_projectile(owner, ty, effect, force, cam);
+                }
+                WorldRequest::FireAreaEffect { owner, ty, src, mouse_cam, look_pitch } => {
+                    self.fire_area_effect(owner, ty, src, mouse_cam, look_pitch);
+                }
+                WorldRequest::Detonate => self.use_detonator(),
             }
         }
         self.bullet_traces.update(self.now_ms);
+        // CWeapon::UpdateWeapons: shots, explosions, projectiles.
+        self.update_shots(ts);
         self.update_explosions(ts);
+        self.update_projectiles(ts);
         self.update_fires(ts);
         self.update_creeping();
         self.update_permanent_shadows();
@@ -656,12 +669,17 @@ impl World {
         if !shift {
             out.extend(buildings.iter().copied());
         }
+        let me_ignored = self.b(i).phys.ignored;
         for j in self.dynamic_order(shift) {
             if j == i {
                 continue;
             }
             let o = self.b(j);
             if !o.phys.has_e(ef::USES_COLLISION) {
+                continue;
+            }
+            // SpecialEntityPreCollisionStuff: either side's m_pEntityIgnoredCollision.
+            if me_ignored == Some(EntityId::Body(j as u32)) || o.phys.ignored == Some(EntityId::Body(i as u32)) {
                 continue;
             }
             let oc = o.phys.matrix.transform(o.col.bound_center);
@@ -781,12 +799,16 @@ impl World {
                     || ped_vs_resting_prop
             }
         };
-        if static_path {
+        let hit = if static_path {
             self.static_response(i, other, &cps[..n], stuck, ctx)
         } else {
             let EntityId::Body(j) = other else { unreachable!() };
             self.physical_response(i, j as usize, &cps[..n], stuck, ctx)
+        };
+        if hit == Hit::Hard && self.b(i).phys.last_hit.is_none() {
+            self.bm(i).phys.last_hit = Some(other);
         }
+        hit
     }
 
     /// Static path of ProcessCollisionSectorList.
@@ -1122,6 +1144,14 @@ impl World {
         self.process_line_of_sight(start, end, &LosOpts { bodies: !buildings_only, ignore, ..Default::default() })
     }
 
+    /// The player ped's body.
+    pub fn player_id(&self) -> Option<EntityId> {
+        self.bodies.iter().enumerate().find_map(|(i, b)| {
+            let b = b.as_ref()?;
+            b.logic.as_any().downcast_ref::<PedLogic>().filter(|p| p.is_player).map(|_| EntityId::Body(i as u32))
+        })
+    }
+
     /// The camera as the ped tasks see it.
     pub fn cam_info(&self) -> crate::CamInfo {
         crate::CamInfo {
@@ -1230,6 +1260,9 @@ impl World {
                 if !b.phys.has_e(ef::USES_COLLISION) && b.phys.kind != EntityType::Ped {
                     continue;
                 }
+                if !o.peds && b.phys.kind == EntityType::Ped {
+                    continue;
+                }
                 let tyres = if o.car_tyres && b.phys.kind == EntityType::Vehicle {
                     b.logic.tyre_spheres(&b.col)
                 } else {
@@ -1248,6 +1281,8 @@ pub struct LosOpts {
     pub buildings: bool,
     /// Vehicles, peds and objects.
     pub bodies: bool,
+    /// Peds among the bodies.
+    pub peds: bool,
     /// `seeThrough`: skip see-through surfaces.
     pub see_through: bool,
     /// `shootThrough`: skip shoot-through surfaces.
@@ -1264,6 +1299,7 @@ impl Default for LosOpts {
         Self {
             buildings: true,
             bodies: true,
+            peds: true,
             see_through: false,
             shoot_through: false,
             car_tyres: false,

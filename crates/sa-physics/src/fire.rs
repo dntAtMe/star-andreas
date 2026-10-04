@@ -30,7 +30,7 @@ pub(crate) struct Fire {
     script: bool,
     extinguishing: bool,
     pub(crate) first_generation: bool,
-    pos: Vec3,
+    pub(crate) pos: Vec3,
     target: Option<EntityId>,
     creator: Option<EntityId>,
     time_to_burn: u32,
@@ -82,7 +82,7 @@ impl World {
     }
 
     /// 0x539360: strength tiers fire / fire_med / fire_large, always world-positioned.
-    fn create_fire_fx(&mut self, i: usize) {
+    pub(crate) fn create_fire_fx(&mut self, i: usize) {
         if let Some(h) = self.fires[i].fx.take() {
             self.effects.kill(h);
         }

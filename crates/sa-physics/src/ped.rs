@@ -105,8 +105,6 @@ pub struct PedLogic {
     pub prev_pose: Vec<(Quat, Vec3)>,
     /// Player tasks (on foot, weapons); used when the clump and anims are set.
     pub tasks: PedTasks,
-    /// Shots of this frame, sent to the world after the physics.
-    shots: Vec<crate::bullet::InstantHit>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,7 +136,6 @@ impl PedLogic {
             clump: None,
             prev_pose: Vec::new(),
             tasks: PedTasks::default(),
-            shots: Vec::new(),
         }
     }
 
@@ -318,11 +315,14 @@ impl BodyLogic for PedLogic {
             self.tasks.ikm.update_chains(clump, |w| inv.transform(w));
         }
         if let Some(clump) = self.clump.as_deref() {
-            let shots = crate::gun::fire_guns(&mut self.tasks, clump, phys, id, fx.now_ms);
-            self.shots.extend(shots);
+            let reqs = crate::gun::fire_guns(&mut self.tasks, clump, phys, id, fx.now_ms);
+            fx.requests.extend(reqs);
         }
-        for s in self.shots.drain(..) {
-            fx.requests.push(WorldRequest::FireInstantHit(s));
+        for mut r in self.tasks.requests.drain(..) {
+            if let WorldRequest::FireProjectile { owner, .. } = &mut r {
+                *owner = id;
+            }
+            fx.requests.push(r);
         }
     }
 

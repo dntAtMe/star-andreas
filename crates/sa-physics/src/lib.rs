@@ -25,6 +25,7 @@ pub mod ped;
 pub mod pedtask;
 pub mod shadows;
 pub mod physical;
+pub mod projectile;
 pub mod surface;
 pub mod timecycle;
 pub mod vehicle_lights;

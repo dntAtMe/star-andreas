@@ -470,9 +470,21 @@ impl FxManager {
     /// key the caller resolves in `update`; `parent_mat` its current value. Returns None
     /// for unknown names, or when the bounding sphere is off-screen (the caller retries).
     pub fn create(&mut self, name: &str, pos: Vec3, parent: Option<(u64, Affine3A)>, ignore_bb: bool) -> Option<SysId> {
+        self.create_mat(name, Affine3A::from_translation(pos), parent, ignore_bb)
+    }
+
+    /// Replace a system's local matrix (`FxSystem_c::SetMatrix` / `SetParentMatrix` for a
+    /// world-placed system).
+    pub fn set_local_matrix(&mut self, id: SysId, m: Affine3A) {
+        if let Some(s) = self.sys(id) {
+            s.local = m;
+        }
+    }
+
+    /// `CreateFxSystem(name, RwMatrix*, ...)`: a system with a full local matrix.
+    pub fn create_mat(&mut self, name: &str, local: Affine3A, parent: Option<(u64, Affine3A)>, ignore_bb: bool) -> Option<SysId> {
         let &bi = self.by_name.get(&name.to_ascii_uppercase())?;
         let bp = &self.bps[bi];
-        let local = Affine3A::from_translation(pos);
         if !ignore_bb {
             if let (Some((c, r)), Some(cam)) = (bp.sphere, self.camera) {
                 let w = match parent {

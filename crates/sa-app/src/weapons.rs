@@ -31,7 +31,9 @@ impl Plugin for WeaponsPlugin {
         app.add_systems(Startup, (load_weapon_defs, setup_hud, setup_traces))
             .add_systems(
                 PostUpdate,
-                (update_weapon_model, draw_traces, update_hud).after(SaSync).before(TransformSystems::Propagate),
+                (update_weapon_model, draw_traces, update_hud, sync_projectiles, rocket_view)
+                    .after(SaSync)
+                    .before(TransformSystems::Propagate),
             );
     }
 }
@@ -72,6 +74,10 @@ struct HeldWeapon {
     model: i32,
     left: bool,
 }
+
+/// Marks weapon clumps that are not in a hand (projectiles).
+#[derive(Component)]
+struct Loose;
 
 /// The gunflash atomic of a held weapon: (material, base local transform).
 #[derive(Component)]
@@ -210,7 +216,8 @@ fn update_weapon_model(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     ped: Single<&Ped>,
-    held: Query<(Entity, &HeldWeapon)>,
+    held: Query<(Entity, &HeldWeapon, &ChildOf)>,
+    loose: Query<(), With<Loose>>,
     mut flashes: Query<(&GunFlash, &mut Transform, &Children)>,
     mut vis: Query<&mut Visibility>,
 ) {
@@ -219,7 +226,8 @@ fn update_weapon_model(
     let t = &logic.tasks;
     let model = t.weapon_model;
     let twin = t.info_of(t.active_weapon().ty).is_some_and(|i| i.has(wf::TWIN_PISTOL));
-    let current: Vec<(Entity, i32, bool)> = held.iter().map(|(e, h)| (e, h.model, h.left)).collect();
+    let current: Vec<(Entity, i32, bool)> =
+        held.iter().filter(|(_, _, p)| !loose.contains(p.parent())).map(|(e, h, _)| (e, h.model, h.left)).collect();
     let want_left = model >= 0 && twin;
     let ok = current.iter().all(|&(_, m, _)| m == model)
         && current.iter().any(|&(_, _, l)| !l) == (model >= 0)
@@ -262,6 +270,99 @@ fn update_weapon_model(
             if let Ok(mut v) = vis.get_mut(c) {
                 *v = if a > 0 { Visibility::Inherited } else { Visibility::Hidden };
             }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ projectiles
+
+/// The visual of `CProjectileInfo` slot `.0` (body `.1`).
+#[derive(Component)]
+struct ProjectileVis(usize, sa_physics::world::EntityId);
+
+/// Spawn / move / despawn the models of the world's projectiles; also give the world the
+/// projectile models' bounds (AddProjectile's sphere = 0.75 · bound radius).
+#[allow(clippy::too_many_arguments)]
+fn sync_projectiles(
+    mut commands: Commands,
+    world: Res<WorldRes>,
+    defs: Option<Res<WeaponDefs>>,
+    mut sa: ResMut<SaPhys>,
+    mut cache: Local<Cache>,
+    mut bounds_done: Local<bool>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut vis: Query<(Entity, &ProjectileVis, &mut Transform)>,
+) {
+    let Some(defs) = defs else { return };
+    if !*bounds_done {
+        *bounds_done = true;
+        for model in [342, 343, 344, 345, 363] {
+            let entry = cache.0.entry(model).or_insert_with(|| {
+                let (name, txd_name) = defs.0.get(&model)?;
+                load_model(&world, &mut images, name, txd_name)
+            });
+            if let Some(wm) = entry {
+                let pts: Vec<Vec3> = wm.clump.geometries.iter().flat_map(|g| g.positions.iter().map(|p| Vec3::from(*p))).collect();
+                if let (Some(lo), Some(hi)) = (pts.iter().copied().reduce(Vec3::min), pts.iter().copied().reduce(Vec3::max)) {
+                    let c = (lo + hi) * 0.5;
+                    let r = pts.iter().map(|p| (*p - c).length()).fold(0.0, f32::max);
+                    sa.world.projectiles.model_bounds.insert(model, (c, r));
+                }
+            }
+        }
+    }
+    let infos: Vec<(usize, sa_physics::world::EntityId, sa_physics::physical::Matrix, i32)> = sa
+        .world
+        .projectiles
+        .infos
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.active)
+        .filter_map(|(i, p)| {
+            let id = p.body?;
+            let b = sa.world.body(id)?;
+            let model = b.logic.as_any().downcast_ref::<sa_physics::projectile::ProjectileLogic>()?.model;
+            Some((i, id, b.phys.matrix, model))
+        })
+        .collect();
+    let mut have = Vec::new();
+    for (e, pv, mut tf) in &mut vis {
+        match infos.iter().find(|(i, id, _, _)| *i == pv.0 && *id == pv.1) {
+            Some((_, _, m, _)) => {
+                *tf = crate::saphys::transform_from_gta(m);
+                have.push(pv.0);
+            }
+            None => commands.entity(e).despawn(),
+        }
+    }
+    for (i, id, m, model) in infos {
+        if have.contains(&i) {
+            continue;
+        }
+        let entry = cache.0.entry(model).or_insert_with(|| {
+            let (name, txd_name) = defs.0.get(&model)?;
+            load_model(&world, &mut images, name, txd_name)
+        });
+        let Some(wm) = entry.as_ref() else { continue };
+        // The model is authored in GTA space: one -90° X turn into Bevy space.
+        let root = commands
+            .spawn((crate::saphys::transform_from_gta(&m), Visibility::default(), ProjectileVis(i, id)))
+            .id();
+        let inner = commands.spawn((Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)), Visibility::default())).id();
+        commands.entity(root).add_child(inner);
+        spawn_weapon(&mut commands, &mut meshes, &mut materials, wm, inner, Transform::IDENTITY, model, false);
+        commands.entity(inner).insert(Loose);
+    }
+}
+
+/// In the 1st-person rocket camera the player is not drawn (only the crosshair).
+fn rocket_view(cam: Res<SaCam>, mut ped: Query<&mut Visibility, With<Ped>>) {
+    let want = if cam.mode == CamMode::Rocket { Visibility::Hidden } else { Visibility::Inherited };
+    for mut v in &mut ped {
+        if *v != want {
+            *v = want;
         }
     }
 }
@@ -355,6 +456,9 @@ struct CrossQuad(u8);
 struct CrossDot;
 
 #[derive(Component)]
+struct RocketQuad(u8);
+
+#[derive(Component)]
 struct WeaponIcon;
 
 #[derive(Component)]
@@ -367,6 +471,22 @@ fn setup_hud(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Ass
         .and_then(|t| t.into_iter().find(|t| t.name.eq_ignore_ascii_case("siteM16")))
         .and_then(|t| convert_texture(t, false))
         .map(|t| images.add(make_image(t)));
+    let rocket = std::fs::read(root.0.join("models/hud.txd"))
+        .ok()
+        .and_then(|d| txd::parse(&d).ok())
+        .and_then(|t| t.into_iter().find(|t| t.name.eq_ignore_ascii_case("siterocket")))
+        .and_then(|t| convert_texture(t, false))
+        .map(|t| images.add(make_image(t)));
+    if let Some(rocket) = rocket {
+        for q in 0..4u8 {
+            commands.spawn((
+                ImageNode { image: rocket.clone(), flip_x: q & 1 != 0, flip_y: q & 2 != 0, ..default() },
+                Node { position_type: PositionType::Absolute, ..default() },
+                Visibility::Hidden,
+                RocketQuad(q),
+            ));
+        }
+    }
     let Some(site) = site else {
         warn!("hud.txd siteM16 missing: no crosshair");
         return;
@@ -413,10 +533,11 @@ fn update_hud(
     mut images: ResMut<Assets<Image>>,
     ped: Single<&Ped>,
     driving: Res<crate::vehicle::Driving>,
-    mut quads: Query<(&CrossQuad, &mut Node, &mut Visibility), (Without<CrossDot>, Without<WeaponIcon>, Without<AmmoText>)>,
-    mut dot: Query<(&mut Node, &mut Visibility), (With<CrossDot>, Without<WeaponIcon>, Without<AmmoText>)>,
-    mut icon: Query<(&mut ImageNode, &mut Node, &mut Visibility), (With<WeaponIcon>, Without<AmmoText>, Without<CrossQuad>)>,
-    mut ammo: Query<(&mut Text, &mut TextFont, &mut Node, &mut Visibility), (With<AmmoText>, Without<CrossQuad>)>,
+    mut quads: Query<(&CrossQuad, &mut Node, &mut Visibility), (Without<CrossDot>, Without<WeaponIcon>, Without<AmmoText>, Without<RocketQuad>)>,
+    mut dot: Query<(&mut Node, &mut Visibility), (With<CrossDot>, Without<WeaponIcon>, Without<AmmoText>, Without<RocketQuad>)>,
+    mut rockets: Query<(&RocketQuad, &mut Node, &mut Visibility), (Without<CrossQuad>, Without<CrossDot>, Without<WeaponIcon>, Without<AmmoText>)>,
+    mut icon: Query<(&mut ImageNode, &mut Node, &mut Visibility), (With<WeaponIcon>, Without<AmmoText>, Without<CrossQuad>, Without<RocketQuad>)>,
+    mut ammo: Query<(&mut Text, &mut TextFont, &mut Node, &mut Visibility), (With<AmmoText>, Without<CrossQuad>, Without<RocketQuad>)>,
 ) {
     let (w, h) = (window.width(), window.height());
     let logic = sa.logic::<PedLogic>(ped.sa);
@@ -439,6 +560,22 @@ fn update_hud(
                 radius = Some(r.max(0.2));
             }
         }
+    }
+    // Rocket launcher camera: siterocket, four 24×24 quarters pushed 20 units out from the centre.
+    for (q, mut node, mut vis) in &mut rockets {
+        if cam.mode != CamMode::Rocket {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        let (qw, qh) = (w / 640.0 * 24.0, h / 448.0 * 24.0);
+        let (ox, oy) = (w / 640.0 * 20.0, h / 448.0 * 20.0);
+        let x = (w / 2.0).floor() + if q.0 & 1 != 0 { qw * 0.5 + ox } else { -(qw * 0.5 + ox) };
+        let y = (h / 2.0).floor() + if q.0 & 2 != 0 { qh * 0.5 + oy } else { -(qh * 0.5 + oy) };
+        node.left = px(x - qw * 0.5);
+        node.top = px(y - qh * 0.5);
+        node.width = px(qw);
+        node.height = px(qh);
+        *vis = Visibility::Inherited;
     }
     let (cx, cy) = (w * CHAIR_X, h * 0.4);
     for (q, mut node, mut vis) in &mut quads {

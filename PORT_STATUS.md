@@ -54,7 +54,10 @@ Last updated: 2026-10-05.
 | Player weapon control (ProcessPlayerWeapon, CTaskSimpleUseGun, switching, anim groups) | ✅ | PC mouse free aim; lock-on, pistol whip, burst fire missing |
 | Instant-hit bullets (FireInstantHit, shotgun pellets, DoBulletImpact) | 🟡 | vehicles (damage, force, tyres), objects (force), buildings; ped damage, CGlass, ObjectDamage breaking, petrol cap, water splashes missing |
 | Aiming IK (CPedIK torso, IKChainManager CCD chains: arms, head look-at) | ✅ | bone limits from ms_boneInfos; chains only used by the gun task so far |
-| Projectiles, area-effect, sniper / rocket / camera 1st person, melee | ❌ | |
+| Thrown weapons (CTaskSimpleThrowProjectile, grenade, tear gas, molotov, satchel + detonator) | ✅ | satchels stop where they hit instead of attaching to moving entities; tear gas choking needs ped damage |
+| Rocket launcher (1st-person rocket camera, CProjectileInfo rockets) | 🟡 | heat-seeker lock-on and homing not ported (fires plain rockets, as SA does without a lock) |
+| Area effect (FireAreaEffect, CShotInfo: flamethrower, extinguisher, spraycan) | 🟡 | spray tags and ped hits need ped damage / tags |
+| Sniper, camera, melee | ❌ | |
 | Traffic and pedestrians (population, paths, AI) | ❌ | |
 | Wanted level, police | ❌ | |
 | Pickups, collectables | ❌ | |
