@@ -1473,6 +1473,7 @@ impl World {
             EntityId::Building(_) => Vec3::ZERO,
         };
         let soft_surfaces = self.surfaces.clone();
+        let dn = self.clock.dn_balance();
         // SAFETY: `other` is never body `i`; its model is only read during this call.
         let other_col = unsafe { &*other_col };
         let body = self.bodies[i].as_mut().unwrap();
@@ -1520,6 +1521,15 @@ impl World {
                             phys.matrix.pos.z = z;
                         }
                     }
+                    // Contact-surface brightness (+0x12C): the day/night colpoint lighting / 30;
+                    // players ease toward it at ts·0.1, other peds take it at once.
+                    // [Not ported: standing on a vehicle copies the vehicle's value.]
+                    let target = crate::bullet::col_lighting(lp[0].lighting_b, 0.5, dn);
+                    ped.lighting = if ped.is_player {
+                        (1.0 - ts * 0.1) * ped.lighting + target * ts * 0.1
+                    } else {
+                        target
+                    };
                     ped.ground_normal = lp[0].normal;
                     ped.ground_surface = lp[0].surface_b;
                 }

@@ -88,6 +88,8 @@ pub struct PedLogic {
     pub was_standing: bool,
     pub ground_normal: Vec3,
     pub ground_surface: u8,
+    /// `m_fContactSurfaceBrightness` (+0x12C, default 1.0): the ground's collision lighting.
+    pub lighting: f32,
     /// Ground entity (vehicle/object) the ped stands on, if any.
     pub ground_entity: Option<EntityId>,
     pub ceiling_z: f32,
@@ -129,6 +131,7 @@ impl PedLogic {
             was_standing: false,
             ground_normal: Vec3::Z,
             ground_surface: 0,
+            lighting: 1.0,
             ground_entity: None,
             ceiling_z: NO_CEILING,
             ceiling_probe: false,

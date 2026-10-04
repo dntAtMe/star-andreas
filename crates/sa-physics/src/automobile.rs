@@ -347,6 +347,8 @@ pub struct Automobile {
     pub comp: [f32; 4],
     pub comp_prev: [f32; 4],
     pub wheel_cp: [ColPoint; 4],
+    /// +0x574[4]: the collision lighting byte under each wheel (ctor 0x48).
+    pub wheel_lighting: [u8; 4],
     pub wheel_timer: [f32; 4],
     pub wheel_state: [WheelState; 4],
     pub wheel_speed: [f32; 4],
@@ -395,6 +397,13 @@ pub struct Automobile {
 }
 
 impl Automobile {
+    /// `CVehicle` 0x6D0CF0 (from PreRender): the contact-surface brightness (+0x12C), the
+    /// plain average of the four wheel lighting bytes (no smoothing, airborne wheels keep
+    /// their last byte).
+    pub fn lighting(&self, dn: f32) -> f32 {
+        self.wheel_lighting.iter().map(|&l| crate::bullet::col_lighting(l, 0.5, dn)).sum::<f32>() * 0.25
+    }
+
     /// `dummies`: model-space wheel dummy positions in game order (FL, RL, FR, RR).
     /// Adds the four suspension lines to `col` (SetupSuspensionLines 0x6A65D0).
     pub fn new(
@@ -444,6 +453,7 @@ impl Automobile {
             comp: [1.0; 4],
             comp_prev: [1.0; 4],
             wheel_cp: [ColPoint::default(); 4],
+            wheel_lighting: [0x48; 4],
             wheel_timer: [0.0; 4],
             wheel_state: [WheelState::Normal; 4],
             wheel_speed: [0.0; 4],
@@ -1020,6 +1030,7 @@ impl BodyLogic for Automobile {
             self.comp[i] = lines.values[i];
             if lines.values[i] < 1.0 {
                 self.wheel_cp[i] = lines.points[i];
+                self.wheel_lighting[i] = lines.points[i].lighting_b;
             }
         }
         self.do_burst_and_soft_ground_ratios(p, ts);

@@ -193,6 +193,9 @@ fn spawn_weapon(
             });
             let vis = if is_flash { Visibility::Hidden } else { Visibility::Inherited };
             let id = commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material.clone()), NoFrustumCulling, vis)).id();
+            if !is_flash {
+                commands.entity(id).insert(crate::dynlight::DynLit);
+            }
             if is_flash {
                 commands.entity(frames[frame]).insert(GunFlash {
                     material: material.clone(),

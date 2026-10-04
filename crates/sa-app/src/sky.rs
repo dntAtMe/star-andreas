@@ -210,7 +210,8 @@ fn update(
     // Bevy's ambient term is albedo * colour * brightness * exposure (~1/980 by default).
     let amb_obj = if lightning { Vec3::ONE } else { c.ambient_obj * lights_mult };
     ambient.color = Color::srgb(amb_obj.x.min(1.0), amb_obj.y.min(1.0), amb_obj.z.min(1.0));
-    ambient.brightness = 980.0;
+    // The ambient term is per entity (SetupLighting's m): applied as emissive by dynlight.rs.
+    ambient.brightness = 0.0;
     let dir_mult = dbg.dir_mult_override.unwrap_or(c.dir_mult);
     for (mut l, mut tf) in &mut dir_light {
         let d = dir_mult * 0.996_093_75 * lights_mult;

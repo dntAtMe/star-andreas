@@ -230,6 +230,7 @@ fn spawn_player(
         let part = commands
             .spawn((
                 Mesh3d(meshes.add(mesh)),
+                crate::dynlight::DynLit,
                 MeshMaterial3d(material),
                 SkinnedMesh { inverse_bindposes: inverse_bindposes.clone(), joints: joints.clone() },
                 NoFrustumCulling,

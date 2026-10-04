@@ -11,6 +11,7 @@ mod shadows;
 mod sky;
 mod stream;
 mod vehicle;
+mod dynlight;
 mod wasted;
 mod water;
 mod weapons;
@@ -90,7 +91,7 @@ fn main() -> anyhow::Result<()> {
         lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
-    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin))
+    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);

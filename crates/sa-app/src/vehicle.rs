@@ -24,6 +24,7 @@ use sa_physics::{
     world::{EntityId, PlainLogic},
 };
 
+use crate::dynlight::DynLit;
 use crate::{
     player::{CamFollow, GameRoot, Mode, Ped, frame_transform, ped_set_in_vehicle, ped_teleport},
     saphys::{SaBody, SaPhys, SaPhysExt, SaStep, gta_matrix, transform_from_gta},
@@ -360,7 +361,7 @@ fn spawn_vehicle(
             }
             // `_dam` models start hidden; damage swaps them in.
             let vis = if damaged { Visibility::Hidden } else { Visibility::Inherited };
-            let e = commands.spawn((Mesh3d(part.0.clone()), MeshMaterial3d(part.1.clone()), vis)).id();
+            let e = commands.spawn((Mesh3d(part.0.clone()), MeshMaterial3d(part.1.clone()), vis, DynLit)).id();
             commands.entity(frames[fi]).add_child(e);
             if let Some((c, di)) = comp {
                 let idx = match comps.iter().position(|x| x.comp == c) {
@@ -418,7 +419,7 @@ fn spawn_vehicle(
         let flip = if left { Quat::from_rotation_z(std::f32::consts::PI) } else { Quat::IDENTITY };
         let holder = commands.spawn((Transform::from_rotation(flip), Visibility::default())).id();
         for (m, mat) in &wheel_parts {
-            let e = commands.spawn((Mesh3d(m.clone()), MeshMaterial3d(mat.clone()))).id();
+            let e = commands.spawn((Mesh3d(m.clone()), MeshMaterial3d(mat.clone()), DynLit)).id();
             commands.entity(holder).add_child(e);
         }
         commands.entity(pivot).add_child(holder);
@@ -891,7 +892,7 @@ fn spawn_flying_part(
     let tf = transform_from_gta(&m);
     let root = commands.spawn((Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2)), Visibility::default())).id();
     for (mesh, mat, local) in &c.parts {
-        let e = commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), *local)).id();
+        let e = commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), *local, DynLit)).id();
         commands.entity(root).add_child(e);
     }
     commands
