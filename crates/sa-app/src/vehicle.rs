@@ -35,9 +35,18 @@ const SPAWN_LIST: &[&str] = &["greenwoo", "sabre", "infernus", "bobcat", "savann
 
 pub struct VehiclePlugin;
 
+/// Debug-UI spawn requests (vehicles.ide model names), spawned in front of the player.
+#[derive(Resource, Default)]
+pub struct SpawnQueue(pub Vec<String>);
+
+/// Spawnable models (automobiles only: the physics has no bikes, boats or aircraft yet).
+#[derive(Resource, Default)]
+pub struct VehicleModels(pub Vec<String>);
+
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Driving>()
+            .init_resource::<SpawnQueue>()
             .add_systems(Startup, load_vehicle_db)
             .add_systems(Update, (spawn_key, auto_drive, enter_exit, debug_damage, feed_inputs).chain().before(SaStep))
             .add_systems(Update, (update_wheels, update_damage, expire_flying_parts).after(SaStep));
@@ -136,10 +145,14 @@ fn load_vehicle_db(mut commands: Commands, root: Res<GameRoot>, mut images: ResM
     let read = |p: &str| -> Result<String> {
         Ok(String::from_utf8_lossy(&std::fs::read(root.0.join(p)).with_context(|| p.to_string())?).into_owned())
     };
-    let defs = vehicle::parse_vehicles_ide(&read("data/vehicles.ide")?).into_iter().map(|d| (d.model.clone(), d)).collect();
+    let defs: HashMap<String, VehicleDef> = vehicle::parse_vehicles_ide(&read("data/vehicles.ide")?).into_iter().map(|d| (d.model.clone(), d)).collect();
     let handling = vehicle::parse_handling(&read("data/handling.cfg")?);
     let colors = vehicle::parse_carcols(&read("data/carcols.dat")?);
     let generic = load_txd(&std::fs::read(root.0.join("models/generic/vehicle.txd"))?, &mut images)?;
+    let mut models: Vec<String> =
+        defs.values().filter(|d: &&VehicleDef| d.kind.eq_ignore_ascii_case("car")).map(|d| d.model.clone()).collect();
+    models.sort();
+    commands.insert_resource(VehicleModels(models));
     commands.insert_resource(VehicleDb { defs, handling, colors, generic, next_spawn: 0 });
     Ok(())
 }
@@ -490,12 +503,18 @@ fn spawn_key(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut queue: ResMut<SpawnQueue>,
 ) {
     let Some(mut db) = db else { return };
-    if !keys.just_pressed(KeyCode::KeyV) || *mode != Mode::Walk || driving.0.is_some() {
+    if *mode != Mode::Walk || driving.0.is_some() {
         return;
     }
-    let name = SPAWN_LIST[db.next_spawn % SPAWN_LIST.len()];
+    let queued = queue.0.pop();
+    if queued.is_none() && !keys.just_pressed(KeyCode::KeyV) {
+        return;
+    }
+    let name = queued.unwrap_or_else(|| SPAWN_LIST[db.next_spawn % SPAWN_LIST.len()].to_string());
+    let name = name.as_str();
     db.next_spawn += 1;
     let fwd = ped.rotation * Vec3::NEG_Z;
     let pos = ped.translation + fwd * 5.0 + Vec3::Y * 1.0;

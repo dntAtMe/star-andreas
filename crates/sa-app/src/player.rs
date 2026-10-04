@@ -391,11 +391,15 @@ fn cursor_lock(
     keys: Res<ButtonInput<KeyCode>>,
     mut lock: ResMut<MouseLock>,
     mut cursor: Single<&mut CursorOptions>,
+    dbg: Res<crate::debug::DebugUi>,
 ) {
     if *mode != Mode::Walk {
         return;
     }
-    if buttons.just_pressed(MouseButton::Left) {
+    if dbg.open {
+        // The debug UI needs a free cursor.
+        lock.0 = false;
+    } else if buttons.just_pressed(MouseButton::Left) {
         lock.0 = true;
     }
     if keys.just_pressed(KeyCode::Escape) {

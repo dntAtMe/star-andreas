@@ -78,9 +78,10 @@ fn debug_keys(keys: Res<ButtonInput<KeyCode>>, mut sa: ResMut<SaPhys>) {
     }
 }
 
-fn draw_streaks(sa: Res<SaPhys>, streaks: Res<Streaks>, mut meshes: ResMut<Assets<Mesh>>) {
+fn draw_streaks(sa: Res<SaPhys>, streaks: Res<Streaks>, mut meshes: ResMut<Assets<Mesh>>, dbg: Res<crate::debug::DebugUi>) {
     let Some(mut m) = meshes.get_mut(&streaks.0) else { return };
-    let s = &sa.world.weather.streaks;
+    let none = Vec::new();
+    let s = if dbg.rain_streaks { &sa.world.weather.streaks } else { &none };
     let mut pos = Vec::with_capacity(s.len() * 2 + 2);
     let mut col = Vec::with_capacity(s.len() * 2 + 2);
     // RGB 210,210,230; bottom alpha A, top alpha A/2.

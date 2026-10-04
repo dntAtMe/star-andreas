@@ -70,6 +70,11 @@ impl World {
         self.fires.iter().position(|f| !f.active && !f.script)
     }
 
+    /// Number of burning fires.
+    pub fn active_fires(&self) -> usize {
+        self.fires.iter().filter(|f| f.active).count()
+    }
+
     /// The fire burning on `id` (the entity's +0x490 back-pointer).
     pub(crate) fn fire_on(&self, id: EntityId) -> Option<usize> {
         self.fires.iter().position(|f| f.active && f.target == Some(id))

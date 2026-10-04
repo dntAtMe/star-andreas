@@ -1,3 +1,4 @@
+mod debug;
 mod fx;
 mod heat_haze;
 mod player;
@@ -73,6 +74,7 @@ fn main() -> anyhow::Result<()> {
         weather::WeatherPlugin,
         shadows::ShadowsPlugin,
         heat_haze::HeatHazePlugin,
+        debug::DebugPlugin,
     ))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
@@ -153,9 +155,10 @@ fn fly_camera(
     scroll: Res<AccumulatedMouseScroll>,
     mut cursor: Single<&mut CursorOptions>,
     cam: Single<(&mut Transform, &mut FlyCam)>,
+    dbg: Res<debug::DebugUi>,
 ) {
     let (mut tf, mut fc) = cam.into_inner();
-    let looking = buttons.pressed(MouseButton::Right);
+    let looking = buttons.pressed(MouseButton::Right) && !dbg.capture_mouse;
     cursor.grab_mode = if looking { CursorGrabMode::Locked } else { CursorGrabMode::None };
     cursor.visible = !looking;
 

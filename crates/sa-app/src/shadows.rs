@@ -90,6 +90,7 @@ fn draw(
     camera: Single<&GlobalTransform, With<Camera3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut tfs: Query<&mut Transform>,
+    dbg: Res<crate::debug::DebugUi>,
 ) {
     let Some(batches) = batches else { return };
     let origin = camera.translation();
@@ -98,7 +99,7 @@ fn draw(
     for (&(ty, st), (e, mesh_h)) in &batches.0 {
         let (mut pos, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::<u32>::new());
         for s in sa.world.shadows.statics.iter().flatten() {
-            if s.ty != ty || s.tex != st {
+            if s.ty != ty || s.tex != st || !dbg.shadows {
                 continue;
             }
             let rgb = shadow_colour(s.ty, s.light, s.rgb, dn);

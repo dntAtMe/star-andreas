@@ -87,9 +87,14 @@ fn update(
     time: Res<Time>,
     mut tiles: Local<Tiles>,
     mut cam: Single<(&Camera, &GlobalTransform, &Frustum, &mut HeatHaze)>,
+    dbg: Res<crate::debug::DebugUi>,
 ) {
     let (camera, gt, frustum, ref mut hh) = *cam;
     let Some(mut fx) = fx else { return };
+    if !dbg.heat_haze {
+        hh.params.y = 0.0;
+        return;
+    }
     let w = &sa.world.weather;
     let needed = fx.man.heat_haze_needed;
     let (intensity, mode) = if w.heat_haze > 0.0 {

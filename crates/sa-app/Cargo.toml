@@ -9,6 +9,7 @@ license.workspace = true
 sa-formats.workspace = true
 sa-physics = { path = "../sa-physics", features = ["bevy"] }
 sa-fx = { path = "../sa-fx" }
+bevy_mod_imgui = "0.10"
 anyhow.workspace = true
 bevy.workspace = true
 sc2-bevy = { path = "../sc2-bevy", optional = true, default-features = false }
