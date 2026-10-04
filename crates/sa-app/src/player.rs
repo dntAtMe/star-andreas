@@ -382,6 +382,7 @@ fn player_control(
     mut sa: ResMut<SaPhys>,
     mut spawn: ResMut<crate::vehicle::SpawnQueue>,
     mut auto_duck: Local<bool>,
+    mut self_boom: Local<u32>,
     mut ped: Single<&mut Ped>,
 ) {
     let id = ped.sa;
@@ -429,6 +430,15 @@ fn player_control(
     }
     if pressed(KeyCode::KeyA) {
         lr -= 128.0;
+    }
+    // SA_SELFBOOM=<n>: n grenade explosions at the player's feet from 9 s (debug).
+    let booms: u32 = std::env::var("SA_SELFBOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    if *self_boom < booms && time.elapsed_secs() > 9.0 + *self_boom as f32 * 0.7 {
+        *self_boom += 1;
+        if let Some(b) = sa.world.body(id) {
+            let pos = b.phys.matrix.pos + Vec3::new(1.0, 0.0, -0.8);
+            sa.world.add_explosion(None, None, sa_physics::effects::ExplosionType::Grenade, pos, 0, -1.0, false);
+        }
     }
     let mouse = active && lock.0;
     let Some(logic) = sa.logic_mut::<PedLogic>(id) else { return };

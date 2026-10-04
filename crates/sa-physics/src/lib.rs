@@ -22,6 +22,7 @@ pub mod gun;
 pub mod ik;
 pub mod pair;
 pub mod ped;
+pub mod peddamage;
 pub mod pedtask;
 pub mod shadows;
 pub mod physical;

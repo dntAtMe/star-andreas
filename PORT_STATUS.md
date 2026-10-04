@@ -37,7 +37,7 @@ Last updated: 2026-10-05.
 | Burst tyres (BurstTyre, DoBurstAndSoftGroundRatios, burst ProcessWheel) | ✅ | also sand sinking and bumpy surfaces |
 | CPed collision / movement | 🟡 | player only; root motion from the anim blend clump |
 | Bikes, boats, helis, planes, trains | ❌ | |
-| Ped health, damage, death | ❌ | explosions/fire push peds but don't hurt them |
+| Ped health, damage, death (player) | 🟡 | CPedDamageResponseCalculator (×0.33, armour, kill test), falls, explosions, car hits, bullet flinches, knock-down + get-up, death anims, WASTED + hospital respawn; no NPCs yet, no burning / drowning / choking, hospitals hard-coded (no main.scm) |
 | Ragdoll / falls | ❌ | |
 
 ## Gameplay

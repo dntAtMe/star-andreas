@@ -367,10 +367,29 @@ impl World {
                             m = (m - mom).max(0.0);
                         }
                         let mut fz = dir.z * m;
-                        let standing = b.logic.as_any_mut().downcast_mut::<PedLogic>().filter(|l| l.standing);
-                        if let Some(l) = standing {
-                            fz += 4.0;
-                            l.standing = false;
+                        let ped_pos = b.phys.matrix.pos;
+                        let ped = b.logic.as_any_mut().downcast_mut::<PedLogic>();
+                        let standing = ped.as_ref().is_some_and(|l| l.standing);
+                        if let Some(l) = ped {
+                            if standing {
+                                fz += 4.0;
+                                l.standing = false;
+                            } else {
+                                fz += ts * b.phys.mass * 0.008;
+                            }
+                            // Explosion damage: f × 250, type 51, piece 3.
+                            if dmg_pct > 0.0 {
+                                let to = pos - ped_pos;
+                                let dir = crate::peddamage::local_direction(l.cur_rot, glam::Vec2::new(to.x, to.y));
+                                l.pending_damage.push(crate::peddamage::DamageIn {
+                                    src: creator,
+                                    src_pos: Some(pos),
+                                    ty: 51,
+                                    damage: f * 250.0,
+                                    piece: 3,
+                                    dir,
+                                });
+                            }
                         } else {
                             fz += ts * b.phys.mass * 0.008;
                         }

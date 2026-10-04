@@ -1324,6 +1324,11 @@ impl World {
                 (b.phys.matrix, &b.col as *const ColModel, b.phys.kind, st)
             }
         };
+        let other_mv = match other {
+            EntityId::Body(j) => self.b(j as usize).phys.move_speed,
+            EntityId::Building(_) => Vec3::ZERO,
+        };
+        let soft_surfaces = self.surfaces.clone();
         // SAFETY: `other` is never body `i`; its model is only read during this call.
         let other_col = unsafe { &*other_col };
         let body = self.bodies[i].as_mut().unwrap();
@@ -1373,6 +1378,39 @@ impl World {
                     }
                     ped.ground_normal = lp[0].normal;
                     ped.ground_surface = lp[0].surface_b;
+                }
+                // Landing (ped.md §4.1 / §4.5): fall damage, type 54, piece 3.
+                if !ped.was_standing && !ped.standing {
+                    let rel = phys.move_speed - other_mv;
+                    let h = (rel.x * rel.x + rel.y * rel.y).sqrt();
+                    let ignored = phys.ignored == Some(other);
+                    let dir = if rel.x.abs() <= 0.01 && rel.y.abs() <= 0.01 {
+                        2
+                    } else {
+                        crate::peddamage::local_direction(ped.cur_rot, -glam::Vec2::new(rel.x, rel.y))
+                    };
+                    let mut dmg = None;
+                    if (h > 0.33 || rel.z < -0.25) && !ignored {
+                        let soft = soft_surfaces.info(lp[0].surface_b).soft_landing;
+                        let (sv, v0) = if soft { (0.375, -0.375) } else { (0.25, -0.25) };
+                        let mut d = (h - sv).max(0.0) * 100.0 + (v0 - rel.z).max(0.0) * 400.0;
+                        if rel.z < -0.6 {
+                            d = 500.0;
+                        }
+                        dmg = Some(d);
+                    } else if ped.clump.as_deref().is_some_and(|c| c.get(crate::anim::anim_id::FALL_FALL).is_some()) && rel.z < ts * -0.016 {
+                        dmg = Some(15.0);
+                    }
+                    if let Some(d) = dmg.filter(|d| *d > 0.0) {
+                        ped.pending_damage.push(crate::peddamage::DamageIn {
+                            src: None,
+                            src_pos: None,
+                            ty: 54,
+                            damage: d,
+                            piece: 3,
+                            dir,
+                        });
+                    }
                 }
                 ped.standing = true;
                 phys.move_speed.z = 0.0;
@@ -1431,6 +1469,17 @@ fn kill_ped_with_car(car: &mut Physical, ped: &mut Physical, state: &mut PedLogi
     ped.move_speed.z = 0.0;
     state.standing = false;
     state.knocked_down = 1.0;
+    // Damage: the big hit 1000 (NPCs), the small hit 30, type 49 rammed by car, piece 3.
+    let to_car = car.matrix.pos - ped.matrix.pos;
+    let dir = crate::peddamage::local_direction(state.cur_rot, glam::Vec2::new(to_car.x, to_car.y));
+    state.pending_damage.push(crate::peddamage::DamageIn {
+        src: None,
+        src_pos: Some(car.matrix.pos),
+        ty: 49,
+        damage: if big { 1000.0 } else { 30.0 },
+        piece: 3,
+        dir,
+    });
     // Braking reaction on the car.
     let up = car.matrix.up;
     let vp = v - up * v.dot(up);

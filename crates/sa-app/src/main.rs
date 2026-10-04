@@ -11,6 +11,7 @@ mod shadows;
 mod sky;
 mod stream;
 mod vehicle;
+mod wasted;
 mod weapons;
 mod weather;
 mod world;
@@ -88,7 +89,7 @@ fn main() -> anyhow::Result<()> {
         lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
-    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin))
+    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);
@@ -220,7 +221,7 @@ fn update_hud(
     hud.0 = format!(
         "pos {:.0} {:.0} {:.0}  speed {:.0}  fps {:.0}\n\
          instances {}  pending {}  models {} (+{} loading)  txds {}\n\
-         mode {:?}{}{}{}  (F2 toggles walk/fly)\n\
+         mode {:?}{}{}{}{}  (F2 toggles walk/fly)\n\
          {:02}:{:02}  {} -> {} ({:.0}%)  rain {:.2}  wind {:.2}  (N next weather, M release, B damage car)\n\
          walk: click grabs mouse, Esc releases, WASD, Shift sprint, Alt walk, Space jump, V spawn car, F enter/exit\n\
          guns: F1 debug UI gives weapons, RMB aim, LMB fire, wheel or Q/E switch, C crouch (A/D while aiming rolls), Home camera zoom\n\
@@ -239,6 +240,12 @@ fn update_hud(
         *mode,
         if ped.frozen { "  [waiting for collision]" } else { "" },
         if ped.grounded { "  grounded" } else { "" },
+        {
+            use saphys::SaPhysExt;
+            sa.logic::<sa_physics::ped::PedLogic>(ped.sa)
+                .map(|l| format!("  health {:.0}/{:.0}  armour {:.0}", l.tasks.health.health, l.tasks.health.max_health, l.tasks.health.armour))
+                .unwrap_or_default()
+        },
         driving
             .0
             .and_then(|c| cars.get(c).ok())

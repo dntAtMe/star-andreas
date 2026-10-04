@@ -232,6 +232,8 @@ pub struct PedTasks {
     pub requests: Vec<crate::effects::WorldRequest>,
     /// TheCamera as of this step.
     pub cam: crate::CamInfo,
+    /// Health, armour, knock-downs and death.
+    pub health: crate::peddamage::Health,
     /// `CTaskSimpleDuck` in secondary slot 1.
     pub duck: Option<crate::duck::DuckTask>,
     /// ped+0x46C & 0x4000000 bIsDucking.
@@ -277,6 +279,7 @@ impl Default for PedTasks {
             throw: None,
             requests: Vec::new(),
             cam: crate::CamInfo::default(),
+            health: Default::default(),
             duck: None,
             ducking: false,
             air: AirTask::None,

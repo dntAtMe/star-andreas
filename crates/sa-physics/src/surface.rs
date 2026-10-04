@@ -23,6 +23,8 @@ pub struct SurfaceInfo {
     pub is_water: bool,
     /// W_GRASS, W_GRAVEL, W_MUD, W_DUST, W_SAND, W_SPRAY (flags2 bits 1..6).
     pub wheel_fx: [bool; 6],
+    /// SOFTLAND (flags1 bit 11).
+    pub soft_landing: bool,
     /// SEE_THRO, SHOOT_T and GLASS (flags1 bits 12, 13, 19).
     pub see_through: bool,
     pub shoot_through: bool,
@@ -93,6 +95,7 @@ impl SurfaceInfos {
                 is_sand: flag(9),
                 is_water: flag(10),
                 wheel_fx: std::array::from_fn(|k| flag(26 + k)),
+                soft_landing: flag(6),
                 see_through: flag(7),
                 shoot_through: flag(8),
                 glass: flag(14),
