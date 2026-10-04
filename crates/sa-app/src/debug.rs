@@ -267,6 +267,18 @@ fn ui(
                                 ui.same_line();
                             }
                             ui.new_line();
+                            ui.text(format!(
+                                "lights {}  lamps {:04b}",
+                                if car.lights.on { "on" } else { "off" },
+                                car.lights.render & 0xF
+                            ));
+                            ui.checkbox("siren", &mut car.lights.siren);
+                            ui.same_line();
+                            ui.checkbox("taxi light", &mut car.lights.taxi_light);
+                            let mut force = car.lights.force as usize;
+                            if ui.combo_simple_string("lights", &mut force, &["auto", "force off", "force on"]) {
+                                car.lights.force = force as u8;
+                            }
                             let wrecked = phys.status == Status::Wrecked;
                             if !wrecked {
                                 if ui.button("Blow up") {
