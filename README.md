@@ -3,11 +3,13 @@
 GTA San Andreas world renderer in Rust + Bevy, reading assets from an existing
 PC 1.0 install (nothing is modified or redistributed).
 
+See [PORT_STATUS.md](PORT_STATUS.md) for what is ported and what is left.
+
 - `crates/sa-formats` — IMG, DFF, TXD, IDE, IPL (text + binary stream), gta.dat
 - `crates/sa-formats` also reads COL collision, IFP (ANP3) animations, DFF skin/HAnim,
   vehicles.ide, handling.cfg, carcols.dat and vehicle-embedded COL
 - `crates/sa-app` — Bevy viewer: distance streaming, HD/LOD via `VisibilityRange`,
-  BC textures uploaded as-is, Rapier collision from COL, skinned ped with IFP
+  BC textures uploaded as-is, SA physics (`crates/sa-physics`) from COL, skinned ped with IFP
   animation blending, kinematic character controller, orbit camera, drivable cars
   (raycast suspension + tire model from handling.cfg, carcols paint), knockable props
   from object.dat (lamp posts, hydrants, signs, bins... fly off above their uproot
