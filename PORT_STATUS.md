@@ -6,7 +6,7 @@ re-implementations "in the spirit of" SA.
 
 Legend: ✅ ported (1:1 with the exe where it matters) · 🟡 partial / approximated · ❌ not started
 
-Last updated: 2026-10-04.
+Last updated: 2026-10-05.
 
 ## Assets and world
 
@@ -17,6 +17,7 @@ Last updated: 2026-10-04.
 | DFF skin / HAnim, extra vertex colours (night prelight) | ✅ | |
 | DFF 2d effects (2dfx) | 🟡 | lights decoded; particle, ped attractor, enex, roadsign, escalator… skipped |
 | IFP (ANP3) animations | ✅ | |
+| Anim blending (RpAnimBlend, CAnimBlendAssociation, group table) | ✅ | partial layers, movement phase lock, root motion; 3D root extraction and off-screen path not used |
 | Streaming (distance, HD/LOD) | 🟡 | own scheme, not CStreaming / CRenderer lists |
 | Interiors / entry-exits | ❌ | |
 | Water (water.dat, CWaterLevel) | ❌ | placeholder sea plane only; blocks boats, underwater, splashes |
@@ -32,8 +33,9 @@ Last updated: 2026-10-04.
 | CWorld::Process loop, sectors, line of sight | 🟡 | dynamic bodies scanned as lists, not repeat sectors |
 | Knockable props (object.dat uproot) | ✅ | |
 | CAutomobile (suspension, wheels, transmission, handling) | ✅ | |
-| Car damage (CDamageManager, VehicleDamage, doors, flying parts) | ✅ | bumpers don't bounce; bullets not a damage source |
-| CPed collision / movement | 🟡 | player only; animation-driven velocity |
+| Car damage (CDamageManager, VehicleDamage, doors, flying parts) | ✅ | bumpers don't bounce |
+| Burst tyres (BurstTyre, DoBurstAndSoftGroundRatios, burst ProcessWheel) | ✅ | also sand sinking and bumpy surfaces |
+| CPed collision / movement | 🟡 | player only; root motion from the anim blend clump |
 | Bikes, boats, helis, planes, trains | ❌ | |
 | Ped health, damage, death | ❌ | explosions/fire push peds but don't hurt them |
 | Ragdoll / falls | ❌ | |
@@ -43,16 +45,32 @@ Last updated: 2026-10-04.
 | System | Status | Notes |
 |---|---|---|
 | Enter / exit vehicles | 🟡 | instant, no animations |
+| Player locomotion (PlayerControlZelda, SetRealMoveAnim, sprint, walk_start, run stops) | ✅ | turning on the spot, adrenaline, fat/muscle groups missing |
+| Crouch (CTaskSimpleDuck, PlayerControlDucked, crouch walk, crouch rolls, crouch fire) | ✅ | |
+| Jump / in-air / land tasks | 🟡 | launch, glide, FALL_fall, land anims; climbing and the CTaskSimpleFall get-up missing |
 | Explosions (CExplosion, TriggerExplosion, chain fuses) | ✅ | object damage / exploding objects not ported |
 | Fires (CFireManager, CFire, creeping fire) | ✅ | peds catching fire not ported |
-| Weapons, shooting, bullet impacts | ❌ | |
+| CWeaponInfo (weapon.dat, skills), CWeapon (ammo, reload, Update, Fire) | ✅ | |
+| Player weapon control (ProcessPlayerWeapon, CTaskSimpleUseGun, switching, anim groups) | ✅ | PC mouse free aim; lock-on, pistol whip, burst fire missing |
+| Instant-hit bullets (FireInstantHit, shotgun pellets, DoBulletImpact) | 🟡 | vehicles (damage, force, tyres), objects (force), buildings; ped damage, CGlass, ObjectDamage breaking, petrol cap, water splashes missing |
+| Aiming IK (CPedIK torso, IKChainManager CCD chains: arms, head look-at) | ✅ | bone limits from ms_boneInfos; chains only used by the gun task so far |
+| Projectiles, area-effect, sniper / rocket / camera 1st person, melee | ❌ | |
 | Traffic and pedestrians (population, paths, AI) | ❌ | |
 | Wanted level, police | ❌ | |
 | Pickups, collectables | ❌ | |
 | Missions / SCM script interpreter | ❌ | |
-| HUD, radar, menus | ❌ | debug HUD + ImGui debug UI only |
+| HUD, radar, menus | 🟡 | crosshair, weapon icon and ammo only; debug HUD + ImGui debug UI |
 | Audio | ❌ | |
 | Save / load | ❌ | |
+
+## Cameras
+
+| System | Status | Notes |
+|---|---|---|
+| On-foot follow camera (Process_FollowPed_SA, PC mouse) | ✅ | zoom on Home (V spawns cars); sphere-sweep collision approximated by a ray |
+| Aim camera (Process_AimWeapon) and StartTransition easing | ✅ | |
+| Car camera | ❌ | simple orbit |
+| 1st-person weapon cameras (sniper, rocket, camera) | ❌ | |
 
 ## Clock, weather, time of day
 
@@ -93,7 +111,8 @@ Last updated: 2026-10-04.
 | Scrape sparks (ApplyFriction) | ✅ | |
 | Wheel particles (tyre smoke, dirt, grass, sand, spray) | ✅ | |
 | Exhaust smoke | ❌ | |
-| Bullet impacts, blood, glass | ❌ | needs weapons |
+| Bullet impacts (AddBulletImpact, AddWood, AddTyreBurst), gunsmoke, shells, traces | ✅ | shells fall through the ground (GROUNDCOLLIDE missing); blood only without pools |
+| Model gun flash, muzzle light | ✅ | |
 | Heat haze post effect | ✅ | underwater variant missing |
 | Colour filter post effect | ✅ | |
 | SpeedFX, rain grain, underwater ripple, night/IR vision | ❌ | |
@@ -112,7 +131,7 @@ Last updated: 2026-10-04.
 ## Suggested next steps
 
 1. Water (CWaterLevel): unblocks boats, splashes, underwater fog, sun reflection.
-2. Ped health / damage / death, then weapons.
+2. Ped health / damage / death (CPedDamageResponseCalculator), then projectiles and melee.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.
 5. Other vehicle classes (bikes first).

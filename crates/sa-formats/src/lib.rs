@@ -17,3 +17,4 @@ pub mod objdat;
 pub mod rw;
 pub mod txd;
 pub mod vehicle;
+pub mod weapondat;

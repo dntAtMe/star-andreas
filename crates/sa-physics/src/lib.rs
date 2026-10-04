@@ -3,7 +3,9 @@
 //! Everything works in the game's own space and units: Z up, world units,
 //! speeds per 1/50 s frame, and a timestep `ts` measured in such frames.
 
+pub mod anim;
 pub mod automobile;
+pub mod bullet;
 pub mod clock;
 #[cfg(feature = "bevy")]
 pub mod bevy_api;
@@ -11,17 +13,22 @@ pub mod collision;
 pub mod coronas;
 pub mod colpoint;
 pub mod damage;
+pub mod duck;
 pub mod effects;
 pub mod explosion;
 pub mod fire;
 pub mod fxhelpers;
+pub mod gun;
+pub mod ik;
 pub mod pair;
 pub mod ped;
+pub mod pedtask;
 pub mod shadows;
 pub mod physical;
 pub mod surface;
 pub mod timecycle;
 pub mod vehicle_lights;
+pub mod weapon;
 pub mod weather;
 pub mod world;
 
@@ -38,11 +45,64 @@ pub struct Ctx {
     pub keep_going_after_hit: bool,
     /// `CWeather::WetRoads` (tyre grip on wet surfaces).
     pub wet_roads: f32,
+    /// `CTimer::m_snTimeInMilliseconds`.
+    pub now_ms: u32,
+    /// The active camera (TheCamera), for the player's tasks.
+    pub cam: CamInfo,
+}
+
+/// What the ped tasks read from `TheCamera`.
+#[derive(Debug, Clone, Copy)]
+pub struct CamInfo {
+    pub pos: Vec3,
+    pub front: Vec3,
+    pub up: Vec3,
+    /// Horizontal FOV, degrees.
+    pub fov: f32,
+    pub aspect: f32,
+    /// Active `CCam` mode (4 follow ped, 53 aim weapon).
+    pub mode: u8,
+    /// `TheCamera.m_fOrientation`: atan2(front.x, front.y).
+    pub orientation: f32,
+}
+
+impl Default for CamInfo {
+    fn default() -> Self {
+        Self { pos: Vec3::ZERO, front: Vec3::Y, up: Vec3::Z, fov: 70.0, aspect: 16.0 / 9.0, mode: 4, orientation: 0.0 }
+    }
+}
+
+impl CamInfo {
+    /// `CCamera::Find3rdPersonCamTargetVector` (0x514970): the ray through the crosshair
+    /// (0.53, 0.4), its start moved to the point nearest `src`. Returns (start, end).
+    pub fn target_vector(&self, range: f32, src: Vec3) -> (Vec3, Vec3) {
+        const CHAIR_X: f32 = 0.53;
+        const CHAIR_Y: f32 = 0.4;
+        let t = (self.fov * 0.5).to_radians().tan();
+        let sx = 2.0 * (CHAIR_X - 0.5) * t;
+        let sy = 2.0 * (0.5 - CHAIR_Y) * t / self.aspect;
+        let dir = (self.front + self.up * sy + self.front.cross(self.up) * sx).normalize_or(self.front);
+        let start = self.pos + dir * (src - self.pos).dot(dir);
+        (start, start + dir * range)
+    }
+
+    /// `CCamera::Find3rdPersonQuickAimPitch` (0x50AD40) without the alpha term: the pitch of
+    /// the crosshair ray above the camera's own (callers add the camera alpha).
+    pub fn crosshair_pitch_offset(&self) -> f32 {
+        ((1.0 / self.aspect) * 2.0 * (0.5 - 0.4) * (self.fov * 0.5).to_radians().tan()).atan()
+    }
 }
 
 impl Ctx {
     pub fn new(ts: f32) -> Self {
-        Self { ts, later_collision_pass: false, keep_going_after_hit: true, wet_roads: 0.0 }
+        Self {
+            ts,
+            later_collision_pass: false,
+            keep_going_after_hit: true,
+            wet_roads: 0.0,
+            now_ms: 0,
+            cam: CamInfo::default(),
+        }
     }
 }
 

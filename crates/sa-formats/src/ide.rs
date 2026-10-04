@@ -1,5 +1,5 @@
 //! IDE item definition files (text). Only the sections needed for the map
-//! are parsed: `objs`, `tobj`, `anim` and `txdp`.
+//! are parsed: `objs`, `tobj`, `anim`, `weap` and `txdp`.
 
 use anyhow::Result;
 
@@ -17,6 +17,8 @@ pub struct ObjectDef {
 #[derive(Debug, Clone, Default)]
 pub struct Ide {
     pub objects: Vec<ObjectDef>,
+    /// `weap` (default.ide): weapon models.
+    pub weapons: Vec<ObjectDef>,
     /// (txd, parent txd)
     pub txd_parents: Vec<(String, String)>,
 }
@@ -47,6 +49,11 @@ pub fn parse(text: &str) -> Result<Ide> {
                     ide.objects.push(def);
                 }
             }
+            "weap" => {
+                if let Some(def) = parse_object(sec, &f) {
+                    ide.weapons.push(def);
+                }
+            }
             "txdp" if f.len() >= 2 => {
                 ide.txd_parents.push((f[0].to_ascii_lowercase(), f[1].to_ascii_lowercase()));
             }
@@ -64,7 +71,7 @@ fn parse_object(sec: &str, f: &[&str]) -> Option<ObjectDef> {
     let (body, time) = if sec == "tobj" && f.len() >= 7 {
         let n = f.len();
         (&f[3..n - 2], Some((f[n - 2].parse().ok()?, f[n - 1].parse().ok()?)))
-    } else if sec == "anim" {
+    } else if sec == "anim" || sec == "weap" {
         (f.get(4..)?, None)
     } else {
         (&f[3..], None)

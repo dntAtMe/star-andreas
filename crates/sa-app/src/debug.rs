@@ -114,8 +114,9 @@ fn ui(
     mut spawn: ResMut<SpawnQueue>,
     driving: Res<Driving>,
     cars: Query<(Entity, &Vehicle, &Transform)>,
-    ped: Single<&Transform, With<Ped>>,
+    ped_q: Single<(&Transform, &Ped)>,
 ) {
+    let (ped, ped_c) = *ped_q;
     let ui = ctx.ui();
     let io = ui.io();
     dbg.capture_mouse = dbg.open && io.want_capture_mouse;
@@ -313,6 +314,45 @@ fn ui(
                         if ui.button("Spawn (on foot)") {
                             spawn.0.push(models.0[dbg.spawn_idx].clone());
                         }
+                    }
+                }
+            }
+
+            // ---------------------------------------------------------------- weapons
+            if ui.collapsing_header("Weapons", TreeNodeFlags::DEFAULT_OPEN) {
+                use crate::saphys::SaPhysExt;
+                use sa_physics::{ped::PedLogic, weapon::WEAPON_NAMES};
+                if let Some(l) = sa.logic_mut::<PedLogic>(ped_c.sa) {
+                    let t = &mut l.tasks;
+                    let w = *t.active_weapon();
+                    let skill = ["POOR", "STD", "PRO", "COP"][t.weapon_skill(w.ty).min(3) as usize];
+                    ui.text(format!(
+                        "{} ({skill})  clip {}  total {}  state {}",
+                        WEAPON_NAMES[w.ty as usize],
+                        w.ammo_in_clip,
+                        w.total_ammo,
+                        w.state
+                    ));
+                    ui.text(format!(
+                        "move state {}  group {}  aim {}  gun task {}",
+                        t.move_state,
+                        t.anim_group,
+                        t.pd.free_aim,
+                        t.gun.as_ref().map_or("-".to_string(), |g| format!("{:?}", g.last_cmd))
+                    ));
+                    ui.text("LMB fire, RMB aim, wheel / Q / E switch");
+                    for (i, &ty) in [22u32, 23, 24, 25, 26, 27, 28, 29, 32, 30, 31, 33, 38].iter().enumerate() {
+                        if i % 4 != 0 {
+                            ui.same_line();
+                        }
+                        if ui.button(WEAPON_NAMES[ty as usize]) {
+                            let slot = t.give_weapon(ty, 500);
+                            t.pd.chosen_slot = slot;
+                        }
+                    }
+                    let names = ["pistol", "silenced", "deagle", "shotgun", "sawnoff", "spas", "uzi", "mp5", "ak47", "m4"];
+                    for (i, n) in names.iter().enumerate() {
+                        ui.slider(format!("{n} skill"), 0.0, 1000.0, &mut t.skill_stats[i]);
                     }
                 }
             }

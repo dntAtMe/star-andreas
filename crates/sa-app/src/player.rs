@@ -4,7 +4,7 @@
 //! The ped skeleton lives in GTA space (Z-up) under a single "model root"
 //! entity rotated -90° about X, so animation keys apply untouched.
 
-use std::{collections::HashMap, f32::consts::FRAC_PI_2, path::PathBuf};
+use std::{collections::HashMap, f32::consts::FRAC_PI_2, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use bevy::{
@@ -19,10 +19,12 @@ use bevy::{
     transform::TransformSystems,
     window::{CursorGrabMode, CursorOptions},
 };
-use sa_formats::{dff, ifp, txd};
+use sa_formats::{dff, ifp, img::Img, txd};
 use sa_physics::{
+    anim::{AnimManager, Clump, anim_id, group},
     physical::ef,
-    ped::{JumpKind, PedLogic, ped_col_model, ped_physical},
+    ped::{PedLogic, ped_col_model, ped_physical},
+    weapon::WeaponInfos,
     world::EntityId,
 };
 
@@ -33,13 +35,6 @@ use crate::{
 };
 
 const PED_MODEL: &str = "fam1";
-const BLEND_TIME: f32 = 0.18;
-
-const ANIM_IDLE: &str = "idle_stance";
-const ANIM_WALK: &str = "walk_player";
-const ANIM_RUN: &str = "run_player";
-const ANIM_SPRINT: &str = "sprint_civi";
-const ANIM_FALL: &str = "fall_fall";
 
 pub struct PlayerPlugin;
 
@@ -95,18 +90,11 @@ pub struct Ped {
     /// The ped's body in the SA physics world.
     pub sa: EntityId,
     /// Bone entity per DFF frame.
-    bones: Vec<Entity>,
-    /// Local bind pose per frame.
-    bind: Vec<Transform>,
-    /// Frame whose horizontal translation is root motion (stripped; the
-    /// physics moves the ped from the clip's root velocity instead).
-    root_bone: Option<usize>,
-    /// Move blend ratio (CPlayerData +0x14): 0 still, 1 walk, 2 run.
-    mbr: f32,
-    air_time: f32,
+    pub bones: Vec<Entity>,
+    /// DFF frame of each anim clump frame (HAnim node).
+    pub node_frames: Vec<usize>,
     pub grounded: bool,
     pub frozen: bool,
-    anim: AnimPlayer,
 }
 
 /// Put the player ped's SA body into (or take it out of) a vehicle: while
@@ -138,36 +126,6 @@ pub fn ped_teleport(sa: &mut SaPhys, id: EntityId, pos: Vec3, yaw: Option<f32>) 
         ped.aim_rot = yaw;
     }
 }
-
-struct AnimPlayer {
-    cur: &'static str,
-    time: f32,
-    /// Previous clip being faded out: (name, time).
-    prev: Option<(&'static str, f32)>,
-    blend: f32,
-}
-
-impl AnimPlayer {
-    fn play(&mut self, name: &'static str) {
-        if self.cur != name {
-            self.prev = Some((self.cur, self.time));
-            self.cur = name;
-            self.time = 0.0;
-            self.blend = 0.0;
-        }
-    }
-}
-
-/// Animation keyed by DFF frame index.
-struct Clip {
-    duration: f32,
-    frames: Vec<Option<Vec<ifp::Key>>>,
-    /// Average root-bone velocity over the clip, ped-local (x right, y forward), m/s.
-    root_velocity: Vec2,
-}
-
-#[derive(Resource)]
-struct Clips(HashMap<String, Clip>);
 
 // ---------------------------------------------------------------- spawn
 
@@ -280,36 +238,44 @@ fn spawn_player(
         commands.entity(model_root).add_child(part);
     }
 
-    // Animations, retargeted onto this skeleton's frames.
-    let anims = ifp::parse(&std::fs::read(root.0.join("anim/ped.ifp")).context("ped.ifp")?)?;
-    let root_bone = frame_of_node(0).or_else(|| clump.frames.iter().position(|f| f.name.eq_ignore_ascii_case("root")));
-    let mut clips = HashMap::new();
-    for a in anims {
-        let mut frames: Vec<Option<Vec<ifp::Key>>> = vec![None; clump.frames.len()];
-        for t in a.tracks {
-            let fi = frame_of_node(t.bone_id).or_else(|| {
-                clump.frames.iter().position(|f| f.name.eq_ignore_ascii_case(&t.bone_name))
-            });
-            if let Some(fi) = fi {
-                if !t.keys.is_empty() {
-                    frames[fi] = Some(t.keys);
+    // CAnimManager: ped.ifp plus the anim.img blocks.
+    let anim_img = Img::open(&root.0.join("anim/anim.img")).ok();
+    let ped_ifp = ifp::parse(&std::fs::read(root.0.join("anim/ped.ifp")).context("ped.ifp")?)?;
+    let anims = Arc::new(AnimManager::load(|block| {
+        if block.eq_ignore_ascii_case("ped") {
+            return Some(ped_ifp.clone());
+        }
+        let data = anim_img.as_ref()?.get(&format!("{}.ifp", block.to_ascii_lowercase()))?;
+        ifp::parse(data).ok()
+    }));
+    // CWeaponInfo::LoadWeaponData.
+    let weapon_dat = sa_formats::weapondat::parse(&std::fs::read(root.0.join("data/weapon.dat")).context("weapon.dat")?)?;
+    let weapons = Arc::new(WeaponInfos::load(&weapon_dat, AnimManager::group_by_name));
+    sa.world.weapon_infos = Some(weapons.clone());
+
+    // The anim clump: one frame per HAnim node, parented through the DFF frames.
+    let node_frames: Vec<usize> = hroot.nodes.iter().filter_map(|&(id, _, _)| frame_of_node(id)).collect();
+    let node_of_frame = |f: usize| node_frames.iter().position(|&n| n == f);
+    let mut anim_clump = Clump::new(
+        hroot
+            .nodes
+            .iter()
+            .zip(&node_frames)
+            .map(|(&(id, _, _), &fi)| {
+                let mut parent = None;
+                let mut f = clump.frames[fi].parent;
+                while f >= 0 {
+                    if let Some(n) = node_of_frame(f as usize) {
+                        parent = Some(n);
+                        break;
+                    }
+                    f = clump.frames[f as usize].parent;
                 }
-            }
-        }
-        let root_velocity = root_bone
-            .and_then(|r| frames[r].as_ref())
-            .and_then(|k| Some((k.first()?.pos?, k.last()?.pos?)))
-            .filter(|_| a.duration > 0.0)
-            .map(|(p0, p1)| Vec2::new(p1[0] - p0[0], p1[1] - p0[1]) / a.duration)
-            .unwrap_or(Vec2::ZERO);
-        clips.insert(a.name.to_ascii_lowercase(), Clip { duration: a.duration, frames, root_velocity });
-    }
-    for name in [ANIM_IDLE, ANIM_WALK, ANIM_RUN, ANIM_SPRINT, ANIM_FALL] {
-        if !clips.contains_key(name) {
-            warn!("animation {name} missing");
-        }
-    }
-    commands.insert_resource(Clips(clips));
+                (id, clump.frames[fi].name.clone(), bind[fi].rotation, bind[fi].translation, parent)
+            })
+            .collect(),
+    );
+    anim_clump.blend_animation(&anims, group::PLAYER, anim_id::IDLE, 1000.0);
 
     let spawn: Vec<f32> =
         std::env::var("SA_PLAYER").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -324,22 +290,17 @@ fn spawn_player(
     // Frozen (static) until the collision around the spawn point has streamed in.
     let mut phys = ped_physical(m);
     phys.eflags |= ef::IS_STATIC;
-    let id = sa.world.add_body(phys, ped_col_model(), Box::new(PedLogic::new(true, f32::to_radians(heading))));
+    let mut logic = PedLogic::new(true, f32::to_radians(heading));
+    logic.prev_pose = anim_clump.pose.clone();
+    logic.clump = Some(Box::new(anim_clump));
+    logic.tasks.anims = Some(anims);
+    logic.tasks.infos = Some(weapons);
+    let id = sa.world.add_body(phys, ped_col_model(), Box::new(logic));
     commands
         .spawn((
             tf,
             Visibility::default(),
-            Ped {
-                sa: id,
-                bones,
-                bind,
-                root_bone,
-                mbr: 0.0,
-                air_time: 0.0,
-                grounded: false,
-                frozen: true,
-                anim: AnimPlayer { cur: ANIM_IDLE, time: 0.0, prev: None, blend: 1.0 },
-            },
+            Ped { sa: id, bones, node_frames, grounded: false, frozen: true },
             CamFollow { height: 0.6, dist: 3.5 },
             SaBody::new(id, m),
         ))
@@ -412,16 +373,17 @@ fn cursor_lock(
 fn player_control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    scroll: Res<AccumulatedMouseScroll>,
     mode: Res<Mode>,
+    lock: Res<MouseLock>,
     st: Res<Streamer>,
     driving: Res<crate::vehicle::Driving>,
-    clips: Option<Res<Clips>>,
-    cam: Single<&OrbitCam>,
     mut sa: ResMut<SaPhys>,
+    mut spawn: ResMut<crate::vehicle::SpawnQueue>,
+    mut auto_duck: Local<bool>,
     mut ped: Single<&mut Ped>,
 ) {
-    let dt = time.delta_secs();
-    let ts = dt * 50.0;
     let id = ped.sa;
     let s = st.stats;
     if ped.frozen {
@@ -431,150 +393,89 @@ fn player_control(
             if let Some(b) = sa.world.body_mut(id) {
                 b.phys.eflags &= !ef::IS_STATIC;
             }
+            // SA_SPAWN=<model>: a car 5 m ahead (debug).
+            if let Ok(m) = std::env::var("SA_SPAWN") {
+                spawn.0.push(m);
+            }
+            // SA_WEAPON=<type>: start with that weapon (debug).
+            if let Some(ty) = std::env::var("SA_WEAPON").ok().and_then(|v| v.parse::<u32>().ok()) {
+                if let Some(l) = sa.logic_mut::<PedLogic>(id) {
+                    let slot = l.tasks.give_weapon(ty, 500);
+                    l.tasks.pd.chosen_slot = slot;
+                }
+            }
         }
         return;
     }
     if driving.0.is_some() {
-        ped.anim.play(ANIM_IDLE);
         return;
     }
-    let Some(clips) = clips else { return };
 
+    // CPad for the on-foot player: WASD as the left stick (±128, +ud = backwards).
     let auto_walk = std::env::var("SA_AUTOWALK").is_ok();
     let active = *mode == Mode::Walk;
     let pressed = |k: KeyCode| active && keys.pressed(k);
-    let mut input = Vec2::ZERO;
+    let just = |k: KeyCode| active && keys.just_pressed(k);
+    let mut lr = 0.0;
+    let mut ud = 0.0;
     if pressed(KeyCode::KeyW) || auto_walk {
-        input.y += 1.0;
+        ud -= 128.0;
     }
     if pressed(KeyCode::KeyS) {
-        input.y -= 1.0;
+        ud += 128.0;
     }
     if pressed(KeyCode::KeyD) {
-        input.x += 1.0;
+        lr += 128.0;
     }
     if pressed(KeyCode::KeyA) {
-        input.x -= 1.0;
+        lr -= 128.0;
     }
-    let input = input.normalize_or_zero();
-    let (sy, cy) = cam.yaw.sin_cos();
-    let forward = Vec3::new(-sy, 0.0, -cy);
-    let right = Vec3::new(cy, 0.0, -sy);
-    let dir = forward * input.y + right * input.x;
-
-    // PlayerControlZelda: move blend ratio follows the stick (keyboard = full
-    // deflection, 128/60), ramping 0.07*ts per frame; release stops at once.
-    let walk = pressed(KeyCode::AltLeft);
-    let sprint = pressed(KeyCode::ShiftLeft);
-    let target = if dir == Vec3::ZERO { 0.0 } else if walk { 1.0 } else { 128.0 / 60.0 };
-    if target == 0.0 {
-        ped.mbr = 0.0;
-    } else {
-        let step = ts * 0.07;
-        ped.mbr = if target - ped.mbr > step { ped.mbr + step } else if target - ped.mbr < -step { ped.mbr - step } else { target };
-    }
-
-    // Anim selection and its root velocity (SetRealMoveAnim, summarised).
-    let clip_vel = |n: &str| clips.0.get(n).map(|c| c.root_velocity).unwrap_or(Vec2::ZERO);
-    let (gait, vel) = if ped.mbr == 0.0 {
-        (ANIM_IDLE, Vec2::ZERO)
-    } else if sprint && ped.mbr >= 1.0 {
-        (ANIM_SPRINT, clip_vel(ANIM_SPRINT))
-    } else if ped.mbr < 1.0 {
-        (ANIM_WALK, clip_vel(ANIM_WALK))
-    } else if ped.mbr < 2.0 {
-        let k = ped.mbr - 1.0;
-        (ANIM_RUN, clip_vel(ANIM_WALK) * (1.0 - k) + clip_vel(ANIM_RUN) * k)
-    } else {
-        (ANIM_RUN, clip_vel(ANIM_RUN))
-    };
-
-    let jump = pressed(KeyCode::Space);
-    let mbr = ped.mbr;
+    let mouse = active && lock.0;
     let Some(logic) = sa.logic_mut::<PedLogic>(id) else { return };
-    if dir != Vec3::ZERO {
-        // Heading h faces (-sin h, cos h) in GTA space.
-        let d = b2g(dir);
-        logic.aim_rot = (-d[0]).atan2(d[1]);
+    let pad = &mut logic.tasks.pad;
+    pad.walk_lr = lr;
+    pad.walk_ud = ud;
+    pad.walk_key = pressed(KeyCode::AltLeft);
+    pad.sprint = pressed(KeyCode::ShiftLeft);
+    pad.sprint_just_down |= just(KeyCode::ShiftLeft);
+    pad.jump_just_down |= just(KeyCode::Space);
+    // SA_AUTOFIRE=1 / SA_AUTOAIM=1: hold fire / aim (debug).
+    let auto_fire = std::env::var("SA_AUTOFIRE").is_ok();
+    pad.aim = (mouse && buttons.pressed(MouseButton::Right)) || std::env::var("SA_AUTOAIM").is_ok();
+    pad.fire = (mouse && buttons.pressed(MouseButton::Left)) || auto_fire;
+    pad.fire_just_down |= mouse && buttons.just_pressed(MouseButton::Left);
+    pad.duck_just_down |= just(KeyCode::KeyC);
+    // SA_AUTODUCK=1: crouch once (debug).
+    if !*auto_duck && std::env::var("SA_AUTODUCK").is_ok() && time.elapsed_secs() > 8.0 {
+        *auto_duck = true;
+        pad.duck_just_down = true;
     }
-    // Root motion in m/s -> units per 1/50 s frame.
-    logic.anim_velocity = vel / 50.0;
-    if jump && logic.standing {
-        let hs = if sprint && mbr >= 1.0 { 0.22 } else if mbr >= 1.0 { 0.17 } else { 0.1 };
-        logic.jump_request = Some(JumpKind::Speed(hs));
-    }
-    let standing = logic.standing;
+    pad.enter_exit_just_down |= just(KeyCode::KeyF);
+    // Next / previous weapon: mouse wheel, E / Q.
+    pad.next_weapon_just_down |= just(KeyCode::KeyE) || (mouse && scroll.delta.y < 0.0);
+    pad.prev_weapon_just_down |= just(KeyCode::KeyQ) || (mouse && scroll.delta.y > 0.0);
+
     let knocked = logic.knocked_down;
     if knocked > 75.0 {
         logic.knocked_down = 0.0;
     }
-
-    ped.grounded = standing;
-    ped.air_time = if standing { 0.0 } else { ped.air_time + dt };
-    let anim = if knocked > 0.0 || ped.air_time > 0.25 { ANIM_FALL } else { gait };
-    ped.anim.play(anim);
+    ped.grounded = logic.standing;
 }
 
 // ---------------------------------------------------------------- animation
 
-fn sample(keys: &[ifp::Key], duration: f32, t: f32) -> (Quat, Option<Vec3>) {
-    let t = if duration > 0.0 { t % duration } else { 0.0 };
-    let q = |k: &ifp::Key| Quat::from_array(k.rot).normalize();
-    let i = keys.partition_point(|k| k.time <= t);
-    let (a, b) = (&keys[i.saturating_sub(1)], &keys[i.min(keys.len() - 1)]);
-    let f = if b.time > a.time { ((t - a.time) / (b.time - a.time)).clamp(0.0, 1.0) } else { 0.0 };
-    let pos = match (a.pos, b.pos) {
-        (Some(p), Some(r)) => Some(Vec3::from(p).lerp(r.into(), f)),
-        (p, _) => p.map(Vec3::from),
-    };
-    (q(a).slerp(q(b), f), pos)
-}
-
-fn animate_ped(
-    time: Res<Time>,
-    clips: Option<Res<Clips>>,
-    mut peds: Query<&mut Ped>,
-    mut bones: Query<&mut Transform, Without<Ped>>,
-) {
-    let Some(clips) = clips else { return };
-    let dt = time.delta_secs();
-    for mut ped in &mut peds {
-        let ped = &mut *ped;
-        ped.anim.time += dt;
-        if let Some((_, t)) = &mut ped.anim.prev {
-            *t += dt;
-        }
-        ped.anim.blend = (ped.anim.blend + dt / BLEND_TIME).min(1.0);
-        if ped.anim.blend >= 1.0 {
-            ped.anim.prev = None;
-        }
-        let Some(cur) = clips.0.get(ped.anim.cur) else { continue };
-        let prev = ped.anim.prev.and_then(|(n, t)| clips.0.get(n).map(|c| (c, t)));
-
-        for (fi, &bone) in ped.bones.iter().enumerate() {
-            let bind = ped.bind[fi];
-            let pose = |clip: &Clip, t: f32| match &clip.frames[fi] {
-                Some(keys) => sample(keys, clip.duration, t),
-                None => (bind.rotation, None),
-            };
-            let (mut rot, mut pos) = pose(cur, ped.anim.time);
-            if let Some((pc, pt)) = prev {
-                let (prot, ppos) = pose(pc, pt);
-                rot = prot.slerp(rot, ped.anim.blend);
-                pos = match (ppos, pos) {
-                    (Some(a), Some(b)) => Some(a.lerp(b, ped.anim.blend)),
-                    (a, b) => b.or(a),
-                };
-            }
-            let mut pos = pos.unwrap_or(bind.translation);
-            if Some(fi) == ped.root_bone {
-                // Root motion is driven by the controller; keep only the vertical bob.
-                pos.x = bind.translation.x;
-                pos.y = bind.translation.y;
-            }
-            if let Ok(mut tf) = bones.get_mut(bone) {
-                tf.rotation = rot;
-                tf.translation = pos;
+/// Copy the SA anim clump's pose (interpolated between physics steps) onto the bones.
+fn animate_ped(sa: Res<SaPhys>, peds: Query<&Ped>, mut bones: Query<&mut Transform, Without<Ped>>) {
+    let alpha = sa.alpha();
+    for ped in &peds {
+        let Some(logic) = sa.logic::<PedLogic>(ped.sa) else { continue };
+        let Some(clump) = logic.clump.as_deref() else { continue };
+        for (k, &(q, t)) in clump.pose.iter().enumerate() {
+            let (pq, pt) = logic.prev_pose.get(k).copied().unwrap_or((q, t));
+            let Some(&e) = ped.node_frames.get(k).and_then(|&f| ped.bones.get(f)) else { continue };
+            if let Ok(mut tf) = bones.get_mut(e) {
+                tf.rotation = pq.slerp(q, alpha);
+                tf.translation = pt.lerp(t, alpha);
             }
         }
     }
@@ -592,9 +493,15 @@ fn orbit_camera(
     mut idle: Local<f32>,
     target: Single<(Entity, &Transform, &CamFollow, Option<&crate::vehicle::Vehicle>)>,
     cam: Single<(&mut Transform, &mut OrbitCam), Without<CamFollow>>,
+    mut sa_cam: ResMut<crate::camera::SaCam>,
 ) {
     // The target's Transform is already the interpolated SA pose (SaSync).
     let (target_e, target_tf, follow, car) = *target;
+    // On foot the SA cameras (camera.rs) run instead.
+    if car.is_none() {
+        return;
+    }
+    sa_cam.reset_from_orbit();
     let (mut tf, mut oc) = cam.into_inner();
     let dt = time.delta_secs();
     let moved = lock.0 && motion.delta != Vec2::ZERO;

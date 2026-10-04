@@ -28,7 +28,7 @@ use crate::{
     effects::{Effects, FrameFx, WorldRequest},
     explosion::{Explosion, MAX_EXPLOSIONS},
     fire::{Fire, MAX_FIRES},
-    collision::{ColModel, MAX_COLPOINTS, process_col_models},
+    collision::{ColModel, ColSphere, MAX_COLPOINTS, process_col_models},
     colpoint::ColPoint,
     pair::{self, PairInfo},
     ped::{NO_CEILING, PedLogic, ped_lines},
@@ -93,6 +93,12 @@ pub trait BodyLogic: Send + Sync + 'static {
     /// object.dat uproot limit for static props (impulse in SA units).
     fn uproot_limit(&self) -> Option<f32> {
         None
+    }
+
+    /// Tyre spheres for bullet line tests (`bIncludeCarTyres`), model space, pieces 13..16.
+    fn tyre_spheres(&self, col: &ColModel) -> Vec<ColSphere> {
+        let _ = col;
+        Vec::new()
     }
 
     /// The body is leaving the world: stop any FX it owns.
@@ -162,6 +168,11 @@ pub struct World {
     /// Camera side planes (outward normal, d), for on-screen tests.
     pub camera_planes: [(Vec3, f32); 4],
     pub camera_orientation: f32,
+    /// Camera up vector, horizontal FOV (degrees), aspect and `CCam` mode (4 follow, 53 aim).
+    pub camera_up: Vec3,
+    pub camera_fov: f32,
+    pub camera_aspect: f32,
+    pub camera_mode: u8,
     pub clock: Clock,
     pub weather: Weather,
     /// Permanent and static shadows (scorch marks, fire glow).
@@ -176,6 +187,12 @@ pub struct World {
     pub(crate) fires: Vec<Fire>,
     /// `CCreepingFire::m_aFireStatus[32][32]`.
     pub(crate) creeping: [[u8; 32]; 32],
+    /// `CWeaponInfo` table (loaded by the app from data/weapon.dat).
+    pub weapon_infos: Option<Arc<crate::weapon::WeaponInfos>>,
+    /// `CBulletTraces`.
+    pub bullet_traces: crate::bullet::BulletTraces,
+    /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
+    pub(crate) gun_fx_toggle: u8,
 }
 
 impl Default for World {
@@ -204,6 +221,10 @@ impl World {
             camera_right: Vec3::X,
             camera_planes: [(Vec3::ZERO, 1e9); 4],
             camera_orientation: 0.0,
+            camera_up: Vec3::Z,
+            camera_fov: 70.0,
+            camera_aspect: 16.0 / 9.0,
+            camera_mode: 4,
             clock: Clock::new(0),
             weather: Weather::default(),
             shadows: Shadows::new(),
@@ -213,6 +234,9 @@ impl World {
             explosions: vec![Explosion::default(); MAX_EXPLOSIONS],
             fires: vec![Fire::default(); MAX_FIRES],
             creeping: [[0; 32]; 32],
+            weapon_infos: None,
+            bullet_traces: Default::default(),
+            gun_fx_toggle: 0,
         }
     }
 
@@ -368,6 +392,9 @@ impl World {
         self.update_clock_and_weather(ts);
         let mut ctx = Ctx::new(ts);
         ctx.wet_roads = self.weather.wet_roads;
+        ctx.now_ms = self.now_ms;
+        ctx.cam = self.cam_info();
+        self.probe_ped_ground();
         let moving: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))
             .collect();
@@ -481,8 +508,10 @@ impl World {
                 WorldRequest::CarLightShadow { car, id, tex, pos, front, side, rgb, max_view_angle } => {
                     self.store_car_light_shadow(car, id, tex, pos, front, side, rgb, max_view_angle);
                 }
+                WorldRequest::FireInstantHit(h) => self.fire_instant_hit(h),
             }
         }
+        self.bullet_traces.update(self.now_ms);
         self.update_explosions(ts);
         self.update_fires(ts);
         self.update_creeping();
@@ -1090,34 +1119,87 @@ impl World {
         buildings_only: bool,
         ignore: Option<EntityId>,
     ) -> Option<(EntityId, f32, ColPoint)> {
+        self.process_line_of_sight(start, end, &LosOpts { bodies: !buildings_only, ignore, ..Default::default() })
+    }
+
+    /// The camera as the ped tasks see it.
+    pub fn cam_info(&self) -> crate::CamInfo {
+        crate::CamInfo {
+            pos: self.camera_pos,
+            front: self.camera_fwd,
+            up: self.camera_up,
+            fov: self.camera_fov,
+            aspect: self.camera_aspect,
+            mode: self.camera_mode,
+            orientation: self.camera_orientation,
+        }
+    }
+
+    /// `CWorld::ProcessVerticalLine(pos, pos.z - 4.0)` under every moving ped, for the
+    /// in-air test (`IsInAir`, 1.5) and `CTaskSimpleInAir` (4.0 / 1.3).
+    fn probe_ped_ground(&mut self) {
+        let peds: Vec<(u32, Vec3)> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| b.as_ref().filter(|b| b.phys.kind == EntityType::Ped && !b.phys.is_static()).map(|b| (i as u32, b.phys.matrix.pos)))
+            .collect();
+        for (i, pos) in peds {
+            let id = EntityId::Body(i);
+            let hit = self
+                .process_line_of_sight(pos, pos - Vec3::new(0.0, 0.0, 4.0), &LosOpts { ignore: Some(id), ..Default::default() })
+                .map(|(_, _, cp)| cp.point.z);
+            if let Some(ped) = self.bodies[i as usize].as_mut().and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()) {
+                ped.ground_below = hit;
+            }
+        }
+    }
+
+    /// `CWorld::ProcessLineOfSight` with the options the weapon code uses: skipping
+    /// see-through / shoot-through surfaces (per primitive, as CCollision::ProcessLineOfSight)
+    /// and testing vehicles' tyres (`bIncludeCarTyres`).
+    pub fn process_line_of_sight(&mut self, start: Vec3, end: Vec3, o: &LosOpts) -> Option<(EntityId, f32, ColPoint)> {
         use crate::collision::{ColLine, process_line_box, process_line_sphere, process_line_triangle};
         let scan = self.next_scan();
         let mut best: Option<(EntityId, f32, ColPoint)> = None;
         let mut min_t = 1.0f32;
         let seg = end - start;
         let seg_len2 = seg.length_squared().max(1e-12);
-        let mut test = |id: EntityId, mat: &Matrix, col: &ColModel, min_t: &mut f32| {
+        let surfaces = &self.surfaces;
+        let skip = |m: u8| {
+            let i = surfaces.info(m);
+            (o.see_through && i.see_through) || (o.shoot_through && i.shoot_through)
+        };
+        let filtering = o.see_through || o.shoot_through;
+        let mut test = |id: EntityId, mat: &Matrix, col: &ColModel, tyres: &[ColSphere], min_t: &mut f32| {
             // Reject by bounding sphere (distance from its centre to the segment).
             let c = mat.transform(col.bound_center);
             let t0 = ((c - start).dot(seg) / seg_len2).clamp(0.0, 1.0);
-            if (start + seg * t0 - c).length_squared() > col.bound_radius * col.bound_radius {
+            let r = col.bound_radius + if tyres.is_empty() { 0.0 } else { 1.0 };
+            if (start + seg * t0 - c).length_squared() > r * r {
                 return;
             }
             let inv = mat.inverse();
             let l = ColLine { start: inv.transform(start), end: inv.transform(end) };
-            if !line_hits_box(l.start, l.end, col.bbox_min, col.bbox_max) {
+            if tyres.is_empty() && !line_hits_box(l.start, l.end, col.bbox_min, col.bbox_max) {
                 return;
             }
             let mut cp = ColPoint::default();
             let mut t = *min_t;
-            for s in &col.spheres {
-                process_line_sphere(&l, s, &mut cp, &mut t);
+            for sp in col.spheres.iter().chain(tyres) {
+                if !filtering || !skip(sp.surf.material) {
+                    process_line_sphere(&l, sp, &mut cp, &mut t);
+                }
             }
-            for b in &col.boxes {
-                process_line_box(&l, b, &mut cp, &mut t);
+            for bx in &col.boxes {
+                if !filtering || !skip(bx.surf.material) {
+                    process_line_box(&l, bx, &mut cp, &mut t);
+                }
             }
             for k in 0..col.tris.len() {
-                process_line_triangle(&l, col, k, &mut cp, &mut t);
+                if !filtering || !skip(col.tris[k].material) {
+                    process_line_triangle(&l, col, k, &mut cp, &mut t);
+                }
             }
             if t < *min_t {
                 *min_t = t;
@@ -1126,28 +1208,68 @@ impl World {
                 best = Some((id, t, cp));
             }
         };
-        let (lo, hi) = (start.min(end), start.max(end));
-        for y in sector_coord(lo.y)..=sector_coord(hi.y) {
-            for x in sector_coord(lo.x)..=sector_coord(hi.x) {
-                for &bi in &self.sectors[(y * SECTORS + x) as usize] {
-                    let b = self.buildings[bi as usize].as_mut().unwrap();
-                    if b.scan == scan || ignore == Some(EntityId::Building(bi)) {
-                        continue;
+        if o.buildings {
+            let (lo, hi) = (start.min(end), start.max(end));
+            for y in sector_coord(lo.y)..=sector_coord(hi.y) {
+                for x in sector_coord(lo.x)..=sector_coord(hi.x) {
+                    for &bi in &self.sectors[(y * SECTORS + x) as usize] {
+                        let b = self.buildings[bi as usize].as_mut().unwrap();
+                        if b.scan == scan || o.ignore == Some(EntityId::Building(bi)) {
+                            continue;
+                        }
+                        b.scan = scan;
+                        test(EntityId::Building(bi), &b.matrix, &b.col, &[], &mut min_t);
                     }
-                    b.scan = scan;
-                    test(EntityId::Building(bi), &b.matrix, &b.col, &mut min_t);
                 }
             }
         }
-        if !buildings_only {
+        if o.bodies {
             for (j, b) in self.bodies.iter().enumerate() {
                 let id = EntityId::Body(j as u32);
-                if let Some(b) = b.as_ref().filter(|_| ignore != Some(id)) {
-                    test(id, &b.phys.matrix, &b.col, &mut min_t);
+                let Some(b) = b.as_ref().filter(|_| o.ignore != Some(id) && o.ignore2 != Some(id)) else { continue };
+                if !b.phys.has_e(ef::USES_COLLISION) && b.phys.kind != EntityType::Ped {
+                    continue;
                 }
+                let tyres = if o.car_tyres && b.phys.kind == EntityType::Vehicle {
+                    b.logic.tyre_spheres(&b.col)
+                } else {
+                    Vec::new()
+                };
+                test(id, &b.phys.matrix, &b.col, &tyres, &mut min_t);
             }
         }
         best
+    }
+}
+
+/// `CWorld::ProcessLineOfSight` flags plus the line-test globals.
+#[derive(Debug, Clone, Copy)]
+pub struct LosOpts {
+    pub buildings: bool,
+    /// Vehicles, peds and objects.
+    pub bodies: bool,
+    /// `seeThrough`: skip see-through surfaces.
+    pub see_through: bool,
+    /// `shootThrough`: skip shoot-through surfaces.
+    pub shoot_through: bool,
+    /// `CWorld::bIncludeCarTyres`.
+    pub car_tyres: bool,
+    /// `CWorld::pIgnoreEntity` (and the caller's own entity).
+    pub ignore: Option<EntityId>,
+    pub ignore2: Option<EntityId>,
+}
+
+impl Default for LosOpts {
+    fn default() -> Self {
+        Self {
+            buildings: true,
+            bodies: true,
+            see_through: false,
+            shoot_through: false,
+            car_tyres: false,
+            ignore: None,
+            ignore2: None,
+        }
     }
 }
 

@@ -210,6 +210,8 @@ pub enum WorldRequest {
         rgb: [u8; 3],
         max_view_angle: f32,
     },
+    /// `CWeapon::Fire` of an instant-hit gun (FireInstantHit needs the whole world).
+    FireInstantHit(crate::bullet::InstantHit),
 }
 
 /// `eExplosionType`.

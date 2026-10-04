@@ -12,11 +12,14 @@
 
 use std::f32::consts::{PI, TAU};
 
-use glam::{Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3};
 
 use crate::{
     Ctx,
+    anim::Clump,
     collision::{ColLine, ColModel, ColSphere, Surf},
+    effects::{FrameFx, WorldRequest},
+    pedtask::{PedCore, PedTasks},
     physical::{EntityType, Matrix, Physical, pf},
     world::{BodyLogic, EntityId, LineHits},
 };
@@ -94,6 +97,16 @@ pub struct PedLogic {
     pub jump_request: Option<JumpKind>,
     /// Frames since knocked down by a vehicle (0 = not knocked down).
     pub knocked_down: f32,
+    /// Ground z found by the world's vertical line test (pos.z - 4.0), if any.
+    pub ground_below: Option<f32>,
+    /// The ped's anim blend clump (skinned skeleton); drives root motion when present.
+    pub clump: Option<Box<Clump>>,
+    /// Pose before the last anim update, for render interpolation.
+    pub prev_pose: Vec<(Quat, Vec3)>,
+    /// Player tasks (on foot, weapons); used when the clump and anims are set.
+    pub tasks: PedTasks,
+    /// Shots of this frame, sent to the world after the physics.
+    shots: Vec<crate::bullet::InstantHit>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -108,7 +121,8 @@ impl PedLogic {
             is_player,
             cur_rot: heading,
             aim_rot: heading,
-            turn_rate: 15.0,
+            // pedstats+0x20: STAT_PLAYER 9.0 (SetModelIndex overwrites the ctor default 15).
+            turn_rate: if is_player { 9.0 } else { 15.0 },
             turn_factor: 0.1,
             anim_velocity: Vec2::ZERO,
             standing: false,
@@ -120,6 +134,11 @@ impl PedLogic {
             ceiling_probe: false,
             jump_request: None,
             knocked_down: 0.0,
+            ground_below: None,
+            clump: None,
+            prev_pose: Vec::new(),
+            tasks: PedTasks::default(),
+            shots: Vec::new(),
         }
     }
 
@@ -199,6 +218,47 @@ impl BodyLogic for PedLogic {
             self.knocked_down += ts;
         }
 
+        // CEntity::UpdateAnim (CWorld::Process step a): the anims advance; the root shift
+        // becomes the anim velocity (CalculateNewVelocity: shift / ts).
+        if let Some(clump) = &mut self.clump {
+            self.prev_pose.clone_from(&clump.pose);
+            clump.update(ts * 0.02);
+            let v = clump.velocity;
+            let k = if ts < 0.01 { 0.01 } else { 1.0 / ts };
+            self.anim_velocity = Vec2::new(v.x, v.y) * k;
+        }
+
+        // CPed::ProcessControl: gun flash decay.
+        for (alpha, rate) in &mut self.tasks.gun_flash {
+            if *alpha > 0 {
+                let step = (ts * 0.02 * 1000.0) as i32;
+                if (*alpha as i32) > *rate as i32 * step {
+                    *alpha -= (step * *rate as i32) as i16;
+                } else {
+                    *alpha = 0;
+                }
+            }
+        }
+
+        // Step 11: CPedIntelligence::Process (the player's tasks).
+        if self.is_player && self.tasks.anims.is_some() {
+            if let Some(clump) = self.clump.as_deref_mut() {
+                let mut core = PedCore {
+                    p,
+                    clump,
+                    cur_rot: &mut self.cur_rot,
+                    aim_rot: &mut self.aim_rot,
+                    turn_rate: &mut self.turn_rate,
+                    standing: self.standing,
+                    ground_below: self.ground_below,
+                    ground_entity: self.ground_entity.is_some(),
+                };
+                self.tasks.process(&mut core, ctx);
+                self.tasks.post_process(core.clump, ctx);
+            }
+            self.tasks.pad.clear_just_down();
+        }
+
         // Jump task (from the intelligence step).
         if let Some(JumpKind::Speed(hs)) = self.jump_request.take() {
             if self.standing {
@@ -248,6 +308,22 @@ impl BodyLogic for PedLogic {
             (d * 3.333_333_3).ceil().max(2.0)
         };
         (steps.min(255.0) as u8, false)
+    }
+
+    /// `CTaskSimpleUseGun::SetPedPosition` (after the physics): FireGun → CWeapon::Fire.
+    fn process_effects(&mut self, id: EntityId, phys: &mut Physical, _col: &ColModel, fx: &mut FrameFx) {
+        // IKChainManager_c::Update (after the collision), then SetPedPosition / FireGun.
+        if let Some(clump) = self.clump.as_deref_mut() {
+            let inv = phys.matrix.inverse();
+            self.tasks.ikm.update_chains(clump, |w| inv.transform(w));
+        }
+        if let Some(clump) = self.clump.as_deref() {
+            let shots = crate::gun::fire_guns(&mut self.tasks, clump, phys, id, fx.now_ms);
+            self.shots.extend(shots);
+        }
+        for s in self.shots.drain(..) {
+            fx.requests.push(WorldRequest::FireInstantHit(s));
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

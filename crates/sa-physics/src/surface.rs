@@ -23,6 +23,12 @@ pub struct SurfaceInfo {
     pub is_water: bool,
     /// W_GRASS, W_GRAVEL, W_MUD, W_DUST, W_SAND, W_SPRAY (flags2 bits 1..6).
     pub wheel_fx: [bool; 6],
+    /// SEE_THRO, SHOOT_T and GLASS (flags1 bits 12, 13, 19).
+    pub see_through: bool,
+    pub shoot_through: bool,
+    pub glass: bool,
+    /// BULLET_FX (flags1 bits 8..10): 0 NONE, 1 SPARKS, 2 SAND, 3 WOOD, 4 DUST.
+    pub bullet_fx: u8,
 }
 
 /// Indices into `SurfaceInfo::wheel_fx`.
@@ -87,6 +93,16 @@ impl SurfaceInfos {
                 is_sand: flag(9),
                 is_water: flag(10),
                 wheel_fx: std::array::from_fn(|k| flag(26 + k)),
+                see_through: flag(7),
+                shoot_through: flag(8),
+                glass: flag(14),
+                bullet_fx: match t.get(35).map(|v| v.to_ascii_uppercase()).as_deref() {
+                    Some("SPARKS") => 1,
+                    Some("SAND") => 2,
+                    Some("WOOD") => 3,
+                    Some("DUST") => 4,
+                    _ => 0,
+                },
             });
         }
         s

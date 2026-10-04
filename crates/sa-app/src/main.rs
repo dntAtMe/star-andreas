@@ -1,3 +1,4 @@
+mod camera;
 mod debug;
 mod colour_filter;
 mod coronas;
@@ -10,6 +11,7 @@ mod shadows;
 mod sky;
 mod stream;
 mod vehicle;
+mod weapons;
 mod weather;
 mod world;
 mod world_material;
@@ -86,6 +88,7 @@ fn main() -> anyhow::Result<()> {
         lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
+    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);
@@ -220,6 +223,7 @@ fn update_hud(
          mode {:?}{}{}{}  (F2 toggles walk/fly)\n\
          {:02}:{:02}  {} -> {} ({:.0}%)  rain {:.2}  wind {:.2}  (N next weather, M release, B damage car)\n\
          walk: click grabs mouse, Esc releases, WASD, Shift sprint, Alt walk, Space jump, V spawn car, F enter/exit\n\
+         guns: F1 debug UI gives weapons, RMB aim, LMB fire, wheel or Q/E switch, C crouch (A/D while aiming rolls), Home camera zoom\n\
          drive: W throttle, S brake/reverse, A/D steer, Space handbrake\n\
          fly: RMB look, WASD/QE move, Shift fast, wheel speed",
         p[0],

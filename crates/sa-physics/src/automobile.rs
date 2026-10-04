@@ -659,7 +659,12 @@ impl Automobile {
                     }
                 }
                 let mut st = self.wheel_state[w];
-                self.process_wheel(p, ts, f, rt, cs[w], cp[w], thrust, brake * bb, adh * tb, w, &mut st);
+                // A burst tyre: m_fWheelDamageEffect (0.5) traction and a random side force.
+                let burst = self.damage.dm.wheels[w] == 1;
+                let adh = if burst { adh * WHEEL_DAMAGE_EFFECT } else { adh };
+                let mut rng = std::mem::replace(&mut self.damage.rng, crate::damage::Rand::new(0));
+                self.process_wheel(p, ts, f, rt, cs[w], cp[w], thrust, brake * bb, adh * tb, w, &mut st, burst, &mut rng);
+                self.damage.rng = rng;
                 self.wheel_state[w] = if driven && self.gas < 0.0 && st == WheelState::Spinning { WheelState::Normal } else { st };
             }
         }
@@ -707,6 +712,8 @@ impl Automobile {
         mut adhesion: f32,
         wheel: usize,
         state: &mut WheelState,
+        burst: bool,
+        rng: &mut crate::damage::Rand,
     ) {
         let n_contact = self.num_contact_wheels.max(1) as f32;
         let mut side = 0.0f32;
@@ -727,6 +734,9 @@ impl Automobile {
         let right_speed = (rt.y * cs.y + rt.z * cs.z) + rt.x * cs.x;
         if right_speed != 0.0 {
             side = -(right_speed / n_contact);
+            if burst {
+                side += fwd_speed.min(0.3) * ((0.13 - -0.13) * rng.rand01() + -0.13);
+            }
         }
         if driving {
             fwd_f = thrust;
@@ -827,7 +837,83 @@ impl Automobile {
 
 }
 
+/// `CDamageManager::m_fWheelDamageEffect` (ctor 0x6B0ADD).
+const WHEEL_DAMAGE_EFFECT: f32 = 0.5;
+
 impl Automobile {
+    /// 0x6A47F0 CAutomobile::DoBurstAndSoftGroundRatios (run from PreRender in SA, i.e.
+    /// between the collision passes and the next ProcessControl's step 9).
+    fn do_burst_and_soft_ground_ratios(&mut self, p: &Physical, ts: f32) {
+        let fwd_abs = p.move_speed.dot(p.matrix.fwd).abs();
+        for i in 0..4 {
+            // Wheel status order matches the lines: 0 FL, 1 RL, 2 FR, 3 RR.
+            let status = self.damage.dm.wheels[i];
+            let ext = (self.line_len[i] - self.spring_len[i]) / self.line_len[i];
+            if status == 2 {
+                self.comp[i] = 1.0;
+            } else if status == 1 {
+                let r = (self.damage.rng.next() & 0xFFFF) as f32 * (1.0 / 32768.0);
+                if ((r * ((fwd_abs * 40.0) as i32 as u16 as f32 + 98.0)) as i32) < 100 {
+                    self.comp[i] = (self.comp[i] + ext * 0.25).min(1.0);
+                }
+            } else if self.comp[i] < 1.0
+                && self.surfaces.adhesion_group(self.wheel_cp[i].surface_b) == 4
+                && self.model != 432
+            {
+                let k = if self.h.flags & hflags::OFFROAD_ABILITY2 != 0 {
+                    0.15
+                } else if self.h.flags & hflags::OFFROAD_ABILITY != 0 {
+                    0.2
+                } else {
+                    0.3
+                };
+                let f = ((1.0 - (fwd_abs / 0.3) * 0.7) - self.surfaces.wet_roads * 0.7).max(0.4);
+                self.comp[i] = (self.comp[i] + ext * f * k).min(1.0);
+            } else if self.comp[i] < 1.0 && self.wheel_cp[i].surface_b == 178 {
+                let size = if i == 0 || i == 2 { self.wheel_size_front } else { self.wheel_size_rear };
+                let mut q = 1.5 / (size * 0.5);
+                if fwd_abs > 0.3 {
+                    q *= fwd_abs / 0.3;
+                }
+                let q = 1.0 / q;
+                let mut a = q * self.wheel_rot[i];
+                a -= a.floor();
+                let mut b = (ts * self.wheel_speed[i] + self.wheel_rot[i]) * q;
+                b -= b.floor();
+                if (self.wheel_speed[i] > 0.0 && b < a) || (self.wheel_speed[i] < 0.0 && a < b) {
+                    self.comp[i] = (self.comp[i] - ext * 0.3).max(0.2);
+                }
+            }
+        }
+    }
+
+    /// 0x6A32B0 CAutomobile::BurstTyre. `piece` is a col piece (13 LF, 14 RF, 15 LR,
+    /// 16 RR) or a wheel index.
+    pub fn burst_tyre(&mut self, p: &mut Physical, piece: u8, apply_forces: bool) -> bool {
+        if self.model == 432 || p.status == Status::Wrecked {
+            return false;
+        }
+        let w = match piece {
+            13 => 0,
+            14 => 2,
+            15 => 1,
+            16 => 3,
+            w => w as usize,
+        };
+        if w > 3 || self.damage.dm.wheels[w] != 0 {
+            return false;
+        }
+        self.damage.dm.wheels[w] = 1;
+        if apply_forces {
+            let r1 = self.damage.rng.rand01() * 0.06 - 0.03;
+            p.apply_move_force(p.matrix.right * (r1 * p.mass));
+            let r2 = self.damage.rng.rand01() * 0.06 - 0.03;
+            let (right, fwd) = (p.matrix.right, p.matrix.fwd);
+            p.apply_turn_force(right * (r2 * p.turn_mass), fwd);
+        }
+        true
+    }
+
     /// 0x6D1230 ProcessWheelRotation.
     fn wheel_rotation(state: WheelState, dir: Vec3, speed: Vec3, radius: f32) -> f32 {
         match state {
@@ -866,6 +952,22 @@ impl Automobile {
 }
 
 impl BodyLogic for Automobile {
+    /// The tyre col model of `bIncludeCarTyres` line tests: a sphere per present wheel at
+    /// its hub, wheel pieces 13 LF, 14 RF, 15 LR, 16 RR.
+    fn tyre_spheres(&self, col: &ColModel) -> Vec<crate::collision::ColSphere> {
+        (0..4)
+            .filter(|&i| self.damage.dm.wheels[i] != 2 && i < col.lines.len())
+            .map(|i| {
+                let l = col.lines[i];
+                crate::collision::ColSphere {
+                    center: Vec3::new(l.start.x, l.start.y, self.hub_z[i]),
+                    radius: self.wheel_radius(i),
+                    surf: crate::collision::Surf { material: 0, piece: [13, 15, 14, 16][i], lighting: 0 },
+                }
+            })
+            .collect()
+    }
+
     /// 0x6B1880 CAutomobile::ProcessControl (physics path).
     fn process_control(&mut self, p: &mut Physical, col: &mut ColModel, ctx: &Ctx, lines: &LineHits) {
         let ts = ctx.ts;
@@ -909,12 +1011,8 @@ impl BodyLogic for Automobile {
             if lines.values[i] < 1.0 {
                 self.wheel_cp[i] = lines.points[i];
             }
-            // A missing wheel never touches the ground (DoBurstAndSoftGroundRatios).
-            let dm_wheel = i; // same order: 0 FL, 1 RL, 2 FR, 3 RR
-            if self.damage.dm.wheels[dm_wheel] == 2 {
-                self.comp[i] = 1.0;
-            }
         }
+        self.do_burst_and_soft_ground_ratios(p, ts);
 
         if skip {
             p.skip_physics();
