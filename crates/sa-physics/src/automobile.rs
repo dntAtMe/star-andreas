@@ -217,6 +217,8 @@ pub struct VehicleHandling {
     pub flags: u32,
     /// Converted collision damage multiplier (raw * 2000 / mass).
     pub collision_damage: f32,
+    /// `fBuoyancyConstant` = mass·0.8 / nPercentSubmerged.
+    pub buoyancy_constant: f32,
     /// handling.cfg engine type: 'P' petrol, 'D' diesel, 'E' electric.
     pub engine_type: char,
     pub trans: Transmission,
@@ -294,6 +296,7 @@ impl VehicleHandling {
             model_flags: h.model_flags,
             flags: h.handling_flags,
             collision_damage: 1.0 / h.mass * h.collision_damage * 2000.0,
+            buoyancy_constant: h.mass * 0.8 / h.percent_submerged.max(1.0),
             engine_type: h.engine_type,
             trans: t,
         }
@@ -355,6 +358,10 @@ pub struct Automobile {
     pub handbrake: bool,
     pub burnout: bool,
     pub engine_on: bool,
+    /// m_fBuoyancyConstant (+0xA0): handling's, reduced while sinking.
+    pub buoyancy: f32,
+    /// +0x42B & 0x40: sinking.
+    pub sinking: bool,
     pub gear: u8,
     pub revs: f32,
     pub load: f32,
@@ -424,6 +431,7 @@ impl Automobile {
             col.bbox_max.x,
             model as u32 * 7919 + 1,
         );
+        let buoyancy0 = h.buoyancy_constant;
         Self {
             h,
             model,
@@ -447,6 +455,8 @@ impl Automobile {
             handbrake: false,
             burnout: false,
             engine_on: false,
+            buoyancy: buoyancy0,
+            sinking: false,
             gear: 1,
             revs: 0.0,
             load: 0.0,

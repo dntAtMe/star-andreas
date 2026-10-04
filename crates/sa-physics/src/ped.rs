@@ -200,6 +200,33 @@ impl PedLogic {
     }
 }
 
+impl PedLogic {
+    /// `CPlayerPed::HandlePlayerBreath(underWater, 1.0)` (0x60A8D0): breath runs out, then
+    /// `ftol(3·ts)` drowning damage per frame (type 53).
+    pub fn handle_breath(&mut self, under_water: bool, ts: f32) {
+        let pd = &mut self.tasks.pd;
+        if under_water {
+            if pd.breath > 0.0 {
+                pd.breath = (pd.breath - ts).max(0.0);
+            } else {
+                self.pending_damage.push(crate::peddamage::DamageIn {
+                    src: None,
+                    src_pos: None,
+                    ty: 53,
+                    damage: (ts * 3.0) as i32 as f32,
+                    piece: 3,
+                    dir: 0,
+                });
+            }
+        } else if pd.breath < BREATH_MAX {
+            pd.breath += 2.0 * ts;
+        }
+    }
+}
+
+/// GetFatAndMuscleModifier(8): the player's lung capacity [I: stat-driven, default stats].
+pub const BREATH_MAX: f32 = 600.0;
+
 /// Rotate the matrix to heading `h` about Z, keeping position (`CMatrix::SetRotateZOnly`-style).
 pub fn set_heading(m: &mut Matrix, h: f32) {
     let (s, c) = h.sin_cos();

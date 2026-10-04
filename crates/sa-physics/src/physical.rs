@@ -37,6 +37,8 @@ pub mod pf {
     pub const PROBE: u32 = 0x10000;
     pub const NO_COLLISION: u32 = 0x20000;
     pub const VEHICLE_SURFACE_SPEED: u32 = 0x4000000;
+    /// bTouchingWater (set by the ProcessBuoyancy users while in water).
+    pub const TOUCHING_WATER: u32 = 0x800_0000;
     pub const KEEP_COLLISION_RECORDS: u32 = 0x1000_0000;
     pub const DOOR_HIT_LIMIT: u32 = 0x4000_0000;
 }

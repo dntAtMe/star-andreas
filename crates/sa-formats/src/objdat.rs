@@ -8,6 +8,8 @@ pub struct ObjectPhysics {
     pub turn_mass: f32,
     pub air_resistance: f32,
     pub elasticity: f32,
+    /// Column F: percent submerged (buoyancy = (100 / this)·mass·0.008).
+    pub percent_submerged: f32,
     /// Collision impulse (game units: kg * units/frame) needed to knock the object loose.
     pub uproot: f32,
     pub damage_mult: f32,
@@ -47,6 +49,7 @@ pub fn parse(text: &str) -> HashMap<String, ObjectPhysics> {
                 turn_mass,
                 air_resistance: air,
                 elasticity,
+                percent_submerged: n(5).unwrap_or(0.0),
                 uproot,
                 damage_mult: cd_mult,
                 damage_effect: cd_eff as u32,
@@ -68,6 +71,7 @@ mod tests {
         let l = m["lamppost2"];
         assert_eq!(l.mass, 1250.0);
         assert_eq!(l.uproot, 240.0);
+        assert_eq!(l.percent_submerged, 50.0);
         assert_eq!(l.damage_effect, 200);
         assert_eq!(l.special, 1);
     }

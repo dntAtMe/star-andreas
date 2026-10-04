@@ -95,6 +95,12 @@ pub trait BodyLogic: Send + Sync + 'static {
         None
     }
 
+    /// Objects: `CObjectData` buoyancy `(100 / percentSubmerged)·mass·0.008`, if the object floats.
+    fn buoyancy(&self, phys: &Physical) -> Option<f32> {
+        let _ = phys;
+        None
+    }
+
     /// Tyre spheres for bullet line tests (`bIncludeCarTyres`), model space, pieces 13..16.
     fn tyre_spheres(&self, col: &ColModel) -> Vec<ColSphere> {
         let _ = col;
@@ -193,6 +199,8 @@ pub struct World {
     pub bullet_traces: crate::bullet::BulletTraces,
     /// `CProjectileInfo` and `CShotInfo`.
     pub projectiles: crate::projectile::Projectiles,
+    /// `CWaterLevel` (data/water.dat, set by the app).
+    pub water: Option<Arc<crate::water::WaterLevel>>,
     /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
     pub(crate) gun_fx_toggle: u8,
 }
@@ -239,6 +247,7 @@ impl World {
             weapon_infos: None,
             bullet_traces: Default::default(),
             projectiles: Default::default(),
+            water: None,
             gun_fx_toggle: 0,
         }
     }
@@ -407,6 +416,7 @@ impl World {
             let b = self.bm(i);
             b.logic.process_control(&mut b.phys, &mut b.col, &ctx, &b.lines);
             b.lines = LineHits::default();
+            self.process_buoyancy(i, ts);
         }
 
         // Up to 6 collision passes.
@@ -1142,6 +1152,140 @@ impl World {
         ignore: Option<EntityId>,
     ) -> Option<(EntityId, f32, ColPoint)> {
         self.process_line_of_sight(start, end, &LosOpts { bodies: !buildings_only, ignore, ..Default::default() })
+    }
+
+    /// `CWeather::Wavyness`.
+    pub fn wavyness(&self) -> f32 {
+        (self.weather.wind_clipped + 0.3).min(1.0)
+    }
+
+    /// `GetWaterLevel` with the world's water and weather.
+    pub fn water_level(&self, p: Vec3, touching: bool) -> Option<(f32, Vec3)> {
+        self.water.as_ref()?.level(p.x, p.y, p.z, touching, self.wavyness(), self.now_ms)
+    }
+
+    /// The ProcessBuoyancy calls of CAutomobile / CPed / CObject::ProcessControl.
+    fn process_buoyancy(&mut self, i: usize, ts: f32) {
+        use crate::water::{BuoyancyIn, process_buoyancy};
+        let Some(water) = self.water.clone() else { return };
+        let wavy = self.wavyness();
+        let now = self.now_ms;
+        let b = self.bm(i);
+        let kind = b.phys.kind;
+        let touching = b.phys.flags & pf::TOUCHING_WATER != 0;
+        let bconst = match kind {
+            EntityType::Vehicle => match b.logic.as_any().downcast_ref::<crate::automobile::Automobile>() {
+                Some(car) => car.buoyancy,
+                None => return,
+            },
+            EntityType::Ped => {
+                let Some(ped) = b.logic.as_any().downcast_ref::<PedLogic>() else { return };
+                if !b.phys.has_e(ef::USES_COLLISION) {
+                    return; // in a vehicle
+                }
+                let k = if ped.tasks.health.alive() { 1.1 } else { 1.8 };
+                k * b.phys.mass * 0.008
+            }
+            _ => match b.logic.buoyancy(&b.phys) {
+                Some(v) => v,
+                None => return,
+            },
+        };
+        let input = BuoyancyIn {
+            matrix: &b.phys.matrix,
+            bbox_min: b.col.bbox_min,
+            bbox_max: b.col.bbox_max,
+            is_ped: kind == EntityType::Ped,
+            touching,
+            b: bconst,
+            mass: b.phys.mass,
+            move_z: b.phys.move_speed.z,
+            ts,
+        };
+        let Some((turn, force, level)) = process_buoyancy(&water, &input, wavy, now) else {
+            b.phys.flags &= !(pf::TOUCHING_WATER | pf::IN_WATER);
+            if let Some(car) = b.logic.as_any_mut().downcast_mut::<crate::automobile::Automobile>() {
+                car.sinking = false;
+                car.buoyancy = car.h.buoyancy_constant;
+            }
+            return;
+        };
+        let b = self.bm(i);
+        match kind {
+            EntityType::Ped => {
+                b.phys.flags |= pf::TOUCHING_WATER | pf::IN_WATER;
+                b.phys.apply_move_force(force);
+                let mass = b.phys.mass;
+                let deep = force.z / mass > ts * 0.008 || b.phys.matrix.pos.z + 0.6 < level;
+                let Body { phys, logic, .. } = b;
+                let ped = logic.as_any_mut().downcast_mut::<PedLogic>().unwrap();
+                if !deep {
+                    // Wading: the player's head under water loses breath.
+                    if ped.is_player {
+                        ped.handle_breath(phys.matrix.pos.z + 0.8 < level, ts);
+                    }
+                    return;
+                }
+                // Swimming (the swim task is not ported: the ped floats and drifts).
+                ped.standing = false;
+                let f = 0.9f32.powf(ts);
+                phys.move_speed.x *= f;
+                phys.move_speed.y *= f;
+                if phys.move_speed.z < 0.0 {
+                    phys.move_speed.z *= f;
+                }
+                if ped.is_player {
+                    ped.handle_breath(phys.matrix.pos.z + 0.8 < level, ts);
+                }
+            }
+            EntityType::Vehicle => {
+                // CAutomobile::ProcessBuoyancy (0x6A8C00).
+                b.phys.flags |= pf::TOUCHING_WATER;
+                let mass = b.phys.mass;
+                let Body { phys, logic, .. } = b;
+                let car = logic.as_any_mut().downcast_mut::<crate::automobile::Automobile>().unwrap();
+                let mut r = force.z / (ts.max(0.01) * mass * 0.008);
+                if mass * 0.008 > car.buoyancy {
+                    r *= (mass * 0.008 / car.buoyancy) * 1.05;
+                }
+                if phys.flags & pf::HEAVY != 0 {
+                    r *= 1.5;
+                }
+                let damp = (1.0 - r * 0.05).max(0.5).powf(ts);
+                phys.move_speed *= damp;
+                phys.turn_speed *= damp;
+                phys.apply_move_force(force);
+                phys.apply_turn_force(force, turn);
+                let airborne = car.comp.iter().any(|&c| c >= 1.0);
+                let deep = r >= 1.0 || (r > 0.6 && airborne);
+                if !deep {
+                    phys.flags &= !pf::IN_WATER;
+                    car.sinking = false;
+                    return;
+                }
+                car.sinking = true;
+                phys.flags |= pf::IN_WATER;
+                if phys.move_speed.z < -0.1 {
+                    phys.move_speed.z = -0.1;
+                }
+                if car.buoyancy > mass * 0.0064 {
+                    car.buoyancy -= mass * 8e-6;
+                }
+                if car.buoyancy < mass * 0.008 {
+                    car.engine_on = false;
+                }
+            }
+            _ => {
+                // CObject::ProcessControl.
+                b.phys.flags |= pf::TOUCHING_WATER | pf::IN_WATER;
+                b.phys.eflags &= !ef::IS_STATIC;
+                b.phys.apply_move_force(force);
+                b.phys.apply_turn_force(force, turn);
+                let f = 0.97f32.powf(ts);
+                b.phys.move_speed *= f;
+                b.phys.turn_speed *= f;
+            }
+        }
     }
 
     /// The player ped's body.

@@ -12,6 +12,7 @@ mod sky;
 mod stream;
 mod vehicle;
 mod wasted;
+mod water;
 mod weapons;
 mod weather;
 mod world;
@@ -89,7 +90,7 @@ fn main() -> anyhow::Result<()> {
         lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
-    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin))
+    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);
@@ -109,11 +110,7 @@ pub struct FlyCam {
 #[derive(Component)]
 struct Hud;
 
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+fn setup(mut commands: Commands) {
     // Grove Street, looking north-west.
     let v: Vec<f32> = std::env::var("SA_POS")
         .unwrap_or_default()
@@ -138,18 +135,6 @@ fn setup(
     commands.spawn((
         DirectionalLight { illuminance: 9000.0, ..default() },
         Transform::from_xyz(0.0, 0.0, 0.0).looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
-    ));
-
-    // Placeholder sea at z = 0 until water.dat is parsed.
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(12000.0, 12000.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.18, 0.33, 0.42, 0.85),
-            unlit: true,
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, -0.05, 0.0),
     ));
 
     commands.spawn((

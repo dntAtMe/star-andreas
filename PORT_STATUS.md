@@ -20,7 +20,8 @@ Last updated: 2026-10-05.
 | Anim blending (RpAnimBlend, CAnimBlendAssociation, group table) | ✅ | partial layers, movement phase lock, root motion; 3D root extraction and off-screen path not used |
 | Streaming (distance, HD/LOD) | 🟡 | own scheme, not CStreaming / CRenderer lists |
 | Interiors / entry-exits | ❌ | |
-| Water (water.dat, CWaterLevel) | ❌ | placeholder sea plane only; blocks boats, underwater, splashes |
+| Water (water.dat, CWaterLevel) | 🟡 | water.dat grid, GetWaterLevel(NoWaves) with SA's wave function, RenderWater (2 layers, waves within 48 units, flow scroll, timecyc colour/alpha, sea beyond the map, sea bed); no water fog, boat wakes, water1.dat, underwater draw order |
+| Buoyancy (cBuoyancy) | 🟡 | peds (float, breath, drowning), cars (sinking, engine off), object.dat objects; no boats, no swim task (peds float head-under), no splashes |
 | Cull zones (tunnels, no-rain zones) | ❌ | |
 | Time-cycle boxes (IPL `tcyc`) | ❌ | |
 
@@ -133,8 +134,8 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Water (CWaterLevel): unblocks boats, splashes, underwater fog, sun reflection.
-2. Ped health / damage / death (CPedDamageResponseCalculator), then projectiles and melee.
+1. Melee (CTaskSimpleFight), the swim task, boats, underwater fog and splashes.
+2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.
 5. Other vehicle classes (bikes first).

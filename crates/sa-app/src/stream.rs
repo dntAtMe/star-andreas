@@ -589,7 +589,7 @@ fn stream_instances(
                             p.turn_mass = op.turn_mass.max(1.0);
                             p.elasticity = op.elasticity;
                             p.air_resistance = op.air_resistance;
-                            let id = sa.world.add_body(p, (**sa_col).clone(), Box::new(PropLogic { uproot: op.uproot }));
+                            let id = sa.world.add_body(p, (**sa_col).clone(), Box::new(PropLogic { uproot: op.uproot, percent_submerged: op.percent_submerged }));
                             ec.insert(SaBody::new(id, m));
                         }
                         None => {
@@ -644,11 +644,15 @@ fn stream_instances(
 /// object.dat prop: static until a hit exceeds its uproot impulse (SA units).
 struct PropLogic {
     uproot: f32,
+    percent_submerged: f32,
 }
 
 impl BodyLogic for PropLogic {
     fn uproot_limit(&self) -> Option<f32> {
         Some(self.uproot)
+    }
+    fn buoyancy(&self, phys: &sa_physics::physical::Physical) -> Option<f32> {
+        (self.percent_submerged > 0.0).then(|| 100.0 / self.percent_submerged * phys.mass * 0.008)
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self

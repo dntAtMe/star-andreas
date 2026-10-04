@@ -73,6 +73,8 @@ pub struct PlayerData {
     pub attack_counter: f32,
     /// +0x54 look pitch for the torso IK (rad).
     pub look_pitch: f32,
+    /// +0x44 breath.
+    pub breath: f32,
     /// +0x34 & 8: free aiming.
     pub free_aim: bool,
 }
@@ -87,6 +89,7 @@ impl Default for PlayerData {
             chosen_slot: 0,
             attack_counter: 0.0,
             look_pitch: 0.0,
+            breath: crate::ped::BREATH_MAX,
             free_aim: false,
         }
     }
