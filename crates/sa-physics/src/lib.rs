@@ -19,6 +19,7 @@ pub mod ped;
 pub mod shadows;
 pub mod physical;
 pub mod surface;
+pub mod timecycle;
 pub mod weather;
 pub mod world;
 

@@ -1,13 +1,16 @@
 mod debug;
+mod colour_filter;
 mod fx;
 mod heat_haze;
 mod player;
 mod saphys;
 mod shadows;
+mod sky;
 mod stream;
 mod vehicle;
 mod weather;
 mod world;
+mod world_material;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -75,6 +78,9 @@ fn main() -> anyhow::Result<()> {
         shadows::ShadowsPlugin,
         heat_haze::HeatHazePlugin,
         debug::DebugPlugin,
+        world_material::WorldMaterialPlugin,
+        sky::SkyPlugin,
+        colour_filter::ColourFilterPlugin,
     ))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))

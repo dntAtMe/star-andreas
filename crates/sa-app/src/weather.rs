@@ -1,4 +1,4 @@
-//! Weather presentation: rain streaks (`RenderRainStreaks`), the lightning flash, and
+//! Weather presentation: rain streaks (`RenderRainStreaks`) and
 //! debug controls. The simulation (CClock / CWeather) lives in sa-physics' World.
 //!
 //! `SA_TIME=hh:mm` sets the clock, `SA_WEATHER=<0..22>` forces a weather type now;
@@ -17,26 +17,19 @@ pub struct WeatherPlugin;
 impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init)
-            .add_systems(Update, (debug_keys.before(SaStep), (draw_streaks, lightning).after(SaStep)));
+            .add_systems(Update, (debug_keys.before(SaStep), draw_streaks.after(SaStep)));
     }
 }
 
 #[derive(Resource)]
 struct Streaks(Handle<Mesh>);
 
-#[derive(Resource)]
-struct Sky {
-    clear: Color,
-    ambient: f32,
-}
 
 fn init(
     mut commands: Commands,
     mut sa: ResMut<SaPhys>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    clear: Res<ClearColor>,
-    ambient: Res<GlobalAmbientLight>,
 ) {
     if let Some((h, m)) = std::env::var("SA_TIME").ok().and_then(|v| {
         let (h, m) = v.split_once(':')?;
@@ -48,7 +41,6 @@ fn init(
     if let Some(t) = std::env::var("SA_WEATHER").ok().and_then(|v| v.parse::<i16>().ok()) {
         sa.world.weather.force_now(t.clamp(0, 22));
     }
-    commands.insert_resource(Sky { clear: clear.0, ambient: ambient.brightness });
     // Untextured lines, alpha blended, no fog (FOGENABLE off), z-write off.
     let mesh = meshes.add(
         Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default())
@@ -98,16 +90,4 @@ fn draw_streaks(sa: Res<SaPhys>, streaks: Res<Streaks>, mut meshes: ResMut<Asset
     }
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     m.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
-}
-
-/// LightningFlash: sky and clear colour 255,255,255 and ambient 1.0 for the frame.
-fn lightning(sa: Res<SaPhys>, sky: Res<Sky>, mut clear: ResMut<ClearColor>, mut ambient: ResMut<GlobalAmbientLight>) {
-    let flash = sa.world.weather.lightning_flash;
-    let (c, a) = if flash { (Color::WHITE, sky.ambient * 4.0) } else { (sky.clear, sky.ambient) };
-    if clear.0 != c {
-        clear.0 = c;
-    }
-    if ambient.brightness != a {
-        ambient.brightness = a;
-    }
 }

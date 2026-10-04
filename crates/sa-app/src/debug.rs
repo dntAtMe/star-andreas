@@ -42,6 +42,13 @@ pub struct DebugUi {
     pub heat_haze: bool,
     pub shadows: bool,
     pub rain_streaks: bool,
+    pub sky: bool,
+    pub fog: bool,
+    pub colour_filter: bool,
+    /// None = the PC time cycle's DirMult (0); Some = forced directional multiplier.
+    pub dir_mult_override: Option<f32>,
+    /// FrontEnd brightness (256 = neutral).
+    pub brightness: i32,
     spawn_idx: usize,
     weather_idx: usize,
     explosion_idx: usize,
@@ -59,6 +66,11 @@ impl Default for DebugUi {
             heat_haze: true,
             shadows: true,
             rain_streaks: true,
+            sky: true,
+            fog: true,
+            colour_filter: true,
+            dir_mult_override: None,
+            brightness: 256,
             spawn_idx: 0,
             weather_idx: 0,
             explosion_idx: 4,
@@ -180,6 +192,40 @@ fn ui(
                     wt.heat_haze, wt.heat_haze_fx_control, wt.lightning_flash
                 ));
                 ui.text(format!("DN balance {:.2}", w.clock.dn_balance()));
+            }
+
+            // ---------------------------------------------------------------- time cycle
+            if ui.collapsing_header("Time cycle", TreeNodeFlags::empty()) {
+                if let Some(tc) = sa.world.timecycle.as_ref() {
+                    let c = &tc.current;
+                    let rgb = |v: [f32; 3]| format!("{:.0} {:.0} {:.0}", v[0], v[1], v[2]);
+                    ui.text(format!(
+                        "amb {:.2} {:.2} {:.2}  obj {:.2} {:.2} {:.2}",
+                        c.ambient.x, c.ambient.y, c.ambient.z, c.ambient_obj.x, c.ambient_obj.y, c.ambient_obj.z
+                    ));
+                    ui.text(format!("sky top {}  bottom {}", rgb(c.sky_top), rgb(c.sky_bottom)));
+                    ui.text(format!("sun core {}  corona {}  size {:.0}", rgb(c.sun_core), rgb(c.sun_corona), c.sun_size));
+                    ui.text(format!("far clip {:.0}  fog start {:.0}  dir mult {:.2}", c.far_clip, c.fog_start, c.dir_mult));
+                    let p1 = c.post_fx1;
+                    let p2 = c.post_fx2;
+                    ui.text(format!("postfx1 {:.0} {:.0} {:.0} a{:.0}", p1[0], p1[1], p1[2], p1[3]));
+                    ui.text(format!("postfx2 {:.0} {:.0} {:.0} a{:.0}", p2[0], p2[1], p2[2], p2[3]));
+                    let s = tc.vector_to_sun;
+                    ui.text(format!("sun dir {:.2} {:.2} {:.2}", s.x, s.y, s.z));
+                }
+                ui.checkbox("sky", &mut dbg.sky);
+                ui.same_line();
+                ui.checkbox("fog", &mut dbg.fog);
+                ui.same_line();
+                ui.checkbox("colour filter", &mut dbg.colour_filter);
+                let mut force = dbg.dir_mult_override.is_some();
+                if ui.checkbox("force directional light", &mut force) {
+                    dbg.dir_mult_override = force.then_some(1.0);
+                }
+                if let Some(d) = dbg.dir_mult_override.as_mut() {
+                    ui.slider("dir mult", 0.0, 2.0, d);
+                }
+                ui.slider("brightness", 0, 512, &mut dbg.brightness);
             }
 
             // ---------------------------------------------------------------- vehicle

@@ -30,13 +30,18 @@ impl Plugin for HeatHazePlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "heat_haze.wgsl");
         app.add_plugins(FullscreenMaterialPlugin::<HeatHaze>::default())
-            .add_systems(Startup, attach)
+            .add_systems(Update, attach)
             .add_systems(PostUpdate, update.after(crate::fx::FxDrawn));
     }
 }
 
+/// The post-effect pass: CPostEffects' colour filter (k1, k2) then the heat haze. Bevy's
+/// FullscreenMaterial shares bind groups per camera, so both live in one material.
 #[derive(Component, ExtractComponent, Clone, Copy, ShaderType)]
 pub struct HeatHaze {
+    /// Colour filter: PostFx rgb * a (/255), k1.w = enabled.
+    pub k1: Vec4,
+    pub k2: Vec4,
     params: Vec4,
     tiles: [Vec4; TILES * 2],
     masks: [Vec4; MASKS * 2],
@@ -44,7 +49,13 @@ pub struct HeatHaze {
 
 impl Default for HeatHaze {
     fn default() -> Self {
-        Self { params: Vec4::ZERO, tiles: [Vec4::ZERO; TILES * 2], masks: [Vec4::ZERO; MASKS * 2] }
+        Self {
+            k1: Vec4::ZERO,
+            k2: Vec4::ZERO,
+            params: Vec4::ZERO,
+            tiles: [Vec4::ZERO; TILES * 2],
+            masks: [Vec4::ZERO; MASKS * 2],
+        }
     }
 }
 
@@ -52,6 +63,7 @@ impl FullscreenMaterial for HeatHaze {
     fn fragment_shader() -> ShaderRef {
         "embedded://sa_app/heat_haze.wgsl".into()
     }
+
 }
 
 /// HeatHazeFXInit state: tile positions in raster pixels, seeded per screen size.
@@ -77,8 +89,10 @@ fn raster(n: u32) -> i32 {
     1 << (32 - n.max(1).leading_zeros())
 }
 
-fn attach(mut commands: Commands, cam: Single<Entity, With<Camera3d>>) {
-    commands.entity(*cam).insert(HeatHaze::default());
+fn attach(mut commands: Commands, cams: Query<Entity, (With<Camera3d>, Without<HeatHaze>)>) {
+    for e in &cams {
+        commands.entity(e).insert(HeatHaze::default());
+    }
 }
 
 fn update(

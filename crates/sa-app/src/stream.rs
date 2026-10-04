@@ -33,6 +33,7 @@ use sa_physics::{
 };
 
 use crate::{
+    world_material::{ATTRIBUTE_NIGHT_COLOR, WorldGlobals, WorldMatUniform, WorldMaterial},
     saphys::{SaBody, SaBuilding, SaPhys, gta_matrix},
     world::{WorldRes, g2b},
 };
@@ -65,10 +66,14 @@ struct PartCpu {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    /// Day and night prelit colours, gamma 0..1.
     colors: Vec<[f32; 4]>,
+    night: Vec<[f32; 4]>,
     indices: Vec<u32>,
     texture: Option<String>,
     color: [u8; 4],
+    /// rpGEOMETRYLIGHT: the timecyc ambient is added.
+    lit: bool,
 }
 
 pub struct TexCpu {
@@ -97,7 +102,7 @@ struct Loader {
 #[derive(Clone)]
 struct Part {
     mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
+    material: Handle<WorldMaterial>,
 }
 
 struct Model {
@@ -138,7 +143,7 @@ enum TxdState {
 struct Cache {
     models: HashMap<u32, ModelState>,
     txds: HashMap<String, TxdState>,
-    materials: HashMap<(String, String, [u8; 4]), Handle<StandardMaterial>>,
+    materials: HashMap<(String, String, [u8; 4], bool), Handle<WorldMaterial>>,
 }
 
 #[derive(Resource, Default)]
@@ -232,9 +237,11 @@ fn build_parts(clump: &dff::Clump) -> Result<Vec<PartCpu>> {
                 normals: Vec::new(),
                 uvs: Vec::new(),
                 colors: Vec::new(),
+                night: Vec::new(),
                 indices: Vec::with_capacity(tris.len() * 3),
                 texture: mat.texture.as_ref().map(|t| t.name.to_ascii_lowercase()),
                 color: mat.color,
+                lit,
             };
             for t in tris {
                 for &v in &t.v {
@@ -250,7 +257,9 @@ fn build_parts(clump: &dff::Clump) -> Result<Vec<PartCpu>> {
                         }
                         part.uvs.push(geo.uvs.first().and_then(|u| u.get(v)).copied().unwrap_or([0.0; 2]));
                         let c = geo.prelit.get(v).copied().unwrap_or([255; 4]);
-                        part.colors.push(prelit_to_linear(c, lit));
+                        let n = geo.extra_colors.get(v).copied().unwrap_or(c);
+                        part.colors.push(gamma01(c));
+                        part.night.push(gamma01(n));
                     }
                     part.indices.push(remap[v]);
                 }
@@ -263,13 +272,9 @@ fn build_parts(clump: &dff::Clump) -> Result<Vec<PartCpu>> {
     Ok(parts)
 }
 
-/// Noon ambient added to lit geometry (stand-in for timecyc `AmbientObj`).
-const NOON_AMBIENT: f32 = 0.3;
-
-fn prelit_to_linear(c: [u8; 4], lit: bool) -> [f32; 4] {
-    let amb = if lit { NOON_AMBIENT } else { 0.0 };
-    let f = |x: u8| (x as f32 / 255.0 + amb).min(1.0).powf(2.2);
-    [f(c[0]), f(c[1]), f(c[2]), c[3] as f32 / 255.0]
+/// Prelit colour as gamma 0..1 (the world material blends and lights in gamma space).
+fn gamma01(c: [u8; 4]) -> [f32; 4] {
+    c.map(|x| x as f32 / 255.0)
 }
 
 pub fn convert_texture(t: txd::Texture, bc_supported: bool) -> Option<TexCpu> {
@@ -400,7 +405,8 @@ fn finalize_models(
     formats: Option<Res<CompressedImageFormatSupport>>,
     mut cache: ResMut<Cache>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<WorldMaterial>>,
+    globals: Res<WorldGlobals>,
 ) {
     let bc = formats.is_some_and(|f| f.0.contains(CompressedImageFormats::BC));
     let parsed: Vec<u32> = cache
@@ -445,27 +451,29 @@ fn finalize_models(
                     _ => None,
                 })
             });
-            let key = (obj.txd.clone(), p.texture.clone().unwrap_or_default(), p.color);
+            let key = (obj.txd.clone(), p.texture.clone().unwrap_or_default(), p.color, p.lit);
             let material = cache
                 .materials
                 .entry(key)
                 .or_insert_with(|| {
                     let alpha = tex.as_ref().is_some_and(|t| t.alpha);
                     let c = p.color;
-                    materials.add(StandardMaterial {
-                        base_color: Color::srgba_u8(c[0], c[1], c[2], c[3]),
-                        base_color_texture: tex.map(|t| t.image),
-                        unlit: true,
-                        double_sided: true,
-                        cull_mode: None,
-                        alpha_mode: if c[3] < 255 {
-                            AlphaMode::Blend
-                        } else if alpha {
-                            AlphaMode::Mask(0.5)
-                        } else {
-                            AlphaMode::Opaque
+                    let alpha_mode = if c[3] < 255 {
+                        AlphaMode::Blend
+                    } else if alpha {
+                        AlphaMode::Mask(0.5)
+                    } else {
+                        AlphaMode::Opaque
+                    };
+                    let cutoff = if let AlphaMode::Mask(x) = alpha_mode { x } else { -1.0 };
+                    materials.add(WorldMaterial {
+                        uniform: WorldMatUniform {
+                            color: Vec4::from(gamma01(c)),
+                            params: Vec4::new(if p.lit { 1.0 } else { 0.0 }, cutoff, 0.0, 0.0),
                         },
-                        ..default()
+                        texture: tex.map(|t| t.image),
+                        globals: globals.0.clone(),
+                        alpha_mode,
                     })
                 })
                 .clone();
@@ -478,6 +486,7 @@ fn finalize_models(
             }
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, p.uvs);
             mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, p.colors);
+            mesh.insert_attribute(ATTRIBUTE_NIGHT_COLOR, p.night);
             mesh.insert_indices(Indices::U32(p.indices));
             if !has_normals {
                 mesh.duplicate_vertices();

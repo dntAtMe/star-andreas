@@ -166,6 +166,8 @@ pub struct World {
     pub weather: Weather,
     /// Permanent and static shadows (scorch marks, fire glow).
     pub shadows: Shadows,
+    /// `CTimeCycle` (loaded by the app from data/timecyc.dat).
+    pub timecycle: Option<crate::timecycle::TimeCycle>,
     /// The CRT `rand()` shared by explosions and fires.
     pub rng: Rand,
     pub(crate) explosions: Vec<Explosion>,
@@ -203,6 +205,7 @@ impl World {
             clock: Clock::new(0),
             weather: Weather::default(),
             shadows: Shadows::new(),
+            timecycle: None,
             rng: Rand::new(1),
             explosions: vec![Explosion::default(); MAX_EXPLOSIONS],
             fires: vec![Fire::default(); MAX_FIRES],
