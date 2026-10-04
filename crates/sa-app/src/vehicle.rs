@@ -92,6 +92,17 @@ pub struct Vehicle {
     materials: Vec<Handle<StandardMaterial>>,
     wheel_parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
     burnt: bool,
+    /// Lamp materials (vehiclelights128), switched to vehiclelightson128 when lit.
+    pub lamps: Vec<Lamp>,
+}
+
+/// One lamp material: index 0 FL, 1 FR, 2 RL, 3 RR.
+pub struct Lamp {
+    pub index: u8,
+    pub material: Handle<StandardMaterial>,
+    pub tex_off: Option<Handle<Image>>,
+    pub tex_on: Option<Handle<Image>>,
+    pub on: bool,
 }
 
 /// A damageable component: eDoors (bonnet, boot, doors) or ePanels (wings, windscreen, bumpers).
@@ -247,18 +258,32 @@ fn spawn_vehicle(
     let primary = pair.and_then(|p| pal(p.0)).unwrap_or(Color::srgb(0.6, 0.6, 0.6));
     let secondary = pair.and_then(|p| pal(p.1)).unwrap_or(primary);
 
+    let tex_lights_on = tex("vehiclelightson128").map(|t| t.0);
+    let mut lamps: Vec<Lamp> = Vec::new();
     let mut make_material = |m: &dff::Material| -> Handle<StandardMaterial> {
-        let t = m.texture.as_ref().and_then(|t| tex(&t.name.to_ascii_lowercase()));
+        let tname = m.texture.as_ref().map(|t| t.name.to_ascii_lowercase());
+        let t = tname.as_deref().and_then(tex);
         let c = m.color;
         let alpha = c[3] as f32 / 255.0;
+        // SetEditableMaterialsCB: vehiclelights128 materials are reset to white; the marker
+        // colour picks the lamp (FL, FR, RL, RR).
+        let lamp_tex = tname.as_deref() == Some("vehiclelights128");
+        let lamp = match [c[0], c[1], c[2]] {
+            [255, 175, 0] => Some(0u8),
+            [0, 255, 200] => Some(1),
+            [185, 255, 0] => Some(2),
+            [255, 60, 0] => Some(3),
+            _ => None,
+        };
         let (base, body) = match paint_of(c) {
+            _ if lamp_tex => (Color::WHITE, false),
             Paint::Primary => (primary, true),
             Paint::Secondary => (secondary, true),
             Paint::FrontLight => (Color::WHITE, false),
             Paint::RearLight => (Color::srgb(0.75, 0.1, 0.1), false),
             Paint::Plain => (Color::srgb_u8(c[0], c[1], c[2]), false),
         };
-        materials.add(StandardMaterial {
+        let h = materials.add(StandardMaterial {
             base_color: base.with_alpha(alpha),
             base_color_texture: t.as_ref().map(|t| t.0.clone()),
             alpha_mode: if c[3] < 255 {
@@ -273,7 +298,17 @@ fn spawn_vehicle(
             double_sided: true,
             cull_mode: None,
             ..default()
-        })
+        });
+        if let (true, Some(index)) = (lamp_tex, lamp) {
+            lamps.push(Lamp {
+                index,
+                material: h.clone(),
+                tex_off: t.as_ref().map(|t| t.0.clone()),
+                tex_on: tex_lights_on.clone(),
+                on: false,
+            });
+        }
+        h
     };
 
     // Frame hierarchy in GTA space.
@@ -452,6 +487,12 @@ fn spawn_vehicle(
         Vec3::from(p)
     };
     auto.engine_pos = structure_dummy("engine");
+    auto.lights.dummies = [
+        structure_dummy("headlights"),
+        structure_dummy("taillights"),
+        structure_dummy("headlights2"),
+        structure_dummy("taillights2"),
+    ];
     // ms_vehicleColourTable[primary] for collision debris (alpha 255 like carcols).
     if let Some(c) = pair.and_then(|p| db.colors.palette.get(p.0)) {
         auto.colour = [c[0], c[1], c[2], 255];
@@ -481,6 +522,7 @@ fn spawn_vehicle(
                 materials: body_materials,
                 wheel_parts,
                 burnt: false,
+                lamps,
             },
         ))
         .add_child(model_root)

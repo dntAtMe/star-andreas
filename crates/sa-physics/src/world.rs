@@ -168,6 +168,8 @@ pub struct World {
     pub shadows: Shadows,
     /// `CTimeCycle` (loaded by the app from data/timecyc.dat).
     pub timecycle: Option<crate::timecycle::TimeCycle>,
+    /// `CCoronas`.
+    pub coronas: crate::coronas::Coronas,
     /// The CRT `rand()` shared by explosions and fires.
     pub rng: Rand,
     pub(crate) explosions: Vec<Explosion>,
@@ -206,6 +208,7 @@ impl World {
             weather: Weather::default(),
             shadows: Shadows::new(),
             timecycle: None,
+            coronas: crate::coronas::Coronas::default(),
             rng: Rand::new(1),
             explosions: vec![Explosion::default(); MAX_EXPLOSIONS],
             fires: vec![Fire::default(); MAX_FIRES],
@@ -361,7 +364,6 @@ impl World {
         self.now_ms = self.time_ms as u32;
         self.frame = self.frame.wrapping_add(1);
         self.effects.lights.clear();
-        self.effects.coronas.clear();
         // CGame::Process: clock and weather before the world.
         self.update_clock_and_weather(ts);
         let mut ctx = Ctx::new(ts);
@@ -437,6 +439,11 @@ impl World {
                 cam: self.camera_pos,
                 cam_planes: self.camera_planes,
                 wet_roads: self.weather.wet_roads,
+                foggyness: self.weather.foggyness,
+                hours: self.clock.hours,
+                minutes: self.clock.minutes,
+                cam_fwd: self.camera_fwd,
+                sprite_brightness: self.timecycle.as_ref().map_or(10.0, |t| t.current.sprite_brightness),
                 player_in_vehicle,
                 surfaces: &self.surfaces,
             };
@@ -465,6 +472,14 @@ impl World {
                 }
                 WorldRequest::StartFire { target, creator } => {
                     self.start_fire_on(target, creator);
+                }
+                WorldRequest::Corona(a) => self.register_corona(a),
+                WorldRequest::PointLight { ty, pos, dir, range, rgb, fog_type, shadows } => {
+                    let cam = self.camera_pos;
+                    self.effects.add_point_light(cam, ty, pos, dir, range, rgb, fog_type, shadows);
+                }
+                WorldRequest::CarLightShadow { car, id, tex, pos, front, side, rgb, max_view_angle } => {
+                    self.store_car_light_shadow(car, id, tex, pos, front, side, rgb, max_view_angle);
                 }
             }
         }

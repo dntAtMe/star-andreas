@@ -117,6 +117,9 @@ struct ColSet {
     sa: Option<Arc<SaColModel>>,
     /// object.dat physics for knockable props.
     prop: Option<ObjectPhysics>,
+    /// 2dfx lights (positions in GTA model space) and the model name.
+    lights: Arc<Vec<dff::Light2d>>,
+    name: Arc<str>,
 }
 
 enum ModelState {
@@ -175,8 +178,9 @@ fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
                 let data = world
                     .file(&format!("{}.dff", obj.model))
                     .ok_or_else(|| anyhow::anyhow!("{}.dff missing", obj.model))?;
-                let parts = build_parts(&dff::parse(data)?)?;
-                let mut cols = ColSet::default();
+                let clump = dff::parse(data)?;
+                let parts = build_parts(&clump)?;
+                let mut cols = ColSet { lights: Arc::new(model_lights(&clump)), name: obj.model.as_str().into(), ..Default::default() };
                 if let Some(c) = world.col(&obj.model) {
                     let m = col::parse_model(c)?;
                     cols.sa = Some(Arc::new(SaColModel::from_col(&m)));
@@ -202,6 +206,27 @@ fn request_txd(world: &WorldRes, loader: &Loader, name: String, bc: bool) {
             let _ = tx.send(Loaded::Txd(name, res));
         })
         .detach();
+}
+
+/// The clump's 2dfx lights, moved into GTA model space by their atomic's frame.
+fn model_lights(clump: &dff::Clump) -> Vec<dff::Light2d> {
+    let mut out = Vec::new();
+    for atomic in &clump.atomics {
+        let frame = atomic.frame as usize;
+        let name = clump.frames.get(frame).map(|f| f.name.to_ascii_lowercase()).unwrap_or_default();
+        if name.ends_with("_dam") || name.ends_with("_vlo") {
+            continue;
+        }
+        let Some(geo) = clump.geometries.get(atomic.geometry as usize) else { continue };
+        let (rot, pos) = clump.frame_world(frame);
+        for l in &geo.lights {
+            let r = dff::apply(&rot, l.pos);
+            let mut l = l.clone();
+            l.pos = [r[0] + pos[0], r[1] + pos[1], r[2] + pos[2]];
+            out.push(l);
+        }
+    }
+    out
 }
 
 /// Split a clump into one mesh per material, baked into model space (Y-up).
@@ -571,6 +596,15 @@ fn stream_instances(
                             ec.insert(SaBuilding(sa.world.add_building(m, sa_col.clone())));
                         }
                     }
+                }
+                if !model.cols.lights.is_empty() {
+                    ec.insert(crate::lights::EntityLights {
+                        lights: model.cols.lights.clone(),
+                        model: model.cols.name.clone(),
+                        // m_nRandomSeed: any stable per-instance u16.
+                        seed: (i as u32).wrapping_mul(2_654_435_761).rotate_right(16) as u16,
+                        key: i as u64,
+                    });
                 }
                 let e = ec
                     .with_children(|c| {

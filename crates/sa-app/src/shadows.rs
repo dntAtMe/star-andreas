@@ -59,6 +59,8 @@ fn init(
         // Positive biases only: Bevy packs `depth_bias as i32` into the pipeline key.
         (1u8, ShadowTex::Heli, AlphaMode::Blend, 0.0),
         (2u8, ShadowTex::Exp, AlphaMode::Premultiplied, 0.5),
+        (2u8, ShadowTex::Headlight, AlphaMode::Premultiplied, 0.5),
+        (2u8, ShadowTex::Headlight1, AlphaMode::Premultiplied, 0.5),
     ] {
         let mesh = meshes.add(empty_mesh());
         let mat = materials.add(StandardMaterial {
@@ -103,7 +105,8 @@ fn draw(
                 continue;
             }
             let rgb = shadow_colour(s.ty, s.light, s.rgb, dn);
-            let a = ((1.0 - wet * 0.5) * s.intensity as f32) as i32 as u8;
+            // Type 2 is ONE/ONE (premultiplied here): alpha must not darken the ground.
+            let a = if s.ty == 2 { 0 } else { ((1.0 - wet * 0.5) * s.intensity as f32) as i32 as u8 };
             let c = Color::srgba_u8(rgb[0], rgb[1], rgb[2], a).to_linear();
             for poly in &s.polys {
                 let base = pos.len() as u32;

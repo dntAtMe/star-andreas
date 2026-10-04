@@ -8,6 +8,7 @@ pub mod clock;
 #[cfg(feature = "bevy")]
 pub mod bevy_api;
 pub mod collision;
+pub mod coronas;
 pub mod colpoint;
 pub mod damage;
 pub mod effects;
@@ -20,6 +21,7 @@ pub mod shadows;
 pub mod physical;
 pub mod surface;
 pub mod timecycle;
+pub mod vehicle_lights;
 pub mod weather;
 pub mod world;
 

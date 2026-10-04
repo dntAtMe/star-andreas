@@ -6,7 +6,6 @@
 //! 3. `FxManager::render` → one mesh per textured batch, drawn after the scene in
 //!    the original order (no sorting, z-write off, z-test on).
 //!
-//! Point lights from explosions and fires become Bevy point lights.
 
 use std::collections::HashMap;
 
@@ -32,8 +31,6 @@ use crate::{
 
 /// CTimer caps the timestep at 3 frames (0.06 s).
 const MAX_DT: f32 = 0.06;
-/// Point lights kept alive for explosions and fires.
-const LIGHT_POOL: usize = 8;
 
 pub struct FxPlugin;
 
@@ -42,7 +39,7 @@ impl Plugin for FxPlugin {
         app.add_systems(Startup, init)
             .add_systems(
                 PostUpdate,
-                (update_fx, draw_fx.in_set(FxDrawn), update_lights).chain().after(SaSync).after(TransformSystems::Propagate),
+                (update_fx, draw_fx.in_set(FxDrawn)).chain().after(SaSync).after(TransformSystems::Propagate),
             );
     }
 }
@@ -96,7 +93,6 @@ pub struct Fx {
     textures: HashMap<String, Handle<Image>>,
     /// Pooled batch entities and their meshes / materials.
     batches: Vec<(Entity, Handle<Mesh>, Handle<StandardMaterial>)>,
-    lights: Vec<Entity>,
 }
 
 fn init(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Assets<Image>>) {
@@ -122,7 +118,6 @@ fn init(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Assets<I
                 slots: HashMap::new(),
                 textures,
                 batches: Vec::new(),
-                lights: Vec::new(),
             });
         }
         Err(e) => warn!("fx disabled: {e:#}"),
@@ -378,30 +373,6 @@ fn draw_fx(
     for (e, ..) in fx.batches.iter().skip(batches.len()) {
         if let Ok((mut v, _)) = vis.get_mut(*e) {
             *v = Visibility::Hidden;
-        }
-    }
-}
-
-/// `CPointLights` from explosions and fires (refreshed every physics step).
-fn update_lights(mut commands: Commands, fx: Option<ResMut<Fx>>, sa: Res<SaPhys>, mut q: Query<(&mut PointLight, &mut Transform, &mut Visibility)>) {
-    let Some(mut fx) = fx else { return };
-    while fx.lights.len() < LIGHT_POOL {
-        let e = commands.spawn((PointLight { shadow_maps_enabled: false, ..default() }, Transform::default(), Visibility::Hidden)).id();
-        fx.lights.push(e);
-    }
-    let lights = &sa.world.effects.lights;
-    for (i, &e) in fx.lights.iter().enumerate() {
-        let Ok((mut pl, mut tf, mut v)) = q.get_mut(e) else { continue };
-        match lights.get(i) {
-            Some(l) => {
-                *v = Visibility::Visible;
-                tf.translation = crate::world::g2b(l.pos.to_array());
-                pl.range = l.radius;
-                pl.color = Color::linear_rgb(l.color.x, l.color.y, l.color.z);
-                // SA lights are 0..1 colour strengths over `radius`; scale to lumens.
-                pl.intensity = l.color.max_element() * l.radius * l.radius * 4000.0;
-            }
-            None => *v = Visibility::Hidden,
         }
     }
 }

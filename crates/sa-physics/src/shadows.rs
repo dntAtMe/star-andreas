@@ -8,7 +8,7 @@
 
 use glam::{Vec2, Vec3};
 
-use crate::world::{SECTORS, World, sector_coord};
+use crate::world::{EntityId, SECTORS, World, sector_coord};
 
 pub const MAX_PERMANENT: usize = 48;
 pub const MAX_STATIC: usize = 48;
@@ -20,8 +20,11 @@ const MAX_BUNCHES: usize = 360;
 pub enum ShadowTex {
     /// gpShadowHeliTex `shad_heli` (the explosion scorch).
     Heli,
-    /// gpShadowExplosionTex `shad_exp` (fire glow).
+    /// gpShadowExplosionTex `shad_exp` (fire glow, lamp pools).
     Exp,
+    /// `headlight` / `headlight1` (car light pools, twin / single lamp).
+    Headlight,
+    Headlight1,
 }
 
 impl ShadowTex {
@@ -29,6 +32,18 @@ impl ShadowTex {
         match self {
             Self::Heli => "shad_heli",
             Self::Exp => "shad_exp",
+            Self::Headlight => "headlight",
+            Self::Headlight1 => "headlight1",
+        }
+    }
+
+    /// A 2dfx shadow texture name (particle.txd); unknown names use shad_exp.
+    pub fn from_name(n: &str) -> Self {
+        match n.to_ascii_lowercase().as_str() {
+            "shad_heli" => Self::Heli,
+            "headlight" => Self::Headlight,
+            "headlight1" => Self::Headlight1,
+            _ => Self::Exp,
         }
     }
 }
@@ -293,6 +308,39 @@ impl World {
                 }
             }
         }
+    }
+
+    /// `CShadows::StoreCarLightShadow` (0x70C500): a car's headlight pool. Stored as a
+    /// static shadow while the car is slow and not the player's; the real-time path for
+    /// moving cars is approximated by a temporary static shadow re-cast every frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_car_light_shadow(
+        &mut self,
+        car: EntityId,
+        id: u64,
+        tex: ShadowTex,
+        c: Vec3,
+        front: Vec2,
+        side: Vec2,
+        mut rgb: [u8; 3],
+        max_view_angle: f32,
+    ) {
+        let cam = self.camera_pos;
+        let d2 = (c.x - cam.x).powi(2) + (c.y - cam.y).powi(2);
+        if d2 >= 729.0 {
+            return;
+        }
+        let f = self.camera_fwd;
+        if (c.x - cam.x) * f.x + (c.y - cam.y) * f.y <= -max_view_angle {
+            return;
+        }
+        let dist = d2.sqrt();
+        if dist >= 20.25 {
+            let k = 1.0 - (dist - 18.0) * 0.111_111_11;
+            rgb = rgb.map(|v| (v as f32 * k) as i32 as u8);
+        }
+        let _ = car;
+        self.store_static_shadow(id, 2, tex, c, front, side, 128, rgb, 6.0, 1.0, 0.0, false, 0.4);
     }
 
     /// `UpdateStaticShadows` (0x707F40): drop shadows not re-stored this frame.

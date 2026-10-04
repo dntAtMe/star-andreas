@@ -5,7 +5,7 @@
 //! - map geometry globals (DN balance, Amb, fog) for the world material,
 //! - lights for peds/cars/objects (`SetLightColoursForPedsCarsAndObjects`: Amb_Obj ambient,
 //!   a fixed-direction directional light scaled by DirMult, which is 0 on PC),
-//! - sky sprites: the sun coronas, moon, stars, low clouds, rainbow and fire coronas.
+//! - sky sprites: moon, stars, low clouds, rainbow (the sun is a corona, see coronas.rs).
 //!
 //! Not ported: CCoronas::Render details (sprites are plain additive quads, no fade or
 //! lens flare, no sun line-of-sight dazzle), the fluffy / volumetric cloud layers, SF
@@ -161,7 +161,6 @@ fn update(
     let Some(tc) = sa.world.timecycle.as_mut() else { return };
     tc.brightness = dbg.brightness;
     let c = tc.current;
-    let sun = tc.vector_to_sun;
     let bhg = tc.below_horizon_grey;
     let lights_mult = tc.lights_mult;
     let w = &sa.world.weather;
@@ -170,7 +169,6 @@ fn update(
     let extra_sunny = w.extra_sunnyness;
     let clock = sa.world.clock.clone();
     let dn = clock.dn_balance();
-    let fire_coronas = sa.world.effects.coronas.clone();
 
     let cam_pos_b = cam_gt.translation();
     let cam_pos = Vec3::from(b2g(cam_pos_b));
@@ -258,18 +256,8 @@ fn update(
     let mut star: Vec<Sprite> = Vec::new();
     let mut moon: Vec<Sprite> = Vec::new();
     let mut cloud: Vec<Sprite> = Vec::new();
-    let far_z = far;
     if dbg.sky {
-        // Sun (CCoronas::DoSunAndMoon): core and corona at 0.95 * far.
-        let p = cam_pos + sun * (far_z * 0.95);
-        if sun.z > -0.1 {
-            let r = c.sun_size * 2.7335;
-            star.push(Sprite { pos: p, half: Vec2::splat(r), color: c.sun_core, roll: 0.0 });
-            if sun.z > 0.0 {
-                let r = c.sun_size * 6.0;
-                star.push(Sprite { pos: p, half: Vec2::splat(r), color: c.sun_corona, roll: 0.0 });
-            }
-        }
+        // The sun is two coronas (CCoronas::DoSunAndMoon, coronas.rs).
         let cover = 1.0 - clouds.max(fogginess);
         // Moon: visible 00:00..07:20, brightest at 03:40, fixed direction.
         let m = (clock.hours as u32 * 60 + clock.minutes as u32) as f32 + clock.seconds as f32 / 60.0 - 220.0;
@@ -344,16 +332,6 @@ fn update(
             }
         }
     }
-    // Fire coronas (CFireManager clusters) are real-world sprites.
-    let mut world_star: Vec<Sprite> = fire_coronas
-        .iter()
-        .map(|c| Sprite {
-            pos: c.pos,
-            half: Vec2::splat(c.radius),
-            color: c.color.map(|x| x as f32),
-            roll: 0.0,
-        })
-        .collect();
 
     let push_far = |sp: &mut Vec<Sprite>| {
         // Sky sprites are drawn before the world with no depth: move them behind it.
@@ -368,7 +346,6 @@ fn update(
     push_far(&mut star);
     push_far(&mut moon);
     push_far(&mut cloud);
-    star.append(&mut world_star);
     for (name, list) in [("coronastar", &star), ("coronamoon", &moon), ("cloud1", &cloud)] {
         let Some((e, h)) = sky.sprites.get(name) else { continue };
         let (mut pos, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());

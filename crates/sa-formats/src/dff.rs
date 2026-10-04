@@ -70,6 +70,85 @@ pub struct Geometry {
     /// Second prelit set from the Extra Vert Colour plugin (SA day/night blend).
     pub extra_colors: Vec<[u8; 4]>,
     pub skin: Option<Skin>,
+    /// 2D effects (plugin 0x253F2F8); only lights are decoded, other types are skipped.
+    pub lights: Vec<Light2d>,
+}
+
+/// A LIGHT 2d effect (type 0), as stored in the DFF (see docs: lights.md §1.2).
+#[derive(Debug, Clone)]
+pub struct Light2d {
+    /// Model-space position.
+    pub pos: [f32; 3],
+    pub color: [u8; 4],
+    pub corona_far_clip: f32,
+    pub range: f32,
+    pub corona_size: f32,
+    pub shadow_size: f32,
+    /// Corona show mode (flash type).
+    pub show_mode: u8,
+    pub reflection: bool,
+    pub flare: u8,
+    pub shadow_mult: u8,
+    /// `flags1 | flags2 << 8`.
+    pub flags: u16,
+    pub corona_tex: String,
+    pub shadow_tex: String,
+    /// 0 = use 15.
+    pub shadow_z_dist: u8,
+    pub look: [i8; 3],
+}
+
+pub mod light_flags {
+    pub const CHECK_OBSTACLES: u16 = 0x0001;
+    pub const FOG_TYPE: u16 = 0x0002;
+    pub const FOG_TYPE2: u16 = 0x0004;
+    pub const ONLY_LONG_DISTANCE: u16 = 0x0010;
+    pub const AT_DAY: u16 = 0x0020;
+    pub const AT_NIGHT: u16 = 0x0040;
+    pub const BLINKING1: u16 = 0x0080;
+    pub const ONLY_FROM_BELOW: u16 = 0x0100;
+    pub const BLINKING2: u16 = 0x0200;
+    pub const UPDATE_HEIGHT: u16 = 0x0400;
+    pub const CHECK_DIRECTION: u16 = 0x0800;
+    pub const BLINKING3: u16 = 0x1000;
+}
+
+fn cstr(b: &[u8]) -> String {
+    let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    String::from_utf8_lossy(&b[..n]).into_owned()
+}
+
+fn parse_2dfx(mut r: Reader) -> Result<Vec<Light2d>> {
+    let mut out = Vec::new();
+    let count = r.u32()?;
+    for _ in 0..count {
+        let pos = [r.f32()?, r.f32()?, r.f32()?];
+        let ty = r.u32()? & 0xFF;
+        let size = r.u32()? as usize;
+        let data = r.bytes(size)?;
+        if ty != 0 || !(size == 80 || size == 76) {
+            continue;
+        }
+        let f = |o: usize| f32::from_le_bytes(data[o..o + 4].try_into().unwrap());
+        out.push(Light2d {
+            pos,
+            color: [data[0], data[1], data[2], data[3]],
+            corona_far_clip: f(4),
+            range: f(8),
+            corona_size: f(12),
+            shadow_size: f(16),
+            show_mode: data[0x14],
+            reflection: data[0x15] != 0,
+            flare: data[0x16],
+            shadow_mult: data[0x17],
+            flags: data[0x18] as u16 | (data[0x4A] as u16) << 8,
+            corona_tex: cstr(&data[0x19..0x31]),
+            shadow_tex: cstr(&data[0x31..0x49]),
+            shadow_z_dist: data[0x49],
+            look: if size == 80 { [data[0x4B] as i8, data[0x4C] as i8, data[0x4D] as i8] } else { [0, 0, 100] },
+        });
+    }
+    Ok(out)
 }
 
 pub mod geo_flags {
@@ -290,6 +369,7 @@ fn parse_geometry(mut r: Reader, version: u32) -> Result<Geometry> {
                         .collect::<Result<_>>()?;
                 }
                 id::SKIN => g.skin = Some(parse_skin(body, num_verts).context("skin")?),
+                id::EFFECT_2D => g.lights = parse_2dfx(body).context("2dfx")?,
                 _ => {}
             }
         }

@@ -374,6 +374,8 @@ pub struct Automobile {
     pub headlights_pos: Vec3,
     /// Primary paint colour (ms_vehicleColourTable[+0x434]), set by the app.
     pub colour: [u8; 4],
+    /// Head / tail / siren lights (dummies set by the app).
+    pub lights: crate::vehicle_lights::CarLights,
     /// +0x578 engine smoke and +0x57C fire_car FX systems.
     smoke_fx: Option<FxHandle>,
     fire_fx: Option<FxHandle>,
@@ -460,6 +462,12 @@ impl Automobile {
             engine_pos: Vec3::ZERO,
             headlights_pos: Vec3::ZERO,
             colour: [255; 4],
+            lights: crate::vehicle_lights::CarLights {
+                // m_nRandomSeed: any per-car u16.
+                seed: (model as u32).wrapping_mul(40503) as u16,
+                halogen: false,
+                ..Default::default()
+            },
             smoke_fx: None,
             fire_fx: None,
             avg_move: Vec3::ZERO,
@@ -1100,6 +1108,26 @@ impl BodyLogic for Automobile {
                 f.single_wheel_particles(&v, p.matrix.fwd, state, status, self.comp_prev[i], speed, &cp, flags);
             }
         }
+
+        // DoVehicleLights and the special lights (CAutomobile::PreRender).
+        self.lights.halogen = self.h.flags & 0x0040_0000 != 0;
+        let base_id = match id {
+            EntityId::Body(i) => (i as u64 + 1) << 16,
+            EntityId::Building(i) => (i as u64 + 1) << 40,
+        };
+        let lc = crate::vehicle_lights::LightCtx {
+            id,
+            base_id,
+            model: self.model,
+            phys: p,
+            engine_on: self.engine_on,
+            brake: self.brake,
+            handbrake: self.handbrake,
+            has_driver: p.status == Status::Player,
+            light_status: self.damage.dm.lights,
+            rear_bumper: self.damage.dm.panels[6],
+        };
+        crate::vehicle_lights::do_vehicle_lights(&mut self.lights, &lc, f);
 
         // fire_car at the engine, attached to the car.
         if !self.damage.burning {

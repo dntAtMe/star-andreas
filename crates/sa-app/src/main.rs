@@ -1,7 +1,9 @@
 mod debug;
 mod colour_filter;
+mod coronas;
 mod fx;
 mod heat_haze;
+mod lights;
 mod player;
 mod saphys;
 mod shadows;
@@ -80,6 +82,8 @@ fn main() -> anyhow::Result<()> {
         debug::DebugPlugin,
         world_material::WorldMaterialPlugin,
         sky::SkyPlugin,
+        coronas::CoronasPlugin,
+        lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
     .add_systems(Startup, setup)

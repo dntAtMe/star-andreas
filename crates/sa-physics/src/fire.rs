@@ -11,7 +11,8 @@ use glam::Vec3;
 
 use crate::{
     automobile::Automobile,
-    effects::{Corona, FxHandle},
+    coronas::{CoronaArgs, CoronaTex},
+    effects::FxHandle,
     shadows::ShadowTex,
     physical::{EntityType, normalise},
     world::{EntityId, World},
@@ -258,14 +259,15 @@ impl World {
                     for (j, (pos, flare)) in
                         [(p1, 2), (p1 + Vec3::Z * 2.0, 0), (p1 + r * 2.0, 0), (p1 - r * 2.0, 0)].into_iter().enumerate()
                     {
-                        self.effects.coronas.push(Corona {
+                        self.register_corona(CoronaArgs {
                             id: id * 4 + j as u64,
+                            rgb: color,
                             pos,
-                            color,
                             radius: size * 0.5,
                             far_clip: 70.0,
-                            near_clip: 1.5,
+                            tex: Some(CoronaTex::Star),
                             flare,
+                            ..Default::default()
                         });
                     }
                 }
@@ -368,7 +370,8 @@ impl World {
         let (p, strength) = (f.pos, f.strength);
         if alive {
             let c = (self.rng.next() & 0x7F) as f32 / 512.0;
-            self.effects.add_light(p, 8.0, Vec3::new(c, c, 0.0), false);
+            let cam = self.camera_pos;
+            self.effects.add_point_light(cam, 0, p, Vec3::ZERO, 8.0, Vec3::new(c, c, 0.0), 0, false);
         } else if strength <= 1.0 {
             self.extinguish(i);
         } else {

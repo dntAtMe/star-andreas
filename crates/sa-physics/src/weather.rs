@@ -398,8 +398,12 @@ impl World {
         // CGame::Process: CTimeCycle::Update after the weather.
         let (w, c, cam) = (&self.weather, &self.clock, self.camera_pos);
         if let Some(tc) = self.timecycle.as_mut() {
+            tc.lights_mult = self.coronas.lights_mult;
             tc.calc(c.hours, c.minutes, c.seconds, w.old_type, w.new_type, w.interpolation, cam, w.under_waterness, 0.0);
         }
+        // CGame::Process: CCoronas::DoSunAndMoon, then CCoronas::Update.
+        self.do_sun_and_moon();
+        self.update_coronas(ts);
     }
 
     /// `CWeather::AddRain` (0x72A9A0): ground splashes and rain mist (and sandstorm).

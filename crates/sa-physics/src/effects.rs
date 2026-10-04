@@ -62,26 +62,22 @@ pub struct AddParticle {
     pub prim: Option<u8>,
 }
 
-/// A corona registered for one frame (coronastar texture).
-#[derive(Debug, Clone, Copy)]
-pub struct Corona {
-    pub id: u64,
-    pub pos: Vec3,
-    pub color: [u8; 3],
-    pub radius: f32,
-    pub far_clip: f32,
-    pub near_clip: f32,
-    pub flare: u8,
-}
-
-/// `CPointLights::AddLight` for one frame.
+/// `CPointLight` (0x30 bytes, `CPointLights::AddLight` 0x7000E0), one frame.
 #[derive(Debug, Clone, Copy)]
 pub struct PointLight {
+    /// 0 point, 1 spot (`dir`), 2 darkness, 3 fog only (always), 4 fog only (lit lamp).
+    pub ty: u8,
     pub pos: Vec3,
+    pub dir: Vec3,
     pub radius: f32,
+    /// Already faded by the camera distance.
     pub color: Vec3,
+    pub fog_type: u8,
     pub shadows: bool,
 }
+
+/// `CPointLights::aLights` size.
+pub const MAX_POINT_LIGHTS: usize = 32;
 
 #[derive(Debug, Default)]
 pub struct Effects {
@@ -91,8 +87,6 @@ pub struct Effects {
     pub lights: Vec<PointLight>,
     /// `TheCamera.CamShake(strength, pos)` requests.
     pub cam_shakes: Vec<(f32, Vec3)>,
-    /// `CCoronas::RegisterCorona` requests of the last frame (fire clusters).
-    pub coronas: Vec<Corona>,
     /// `g_debrisPrim` (0xA9ADE4): AddDebris' round-robin prim.
     pub debris_prim: u32,
 }
@@ -157,8 +151,31 @@ impl Effects {
         }));
     }
 
-    pub fn add_light(&mut self, pos: Vec3, radius: f32, color: Vec3, shadows: bool) {
-        self.lights.push(PointLight { pos, radius, color, shadows });
+    /// `CPointLights::AddLight` (0x7000E0): culled beyond range + 15 from the camera, faded
+    /// from 0.75 of that, at most 32 per frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_point_light(
+        &mut self,
+        cam: Vec3,
+        ty: u8,
+        pos: Vec3,
+        dir: Vec3,
+        range: f32,
+        rgb: Vec3,
+        fog_type: u8,
+        shadows: bool,
+    ) {
+        let r = range + 15.0;
+        let (dx, dy) = (pos.x - cam.x, pos.y - cam.y);
+        if !(-r < dx && dx < r) || !(-r < dy && dy < r) || self.lights.len() >= MAX_POINT_LIGHTS {
+            return;
+        }
+        let dist = (pos - cam).length();
+        if dist >= r {
+            return;
+        }
+        let color = if dist < 0.75 * r { rgb } else { rgb * (1.0 - (dist / r - 0.75) * 4.0) };
+        self.lights.push(PointLight { ty, pos, dir, radius: range, color, fog_type, shadows });
     }
 }
 
@@ -178,6 +195,21 @@ pub enum WorldRequest {
     },
     /// `gFireManager.StartFire(entity, creator, ...)` with the vehicle-fire lifetime rules.
     StartFire { target: EntityId, creator: Option<EntityId> },
+    /// `CCoronas::RegisterCorona`.
+    Corona(crate::coronas::CoronaArgs),
+    /// `CPointLights::AddLight(type, pos, dir, range, rgb, fogType, extraShadows)`.
+    PointLight { ty: u8, pos: Vec3, dir: Vec3, range: f32, rgb: Vec3, fog_type: u8, shadows: bool },
+    /// `CShadows::StoreCarLightShadow` (0x70C500).
+    CarLightShadow {
+        car: EntityId,
+        id: u64,
+        tex: crate::shadows::ShadowTex,
+        pos: Vec3,
+        front: glam::Vec2,
+        side: glam::Vec2,
+        rgb: [u8; 3],
+        max_view_angle: f32,
+    },
 }
 
 /// `eExplosionType`.
@@ -213,6 +245,14 @@ pub struct FrameFx<'a> {
     /// Camera side planes (outward normal, d): a sphere is off screen if `n.c - d > r`.
     pub cam_planes: [(Vec3, f32); 4],
     pub wet_roads: f32,
+    pub foggyness: f32,
+    /// Game clock.
+    pub hours: u8,
+    pub minutes: u8,
+    /// Camera forward (GTA space).
+    pub cam_fwd: Vec3,
+    /// Time-cycle sprite brightness (x10, raw).
+    pub sprite_brightness: f32,
     /// `FindPlayerVehicle() != null`.
     pub player_in_vehicle: bool,
     pub surfaces: &'a crate::surface::SurfaceInfos,

@@ -241,12 +241,14 @@ impl World {
                         }
                     }
                     if self.frame & 1 != 0 {
-                        self.effects.add_light(pos, 15.0, Vec3::new(1.0, 0.7, 0.5), true);
+                        let cam = self.camera_pos;
+                        self.effects.add_point_light(cam, 0, pos, Vec3::ZERO, 15.0, Vec3::new(1.0, 0.7, 0.5), 0, true);
                     }
                 }
                 0 | 2 | 3 | 7 | 8 | 9 => {
                     if self.frame & 1 != 0 {
-                        self.effects.add_light(pos, 20.0, Vec3::new(1.0, 1.0, 0.5), true);
+                        let cam = self.camera_pos;
+                        self.effects.add_point_light(cam, 0, pos, Vec3::ZERO, 20.0, Vec3::new(1.0, 1.0, 0.5), 0, true);
                     }
                     if kind == 7 {
                         let r = (self.rng.unit() * 100.0) as i32;
