@@ -77,6 +77,13 @@ Last updated: 2026-10-05.
 | Audio | ❌ | |
 | Save / load | ❌ | |
 
+## HUD
+
+| Feature | Status | Notes |
+|---|---|---|
+| CFont | 🟡 | fonts.txd glyph grid with the exact UV insets, fonts.dat widths, style remaps (pricedown / menu), colour and `~n~` tokens, shadow (1 pass) and outline (8 passes), proportional advance with edge, orientation and word wrapping (ProcessCurrentString), justify gap; no button icons, slant, background box |
+| CHud player info | 🟡 | clock, money ($%08d with the rolling display), weapon icon (fist / `<model>icon`), ammo `reserve-clip`, health (flashing < 10 hp, max-health width), armour and breath bars (DrawBarChart), wanted stars (2 s flash, parole stars, empty slots); no radar, zone / vehicle names, help box, messages |
+
 ## Cameras
 
 | System | Status | Notes |
@@ -144,7 +151,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Vehicle exit sequence (stage C), carjacking, bikes mount, HUD (docs ready), traffic drivers and SIMPLE rails mode, glass, bicycles, NPC armed combat 1002 (docs ready), wanted level and police (docs ready), pickups and flight (docs ready).
+1. Vehicle exit sequence (stage C), carjacking, bikes mount, radar and zone/vehicle names (docs ready), traffic drivers and SIMPLE rails mode, glass, bicycles, NPC armed combat 1002 (docs ready), wanted level and police (docs ready), pickups and flight (docs ready).
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.

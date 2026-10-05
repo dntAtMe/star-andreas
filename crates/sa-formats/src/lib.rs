@@ -9,6 +9,7 @@ pub mod col;
 pub mod dat;
 pub mod decision;
 pub mod dff;
+pub mod fonts;
 pub mod fxp;
 pub mod ide;
 pub mod ifp;

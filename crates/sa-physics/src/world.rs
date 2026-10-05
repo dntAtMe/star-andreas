@@ -224,6 +224,9 @@ pub struct World {
     pub ped_events: Vec<crate::pedevents::EventKind>,
     /// The player's `CWanted`.
     pub wanted: crate::wanted::Wanted,
+    /// CPlayerInfo +0xB8 money and +0xBC the HUD's rolling display value.
+    pub money: i32,
+    pub display_money: i32,
     /// Vehicles the player has already been reported for stealing (`+0x42A & 2`).
     pub stolen: std::collections::HashSet<EntityId>,
 }
@@ -282,6 +285,8 @@ impl World {
             decisions: None,
             ped_events: Vec::new(),
             wanted: Default::default(),
+            money: 0,
+            display_money: 0,
             stolen: Default::default(),
         }
     }
@@ -448,6 +453,23 @@ impl World {
         self.update_population();
         self.process_ped_events();
         self.update_wanted();
+        // CPlayerInfo::Process: the displayed money rolls toward the real value, per frame.
+        if self.display_money != self.money {
+            let diff = self.money - self.display_money;
+            let a = diff.abs();
+            let step = if a > 100_000 {
+                12345
+            } else if a > 10_000 {
+                1234
+            } else if a > 1000 {
+                123
+            } else if a > 50 {
+                42
+            } else {
+                1
+            };
+            self.display_money += diff.signum() * step;
+        }
         self.update_traffic();
         self.traffic_ai();
         self.probe_ped_ground();

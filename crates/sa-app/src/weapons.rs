@@ -26,9 +26,14 @@ use crate::{
 
 pub struct WeaponsPlugin;
 
+/// Weapon model → its HUD icon (`<model>icon` in the model's TXD), loaded on demand.
+#[derive(Resource, Default)]
+pub struct WeaponIcons(pub HashMap<i32, Option<Handle<Image>>>);
+
 impl Plugin for WeaponsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (load_weapon_defs, setup_hud, setup_traces))
+        app.init_resource::<WeaponIcons>()
+            .add_systems(Startup, (load_weapon_defs, setup_hud, setup_traces))
             .add_systems(
                 PostUpdate,
                 (update_weapon_model, draw_traces, update_hud, sync_projectiles, rocket_view)
@@ -462,11 +467,6 @@ struct CrossDot;
 #[derive(Component)]
 struct RocketQuad(u8);
 
-#[derive(Component)]
-struct WeaponIcon;
-
-#[derive(Component)]
-struct AmmoText;
 
 fn setup_hud(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Assets<Image>>) {
     let site = std::fs::read(root.0.join("models/hud.txd"))
@@ -509,21 +509,6 @@ fn setup_hud(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Ass
         Visibility::Hidden,
         CrossDot,
     ));
-    commands.spawn((
-        ImageNode::default(),
-        Node { position_type: PositionType::Absolute, ..default() },
-        Visibility::Hidden,
-        WeaponIcon,
-    ));
-    commands.spawn((
-        Text::default(),
-        TextFont { font_size: bevy::text::FontSize::Px(16.0), ..default() },
-        TextColor(Color::srgb_u8(180, 25, 29)),
-        TextLayout { justify: Justify::Center, ..default() },
-        Node { position_type: PositionType::Absolute, ..default() },
-        Visibility::Hidden,
-        AmmoText,
-    ));
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -533,15 +518,13 @@ fn update_hud(
     window: Single<&Window>,
     world: Res<WorldRes>,
     defs: Option<Res<WeaponDefs>>,
-    mut icons: Local<HashMap<i32, Option<Handle<Image>>>>,
+    mut icons: ResMut<WeaponIcons>,
     mut images: ResMut<Assets<Image>>,
     ped: Single<&Ped>,
     driving: Res<crate::vehicle::Driving>,
-    mut quads: Query<(&CrossQuad, &mut Node, &mut Visibility), (Without<CrossDot>, Without<WeaponIcon>, Without<AmmoText>, Without<RocketQuad>)>,
-    mut dot: Query<(&mut Node, &mut Visibility), (With<CrossDot>, Without<WeaponIcon>, Without<AmmoText>, Without<RocketQuad>)>,
-    mut rockets: Query<(&RocketQuad, &mut Node, &mut Visibility), (Without<CrossQuad>, Without<CrossDot>, Without<WeaponIcon>, Without<AmmoText>)>,
-    mut icon: Query<(&mut ImageNode, &mut Node, &mut Visibility), (With<WeaponIcon>, Without<AmmoText>, Without<CrossQuad>, Without<RocketQuad>)>,
-    mut ammo: Query<(&mut Text, &mut TextFont, &mut Node, &mut Visibility), (With<AmmoText>, Without<CrossQuad>, Without<RocketQuad>)>,
+    mut quads: Query<(&CrossQuad, &mut Node, &mut Visibility), (Without<CrossDot>, Without<RocketQuad>)>,
+    mut dot: Query<(&mut Node, &mut Visibility), (With<CrossDot>, Without<RocketQuad>)>,
+    mut rockets: Query<(&RocketQuad, &mut Node, &mut Visibility), (Without<CrossQuad>, Without<CrossDot>)>,
 ) {
     let (w, h) = (window.width(), window.height());
     let logic = sa.logic::<PedLogic>(ped.sa);
@@ -601,57 +584,18 @@ fn update_hud(
         node.top = px(cy - 1.0);
     }
 
-    // Weapon icon (497, 20) 47x58 and ammo (520.5, 63) in 640x448 units.
-    let sx = w / 640.0;
-    let sy = h / 448.0;
-    let mut shown = false;
-    if let (Some(l), Some(defs), None) = (logic, defs, driving.0) {
+    // The HUD's weapon icon (hud.rs): load the active weapon's icon texture once.
+    if let (Some(l), Some(defs)) = (logic, defs) {
         let t = &l.tasks;
-        let wpn = *t.active_weapon();
-        if let Some(info) = t.infos.as_deref().map(|i| i.get(wpn.ty, 1)) {
+        if let Some(info) = t.infos.as_deref().map(|i| i.get(t.active_weapon().ty, 1)) {
             let model = info.model1;
             if model > 0 {
-                let handle = icons
-                    .entry(model)
-                    .or_insert_with(|| {
-                        let (name, txd_name) = defs.0.get(&model)?;
-                        load_model(&world, &mut images, name, txd_name)?.icon
-                    })
-                    .clone();
-                if let (Some(hd), Ok((mut img, mut node, mut vis))) = (handle, icon.single_mut()) {
-                    img.image = hd;
-                    node.left = px(w - (sx * 32.0 + w * 0.173_430_46));
-                    node.top = px(sy * 20.0);
-                    node.width = px(sx * 47.0);
-                    node.height = px(sy * 58.0);
-                    *vis = Visibility::Inherited;
-                    shown = true;
-                }
-            }
-            let clip = t.info_of(wpn.ty).map_or(0, |i| i.ammo_clip);
-            if let Ok((mut text, mut font, mut node, mut vis)) = ammo.single_mut() {
-                let show = model > 0 && info.slot > 1 && info.fire_type != sa_physics::weapon::fire::USE;
-                text.0 = if 1 < clip && clip < 1000 {
-                    format!("{}-{}", (wpn.total_ammo - wpn.ammo_in_clip).min(9999), wpn.ammo_in_clip)
-                } else {
-                    format!("{}", wpn.total_ammo)
-                };
-                font.font_size = bevy::text::FontSize::Px(sy * 14.0);
-                node.left = px(w - (w * 0.173_43 + sx * 32.0) + sx * 47.0 * 0.5 - sx * 30.0);
-                node.width = px(sx * 60.0);
-                node.top = px(sy * 63.0);
-                *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
+                icons.0.entry(model).or_insert_with(|| {
+                    let (name, txd_name) = defs.0.get(&model)?;
+                    load_model(&world, &mut images, name, txd_name)?.icon
+                });
             }
         }
     }
-    if !shown {
-        if let Ok((_, _, mut vis)) = icon.single_mut() {
-            *vis = Visibility::Hidden;
-        }
-    }
-    if driving.0.is_some() {
-        if let Ok((_, _, _, mut vis)) = ammo.single_mut() {
-            *vis = Visibility::Hidden;
-        }
-    }
+    let _ = (&driving, w, h);
 }
