@@ -21,6 +21,7 @@ Last updated: 2026-10-05.
 | Streaming (distance, HD/LOD) | 🟡 | own scheme, not CStreaming / CRenderer lists |
 | Interiors / entry-exits | ❌ | |
 | Water (water.dat, CWaterLevel) | 🟡 | water.dat grid, GetWaterLevel(NoWaves) with SA's wave function, RenderWater (2 layers, waves within 48 units, flow scroll, timecyc colour/alpha, sea beyond the map, sea bed); no water fog, boat wakes, water1.dat, underwater draw order |
+| Boats (CBoat, ProcessBoatControl, ProcessBuoyancyBoat) | 🟡 | boat handling (`%` lines), 3×3 boat buoyancy with volume tables and wave-normal damping, thrust / rudder / aquaplaning / sideslip / handbrake drag / water and turn resistance / wave slam, prop and rudder animation, wake trail and rendering, bow splashes, damage / burning / blow-up and sinking; no hull water mask, boat AI, anchoring, marquis boom, flying radar, fire FX, boat camera |
 | Swimming (CTaskComplexInWater / CTaskSimpleSwim, player) | 🟡 | tread / breaststroke / crawl / dive / underwater / jump-out states, surface hold, resurfacing pitch, breath drain and refill, render pitch and roll, exit in shallow water; no climbing out, NPC swimmers, torso twist, swim fx, camera tilt |
 | Buoyancy (cBuoyancy) | 🟡 | peds (float, breath, drowning), cars (sinking, engine off), object.dat objects; no boats, no splashes |
 | Cull zones (tunnels, no-rain zones) | ❌ | |
@@ -136,7 +137,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Boats, bikes, ped population (RE in progress), underwater fog and splashes.
+1. Ped population and wandering (docs ready), bikes (RE in progress), underwater fog and splashes.
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.

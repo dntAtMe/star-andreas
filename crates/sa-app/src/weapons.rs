@@ -360,9 +360,11 @@ fn sync_projectiles(
     }
 }
 
-/// In the 1st-person rocket camera the player is not drawn (only the crosshair).
-fn rocket_view(cam: Res<SaCam>, mut ped: Query<&mut Visibility, With<Ped>>) {
-    let want = if cam.mode == CamMode::Rocket { Visibility::Hidden } else { Visibility::Inherited };
+/// In the 1st-person rocket camera the player is not drawn (only the crosshair); in a
+/// vehicle the (hidden) driver stays hidden.
+fn rocket_view(cam: Res<SaCam>, driving: Res<crate::vehicle::Driving>, mut ped: Query<&mut Visibility, With<Ped>>) {
+    let hidden = cam.mode == CamMode::Rocket || driving.0.is_some();
+    let want = if hidden { Visibility::Hidden } else { Visibility::Inherited };
     for mut v in &mut ped {
         if *v != want {
             *v = want;

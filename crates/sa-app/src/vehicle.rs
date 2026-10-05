@@ -14,10 +14,11 @@ use bevy::{
 };
 use sa_formats::{
     col, dff, txd,
-    vehicle::{self, CarColors, Handling, VehicleDef},
+    vehicle::{self, BoatHandling as RawBoatHandling, CarColors, Handling, VehicleDef},
 };
 use sa_physics::{
     automobile::{Automobile, CarInput, VehicleHandling},
+    boat::{Boat, BoatHandling},
     collision::{ColModel as SaColModel, ColSphere, Surf},
     damage::{DamageEvent, FlyingKind, flying_component_velocity},
     physical::{EntityType, Matrix as GMatrix, Physical, Status, VehicleClass, VehicleInfo},
@@ -50,7 +51,7 @@ impl Plugin for VehiclePlugin {
             .init_resource::<SpawnQueue>()
             .add_systems(Startup, load_vehicle_db)
             .add_systems(Update, (spawn_key, auto_drive, enter_exit, debug_damage, feed_inputs).chain().before(SaStep))
-            .add_systems(Update, (update_wheels, update_damage, expire_flying_parts).after(SaStep));
+            .add_systems(Update, (update_wheels, update_boats, update_damage, expire_flying_parts).after(SaStep));
     }
 }
 
@@ -62,6 +63,8 @@ pub struct Driving(pub Option<Entity>);
 struct VehicleDb {
     defs: HashMap<String, VehicleDef>,
     handling: HashMap<String, Handling>,
+    /// `%` lines (tBoatHandlingData).
+    boats: HashMap<String, RawBoatHandling>,
     colors: CarColors,
     /// models/generic/vehicle.txd: shared textures (lights, grunge, ...).
     generic: HashMap<String, (Handle<Image>, bool)>,
@@ -95,6 +98,8 @@ pub struct Vehicle {
     burnt: bool,
     /// Lamp materials (vehiclelights128), switched to vehiclelightson128 when lit.
     pub lamps: Vec<Lamp>,
+    /// Boat frame nodes (node id, frame, rest transform) animated by CBoat::PreRender.
+    boat_nodes: Vec<(u8, Entity, Transform)>,
 }
 
 /// One lamp material: index 0 FL, 1 FR, 2 RL, 3 RR.
@@ -158,14 +163,16 @@ fn load_vehicle_db(mut commands: Commands, root: Res<GameRoot>, mut images: ResM
         Ok(String::from_utf8_lossy(&std::fs::read(root.0.join(p)).with_context(|| p.to_string())?).into_owned())
     };
     let defs: HashMap<String, VehicleDef> = vehicle::parse_vehicles_ide(&read("data/vehicles.ide")?).into_iter().map(|d| (d.model.clone(), d)).collect();
-    let handling = vehicle::parse_handling(&read("data/handling.cfg")?);
+    let handling_cfg = read("data/handling.cfg")?;
+    let handling = vehicle::parse_handling(&handling_cfg);
+    let boats = vehicle::parse_boat_handling(&handling_cfg);
     let colors = vehicle::parse_carcols(&read("data/carcols.dat")?);
     let generic = load_txd(&std::fs::read(root.0.join("models/generic/vehicle.txd"))?, &mut images)?;
     let mut models: Vec<String> =
         defs.values().filter(|d: &&VehicleDef| d.kind.eq_ignore_ascii_case("car")).map(|d| d.model.clone()).collect();
     models.sort();
     commands.insert_resource(VehicleModels(models));
-    commands.insert_resource(VehicleDb { defs, handling, colors, generic, next_spawn: 0 });
+    commands.insert_resource(VehicleDb { defs, handling, boats, colors, generic, next_spawn: 0 });
     Ok(())
 }
 
@@ -455,13 +462,20 @@ fn spawn_vehicle(
     let dummies = [dummy_of("wheel_lf_dummy"), dummy_of("wheel_lb_dummy"), dummy_of("wheel_rf_dummy"), dummy_of("wheel_rb_dummy")];
     let mut sa_col = raw_col.as_ref().map(SaColModel::from_col).context("vehicle has no collision")?;
     let vh = VehicleHandling::from_raw(&h);
+    // CBoat: boat handling by id, PREDATOR for anything else (GetBoatPointer).
+    let boat = (def.kind == "boat").then(|| {
+        let bh = db.boats.get(&def.handling).or_else(|| db.boats.get("PREDATOR")).map(BoatHandling::from_raw);
+        bh.map(|bh| Boat::new(vh.clone(), bh, def.id as u16, &sa_col))
+    });
+    let boat = boat.flatten();
+    let mut car_col = sa_col.clone();
     let mut auto = Automobile::new(
         vh,
         def.id as u16,
         def.wheel_scale_front,
         def.wheel_scale_rear,
         dummies,
-        &mut sa_col,
+        if boat.is_some() { &mut car_col } else { &mut sa_col },
         sa.world.surfaces.clone(),
     );
     for c in &comps {
@@ -502,10 +516,39 @@ fn spawn_vehicle(
     let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
     let m = gta_matrix(&tf);
     let mut phys = Physical::new(EntityType::Vehicle, m);
-    phys.vehicle = Some(VehicleInfo { class: VehicleClass::Automobile, model: def.id as u16, towed_mass: None });
     phys.status = Status::Abandoned;
-    auto.setup_physical(&mut phys);
-    let id = sa.world.add_body(phys, sa_col, Box::new(auto));
+    let id = match boat {
+        Some(boat) => {
+            phys.vehicle = Some(VehicleInfo { class: VehicleClass::Boat, model: def.id as u16, towed_mass: None });
+            boat.setup_physical(&mut phys);
+            sa.world.add_body(phys, sa_col, Box::new(boat))
+        }
+        None => {
+            phys.vehicle = Some(VehicleInfo { class: VehicleClass::Automobile, model: def.id as u16, towed_mass: None });
+            auto.setup_physical(&mut phys);
+            sa.world.add_body(phys, sa_col, Box::new(auto))
+        }
+    };
+    // Boat nodes (table 0x8A6F80).
+    let boat_nodes: Vec<(u8, Entity, Transform)> = clump
+        .frames
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
+            let id = match f.name.to_ascii_lowercase().as_str() {
+                "boat_moving_hi" => 1,
+                "boat_rudder_hi" => 3,
+                "boat_rearflap_left" => 6,
+                "boat_rearflap_right" => 7,
+                "static_prop" => 8,
+                "moving_prop" => 9,
+                "static_prop2" => 10,
+                "moving_prop2" => 11,
+                _ => return None,
+            };
+            Some((id, frames[i], frame_transform(f)))
+        })
+        .collect();
 
     let car = commands
         .spawn((
@@ -524,6 +567,7 @@ fn spawn_vehicle(
                 wheel_parts,
                 burnt: false,
                 lamps,
+                boat_nodes,
             },
         ))
         .add_child(model_root)
@@ -712,6 +756,34 @@ fn feed_inputs(
         }
         if let Some(car) = sa.logic_mut::<Automobile>(v.sa) {
             car.input = input;
+        }
+        if let Some(boat) = sa.logic_mut::<Boat>(v.sa) {
+            boat.input = input;
+        }
+    }
+}
+
+/// `CBoat::PreRender` (0x6F1180): rudder and flaps follow the steering, the propellers turn
+/// (static / moving models cross-faded by the prop speed), the radar spins.
+fn update_boats(sa: Res<SaPhys>, cars: Query<&Vehicle>, mut tfs: Query<(&mut Transform, &mut Visibility), Without<Vehicle>>) {
+    for v in &cars {
+        let Some(boat) = sa.logic::<Boat>(v.sa) else { continue };
+        let a = (boat.prop_speed * 5.092_958).min(1.0);
+        for &(node, e, rest) in &v.boat_nodes {
+            let Ok((mut tf, mut vis)) = tfs.get_mut(e) else { continue };
+            let sign = if node < 10 { 1.0 } else { -1.0 };
+            let (rot, visible) = match node {
+                3 | 6 | 7 => (Quat::from_rotation_z(-boat.steer_angle), true),
+                8 | 10 => (Quat::from_rotation_y(2.0 * sign * boat.prop_rot), a < 0.45),
+                9 | 11 => (Quat::from_rotation_y(-sign * boat.prop_rot), a >= 0.45),
+                1 => (Quat::from_rotation_z(boat.moving_hi_rot), true),
+                _ => (Quat::IDENTITY, true),
+            };
+            tf.rotation = rest.rotation * rot;
+            let want = if visible { Visibility::Inherited } else { Visibility::Hidden };
+            if *vis != want {
+                *vis = want;
+            }
         }
     }
 }

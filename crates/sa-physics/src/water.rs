@@ -434,6 +434,161 @@ pub fn process_buoyancy(w: &WaterLevel, i: &BuoyancyIn, wavyness: f32, t_ms: u32
     Some((turn, Vec3::new(0.0, 0.0, fz), level))
 }
 
+/// `PreCalcSetup` (0x6C2B90) bounding-box tweaks for boats (vehicle class 5).
+pub fn boat_buoyancy_bbox(model: u16, min: Vec3, max: Vec3) -> (Vec3, Vec3) {
+    let (mut min, mut max) = (min, max);
+    match model {
+        446 => {
+            max.y *= 0.9;
+            min.y *= 0.9;
+        }
+        452 => {
+            max.y *= 1.25;
+            min.y *= 0.83;
+        }
+        453 | 493 => min.y *= 0.9,
+        454 => {
+            max.y *= 1.3;
+            min.y *= 0.82;
+            min.z -= 0.2;
+        }
+        472 => {
+            max.y *= 1.1;
+            min.y *= 0.9;
+            min.z -= 0.3;
+        }
+        473 => {
+            max.y *= 1.3;
+            min.y *= 0.9;
+            min.z -= 0.2;
+        }
+        484 => {
+            max.y *= 1.1;
+            min.y *= 0.9;
+        }
+        595 => {
+            max.y *= 1.25;
+            min.y *= 0.8;
+            min.z -= 0.1;
+        }
+        _ => {
+            max.y *= 1.05;
+            min.y *= 0.9;
+        }
+    }
+    (min, max)
+}
+
+/// Per-column volume multipliers of `ProcessBuoyancyBoat` (index `ix + 3·iy`, iy 0 = rear).
+fn boat_volume_table(model: u16) -> [f32; 9] {
+    match model {
+        446 | 452 | 493 | 595 => [0.7, 0.9, 0.7, 0.95, 1.0, 0.95, 0.6, 0.7, 0.6],
+        472 | 473 => [0.65, 0.85, 0.65, 0.85, 1.1, 0.85, 0.65, 0.95, 0.65],
+        484 => [0.55, 0.95, 0.55, 0.75, 1.1, 0.75, 0.3, 0.8, 0.3],
+        _ => [0.75, 0.9, 0.75, 0.95, 1.0, 0.95, 0.4, 0.7, 0.4],
+    }
+}
+
+/// Inputs of `cBuoyancy::ProcessBuoyancyBoat`.
+pub struct BoatBuoyancyIn<'a> {
+    pub matrix: &'a Matrix,
+    /// The col model's bounding box (the boat tweaks are applied here).
+    pub bbox_min: Vec3,
+    pub bbox_max: Vec3,
+    pub model: u16,
+    pub touching: bool,
+    pub b: f32,
+    /// handling fSuspensionDampingLevel (+0xB0): the water damping multiplier.
+    pub damping: f32,
+    pub ts: f32,
+    /// bNoTurn: the per-point turn forces are not produced.
+    pub no_turn: bool,
+}
+
+/// `ProcessBuoyancyBoat` result.
+pub struct BoatBuoyancy {
+    pub turn_point: Vec3,
+    pub force: Vec3,
+    /// m_fEntityWaterImmersion.
+    pub immersion: f32,
+    /// ApplyTurnForce(force, offset) calls made during the sampling.
+    pub turn_forces: Vec<(Vec3, Vec3)>,
+}
+
+/// `cBuoyancy::ProcessBuoyancyBoat` (0x6C3030). `speed_at(offset)` = CPhysical::GetSpeed.
+pub fn process_buoyancy_boat(
+    w: &WaterLevel,
+    i: &BoatBuoyancyIn,
+    speed_at: impl Fn(Vec3) -> Vec3,
+    wavyness: f32,
+    t_ms: u32,
+) -> Option<BoatBuoyancy> {
+    let pos = i.matrix.pos;
+    w.level(pos.x, pos.y, pos.z, i.touching, wavyness, t_ms)?;
+    let (min, max) = boat_buoyancy_bbox(i.model, i.bbox_min, i.bbox_max);
+    let h = (max - min) * 0.5;
+    // Largest axis normalised (ties: z only if strictly largest, then y, else x).
+    let m = if h.z > h.x && h.z > h.y {
+        h.z
+    } else if h.y >= h.x {
+        h.y
+    } else {
+        h.x
+    };
+    let hn = if m > 0.0 { h / m } else { Vec3::ONE };
+    let inv_norm = 1.0 / ((max.z - min.z) * 9.0);
+    let table = boat_volume_table(i.model);
+    let mut out = BoatBuoyancy { turn_point: Vec3::ZERO, force: Vec3::ZERO, immersion: 0.0, turn_forces: Vec::new() };
+    let mut move_force = Vec3::ZERO;
+    let mut checked = 1.0f32;
+    for ix in 0..3 {
+        let x = min.x + ix as f32 * h.x;
+        for iy in 0..3 {
+            let y = min.y + iy as f32 * h.y;
+            // FindWaterLevelNorm.
+            let r = i.matrix.rotate(Vec3::new(x, y, 0.0));
+            let Some((wl, n)) = w.level(pos.x + r.x, pos.y + r.y, pos.z, true, wavyness, t_ms) else { continue };
+            let mut pz = wl - (r.z + pos.z);
+            let state = if pz > max.z {
+                pz = max.z;
+                2
+            } else if pz < min.z {
+                pz = min.z;
+                0
+            } else {
+                1
+            };
+            let n2 = Vec3::new(n.x, n.y, n.z + 2.0) / 3.0;
+            let vol = table[ix + 3 * iy];
+            if state == 0 {
+                continue;
+            }
+            // SimpleSumBuoyancyData with the boat's volume multiplier.
+            let mut v = (pz - min.z).abs() - (1.0 - vol);
+            let mut f = 0.0;
+            if v >= 0.0 {
+                v = (vol * v) * (vol * v);
+                out.immersion += v;
+                let arm = Vec3::new(hn.x * x, hn.y * y, (pz + min.z) * 0.5 * hn.z);
+                let k = 1.0 / checked;
+                move_force = move_force * (1.0 - k) + arm * k * v;
+                checked += 1.0;
+                f = v;
+            }
+            let fz = f * inv_norm * i.ts * i.b;
+            let vp = speed_at(r);
+            let d = (1.0 - vp.dot(n2) * i.damping).max(0.0);
+            out.force.z += fz * d;
+            if !i.no_turn {
+                out.turn_forces.push((n2 * fz * d, i.matrix.rotate(Vec3::new(x, y, pz))));
+            }
+        }
+    }
+    out.immersion *= inv_norm;
+    out.turn_point = i.matrix.rotate(move_force);
+    Some(out)
+}
+
 /// Helper for the renderer: the 2-unit lattice heights of a rectangle are computed by the app.
 pub fn lattice_coord(v: f32) -> i32 {
     ((v * 0.5).floor() * 2.0) as i32

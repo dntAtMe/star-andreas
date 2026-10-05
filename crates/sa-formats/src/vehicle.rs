@@ -173,3 +173,63 @@ pub fn parse_carcols(text: &str) -> CarColors {
     }
     cc
 }
+
+/// A `%` (boat) line of handling.cfg: `tBoatHandlingData` (no unit conversion).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoatHandling {
+    pub id: String,
+    pub thrust_y: f32,
+    pub thrust_z: f32,
+    pub thrust_app_z: f32,
+    pub aq_plane_force: f32,
+    pub aq_plane_limit: f32,
+    pub aq_plane_offset: f32,
+    pub wave_audio_mult: f32,
+    pub move_res: [f32; 3],
+    pub turn_res: [f32; 3],
+    pub look_lr_behind_cam_height: f32,
+}
+
+pub fn parse_boat_handling(text: &str) -> HashMap<String, BoatHandling> {
+    let mut out = HashMap::new();
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        if !line.starts_with('%') {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 16 {
+            continue;
+        }
+        let n = |i: usize| f[i].parse::<f32>().unwrap_or(0.0);
+        let b = BoatHandling {
+            id: f[1].to_ascii_uppercase(),
+            thrust_y: n(2),
+            thrust_z: n(3),
+            thrust_app_z: n(4),
+            aq_plane_force: n(5),
+            aq_plane_limit: n(6),
+            aq_plane_offset: n(7),
+            wave_audio_mult: n(8),
+            move_res: [n(9), n(10), n(11)],
+            turn_res: [n(12), n(13), n(14)],
+            look_lr_behind_cam_height: n(15),
+        };
+        out.insert(b.id.clone(), b);
+    }
+    out
+}
+
+#[cfg(test)]
+mod boat_tests {
+    #[test]
+    fn parses_boat_line() {
+        let m = super::parse_boat_handling("%\tPREDATOR\t0.79\t0.5\t\t0.6\t\t7.0\t\t0.60\t-1.9\t4.0\t\t\t0.8\t\t0.998\t0.998\t\t0.85\t0.98\t0.97\t4.0\n");
+        let b = &m["PREDATOR"];
+        assert_eq!(b.thrust_y, 0.79);
+        assert_eq!(b.aq_plane_offset, -1.9);
+        assert_eq!(b.move_res, [0.8, 0.998, 0.998]);
+        assert_eq!(b.turn_res, [0.85, 0.98, 0.97]);
+        assert_eq!(b.look_lr_behind_cam_height, 4.0);
+    }
+}

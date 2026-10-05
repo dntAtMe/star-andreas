@@ -115,7 +115,8 @@ fn apply(
                 let contact = if is_ped {
                     sa.logic::<PedLogic>(id).map_or(1.0, |p| p.lighting)
                 } else {
-                    sa.logic::<Automobile>(id).map_or(1.0, |a| a.lighting(dn))
+                    // CBoat::PreRender sets the contact brightness to 0.5.
+                    sa.logic::<Automobile>(id).map_or(if sa.logic::<sa_physics::boat::Boat>(id).is_some() { 0.5 } else { 1.0 }, |a| a.lighting(dn))
                 };
                 m_of(contact, b.phys.matrix.pos)
             }

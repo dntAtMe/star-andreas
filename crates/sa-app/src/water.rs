@@ -44,6 +44,8 @@ impl Plugin for WaterPlugin {
 struct WaterR {
     layers: [(Entity, Handle<Mesh>); 2],
     seabed: (Entity, Handle<Mesh>),
+    /// Boat wakes (`RenderBoatWakes`, waterwake texture).
+    wakes: (Entity, Handle<Mesh>),
     /// U1, V1, U2, V2 (0x8D3824..30), start 0.5.
     scroll: [f32; 4],
     flow: Vec2,
@@ -78,11 +80,13 @@ fn init(
     }
     let mut water_tex = None;
     let mut bed_tex = None;
+    let mut wake_tex = None;
     if let Ok(txd) = std::fs::read(root.0.join("models/particle.txd")).map_err(anyhow::Error::from).and_then(|d| sa_formats::txd::parse(&d)) {
         for t in txd.into_iter().filter_map(|t| convert_texture(t, false)) {
             match t.name.as_str() {
                 "waterclear256" => water_tex = Some(images.add(make_image(t))),
                 "seabd32" => bed_tex = Some(images.add(make_image(t))),
+                "waterwake" => wake_tex = Some(images.add(make_image(t))),
                 _ => {}
             }
         }
@@ -104,7 +108,17 @@ fn init(
         ..default()
     };
     let layers = [spawn(layer(0.0)), spawn(layer(1.0))];
-    commands.insert_resource(WaterR { layers, seabed, scroll: [0.5; 4], flow: Vec2::ZERO, target: Vec2::ZERO, frame: 0 });
+    // Wakes are drawn inside RenderWater after the water (same blend states).
+    let wakes = spawn(StandardMaterial {
+        base_color_texture: wake_tex,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        double_sided: true,
+        cull_mode: None,
+        depth_bias: 2.0,
+        ..default()
+    });
+    commands.insert_resource(WaterR { layers, seabed, wakes, scroll: [0.5; 4], flow: Vec2::ZERO, target: Vec2::ZERO, frame: 0 });
 }
 
 /// A planar triangle with its `CRenPar`s.
@@ -288,6 +302,7 @@ fn draw(
     let Some(mut wr) = wr else { return };
     let Some(water) = sa.world.water.clone() else { return };
     let origin = camera.translation();
+    let camera_fwd = Vec3::from(b2g(camera.forward().as_vec3()));
     let cg = b2g(origin);
     let cam = Vec2::new(cg[0], cg[1]);
     let ts = time.delta_secs() * 50.0;
@@ -418,7 +433,109 @@ fn draw(
         }
     }
 
-    for (e, _) in wr.layers.iter().chain([&wr.seabed]) {
+    // RenderBoatWakes (0x6ED9A0): up to 4 boats (FillBoatList), segments of 4 strips.
+    let mut wake = Geo::default();
+    let mut wake_uv = Vec::new();
+    let mut wake_a: Vec<f32> = Vec::new();
+    {
+        let cam_f = Vec2::new(camera_fwd.x, camera_fwd.y).normalize_or_zero();
+        let mut boats: Vec<(f32, sa_physics::world::EntityId)> = Vec::new();
+        for id in sa.world.body_ids() {
+            let Some(b) = sa.world.body(id) else { continue };
+            let Some(boat) = b.logic.as_any().downcast_ref::<sa_physics::boat::Boat>() else { continue };
+            if boat.wake_count == 0 {
+                continue;
+            }
+            let d = b.phys.matrix.pos.truncate() - cam;
+            let along = d.dot(cam_f);
+            if along > 100.0 || along < -15.0 || d.length_squared() > 6400.0 {
+                continue;
+            }
+            boats.push((d.length_squared(), id));
+        }
+        boats.sort_by(|a, b| a.0.total_cmp(&b.0));
+        boats.truncate(4);
+        let phase = (now & 0xFFF) as f32 * 0.001_533_935_5;
+        let amp = sa.world.weather.wind_clipped * 0.4 + 0.2;
+        let zf = |q: Vec2| {
+            let fr = |v: f32| ((v + 3072.0) / 32.0).fract();
+            amp * ((fr(q.x) + fr(q.y)) * std::f32::consts::TAU + phase).sin() - 0.03
+        };
+        const K: [f32; 5] = [0.4, 1.0, 0.2, 1.0, 0.4];
+        for (_, id) in boats {
+            let Some(b) = sa.world.body(id) else { continue };
+            let Some(boat) = b.logic.as_any().downcast_ref::<sa_physics::boat::Boat>() else { continue };
+            let w0 = b.col.bbox_max.x * 0.65;
+            let width = |i: usize| (150.0 - boat.wake[i].1) * (boat.wake[i].2 as f32 * 0.04 + 0.5) / 150.0 * w0 + w0;
+            let d = (b.phys.matrix.pos.truncate() - cam).length();
+            let count = boat.wake_count as usize;
+            let mut prev_dir = Vec2::new(b.phys.matrix.fwd.x, b.phys.matrix.fwd.y);
+            let mut prev_w = width(0);
+            let mut prev_a = 0.0f32;
+            for i in 1..count {
+                let mut dir = boat.wake[i - 1].0 - boat.wake[i].0;
+                let mut draw = true;
+                if dir.length_squared() > 9.0 {
+                    let l = dir.length();
+                    dir /= l;
+                    if l > 13.0 {
+                        draw = false;
+                    }
+                }
+                let w = width(i);
+                let mut f = (1.0 - i as f32 / count as f32) * 160.0;
+                if i < 3 {
+                    f *= i as f32 / 3.0;
+                }
+                let mut a = (boat.wake[i].2 as f32 * 0.01 + 0.15) * f;
+                if d > 50.0 {
+                    a *= (80.0 - d) / 30.0;
+                }
+                let (p0, p1) = (boat.wake[i - 1].0, boat.wake[i].0);
+                let prev_l = p0 + Vec2::new(-prev_dir.y, prev_dir.x) * prev_w;
+                let prev_r = p0 + Vec2::new(prev_dir.y, -prev_dir.x) * prev_w;
+                let cur_l = p1 + Vec2::new(-dir.y, dir.x) * w;
+                let cur_r = p1 + Vec2::new(dir.y, -dir.x) * w;
+                if draw {
+                    // RenderWakeSegment (0x6EA260): 4 strips across the width.
+                    for j in 0..4 {
+                        let (t0, t1) = (j as f32 / 4.0, (j + 1) as f32 / 4.0);
+                        let quad = [
+                            (prev_l.lerp(prev_r, t0), prev_a * K[j]),
+                            (prev_l.lerp(prev_r, t1), prev_a * K[j + 1]),
+                            (cur_l.lerp(cur_r, t1), a * K[j + 1]),
+                            (cur_l.lerp(cur_r, t0), a * K[j]),
+                        ];
+                        let base = wake.pos.len() as u32;
+                        for (q, al) in quad {
+                            wake.pos.push((g2b([q.x, q.y, zf(q)]) - origin).to_array());
+                            wake_uv.push((q * 0.25).to_array());
+                            // D3DCOLOR alpha: the low byte of the ftol.
+                            wake_a.push(((al as i32) & 0xFF) as f32 / 255.0);
+                        }
+                        wake.idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+                    }
+                }
+                prev_dir = dir;
+                prev_w = w;
+                prev_a = a;
+            }
+        }
+    }
+    if let Some(mut m) = meshes.get_mut(&wr.wakes.1) {
+        if wake.idx.is_empty() {
+            *m = empty_mesh();
+        } else {
+            let n = wake.pos.len();
+            m.insert_attribute(Mesh::ATTRIBUTE_POSITION, wake.pos.clone());
+            m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; n]);
+            m.insert_attribute(Mesh::ATTRIBUTE_UV_0, wake_uv);
+            m.insert_attribute(Mesh::ATTRIBUTE_COLOR, wake_a.iter().map(|a| [1.0, 1.0, 1.0, *a]).collect::<Vec<_>>());
+            m.insert_indices(Indices::U32(wake.idx.clone()));
+        }
+    }
+
+    for (e, _) in wr.layers.iter().chain([&wr.seabed, &wr.wakes]) {
         if let Ok(mut tf) = tfs.get_mut(*e) {
             tf.translation = origin;
         }

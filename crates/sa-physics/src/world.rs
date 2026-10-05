@@ -1172,6 +1172,14 @@ impl World {
         let wavy = self.wavyness();
         let now = self.now_ms;
         let b = self.bm(i);
+        // CBoat: ProcessBoatControl (its own buoyancy and water forces).
+        {
+            let Body { phys, logic, .. } = &mut *b;
+            if let Some(boat) = logic.as_any_mut().downcast_mut::<crate::boat::Boat>() {
+                boat.process_boat_control(phys, &water, wavy, now, ts);
+                return;
+            }
+        }
         let kind = b.phys.kind;
         let touching = b.phys.flags & pf::TOUCHING_WATER != 0;
         let bconst = match kind {

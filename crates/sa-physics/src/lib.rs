@@ -5,6 +5,7 @@
 
 pub mod anim;
 pub mod automobile;
+pub mod boat;
 pub mod bullet;
 pub mod clock;
 #[cfg(feature = "bevy")]
