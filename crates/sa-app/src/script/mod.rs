@@ -252,6 +252,23 @@ impl WorldHost<'_> {
         }
     }
 
+    /// LOAD_SCENE stand-in: a player warped by the script waits (static) for the
+    /// collision and models around the new spot, then stands on the ground.
+    fn hold_player_for_streaming(&mut self, id: EntityId) {
+        if Some(id) != self.player_ped() {
+            return;
+        }
+        let now = self.world.resource::<Time>().elapsed_secs();
+        if let Some(b) = self.sa().world.body_mut(id) {
+            b.phys.eflags |= sa_physics::physical::ef::IS_STATIC;
+        }
+        let mut q = self.world.query::<&mut Ped>();
+        for mut ped in q.iter_mut(self.world) {
+            ped.frozen = true;
+            ped.frozen_at = now;
+        }
+    }
+
     fn sa(&mut self) -> Mut<'_, SaPhys> {
         self.world.resource_mut::<SaPhys>()
     }
@@ -348,6 +365,7 @@ impl Host for WorldHost<'_> {
                     let mut sa = self.sa();
                     let z = if p.z <= -100.0 { sa.world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z) } else { p.z };
                     crate::player::ped_teleport(&mut sa, id, g2b([p.x, p.y, z + 1.0]), None);
+                    self.hold_player_for_streaming(id);
                 }
                 x.store(&[idx]);
             }
@@ -404,6 +422,8 @@ impl Host for WorldHost<'_> {
                     }
                     let z = if p.z <= -100.0 { sa.world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z) } else { p.z };
                     crate::player::ped_teleport(&mut sa, id, g2b([p.x, p.y, z + 1.0]), None);
+                    drop(sa);
+                    self.hold_player_for_streaming(id);
                 }
             }
             0x009A => {
