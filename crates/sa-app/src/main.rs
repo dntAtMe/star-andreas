@@ -1,6 +1,7 @@
 mod audio;
 mod breaks;
 mod camera;
+mod clothes;
 mod debug;
 mod colour_filter;
 mod coronas;

@@ -278,6 +278,21 @@ pub fn parse(data: &[u8]) -> Result<Clump> {
     bail!("no clump chunk found")
 }
 
+/// Every clump of a multi-clump DFF (the clothes parts in player.img hold three: `Ripped`,
+/// `Fat` and `Normal`; `LoadClumpFile` 0x5372D0).
+pub fn parse_all(data: &[u8]) -> Result<Vec<Clump>> {
+    let mut r = Reader::new(data);
+    let mut out = Vec::new();
+    while r.remaining() >= 12 {
+        let h = rw::header(&mut r)?;
+        let body = Reader::new(r.bytes(h.size)?);
+        if h.ty == id::CLUMP {
+            out.push(parse_clump(body)?);
+        }
+    }
+    Ok(out)
+}
+
 fn parse_clump(mut r: Reader) -> Result<Clump> {
     let (_, mut s) = rw::sub(&mut r, id::STRUCT)?;
     let num_atomics = s.u32()? as usize;

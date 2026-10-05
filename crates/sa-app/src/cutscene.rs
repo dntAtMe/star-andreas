@@ -66,6 +66,9 @@ pub enum Status {
 struct CutObject {
     root: Entity,
     tracks: Vec<(Entity, Vec<ifp::Key>)>,
+    /// csplay: the bone entity chains (root → bone) of the shoulder bones, for
+    /// CCutsceneObject::PreRender's ShoulderBoneRotation.
+    shoulders: HashMap<i32, Vec<Entity>>,
 }
 
 /// The cutscene manager state (`CCutsceneMgr` statics).
@@ -348,7 +351,39 @@ fn load(
 
     let mut objects = Vec::new();
     for m in &cut.models {
-        // csplay is the player (model 1); otherwise an IDE model, else a special CUTOBJ slot.
+        // csplay is CJ rebuilt on csplay.dff (RebuildCutscenePlayer); otherwise an IDE model,
+        // else a special CUTOBJ slot.
+        if m.model == "csplay" {
+            let cj = Img::open(&root.join("models/player.img")).and_then(|img| crate::clothes::build_cj(&world.0, &img, ctx.images, true));
+            if let Err(e) = &cj {
+                warn!("cutscene CJ: {e:#}");
+            }
+            if let Ok((clump, textures)) = cj {
+                let PedVisual { model_root, bones, .. } = build_ped_visual(ctx.commands, ctx.meshes, ctx.materials, ctx.bindposes, &clump, &textures)?;
+                ctx.commands.entity(model_root).insert(Visibility::Hidden);
+                let mut by_name: HashMap<String, Entity> = clump.frames.iter().zip(&bones).map(|(f, &e)| (frame_key(&f.name), e)).collect();
+                // The rebuilt clump's HAnim root frame is "Normal"; the anim's root sequence
+                // ("root") binds to that node (id 0).
+                if let Some(i) = clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == 0)) {
+                    by_name.insert("root".into(), bones[i]);
+                }
+                let anim = m.anims.last().and_then(|a| anims.iter().find(|x| x.name.eq_ignore_ascii_case(a)));
+                let tracks = anim.map_or_else(Vec::new, |a| a.tracks.iter().filter_map(|t| Some((*by_name.get(&frame_key(&t.bone_name))?, t.keys.clone()))).filter(|t| !t.1.is_empty()).collect());
+                let mut shoulders = HashMap::new();
+                for tag in [31, 32, 21, 22, 301, 302] {
+                    let Some(mut f) = clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == tag)) else { continue };
+                    let mut chain = vec![bones[f]];
+                    while clump.frames[f].parent >= 0 {
+                        f = clump.frames[f].parent as usize;
+                        chain.push(bones[f]);
+                    }
+                    chain.reverse();
+                    shoulders.insert(tag, chain);
+                }
+                objects.push(CutObject { root: model_root, tracks, shoulders });
+                continue;
+            }
+        }
         let model = if m.model == "csplay" { crate::player::PED_MODEL.to_string() } else { m.model.clone() };
         let (dff_data, txd_data) = match world.0.file(&format!("{model}.dff")) {
             Some(d) => (d, world.0.file(&format!("{model}.txd"))),
@@ -378,7 +413,7 @@ fn load(
                 }
             }
         }
-        objects.push(CutObject { root: root_e, tracks });
+        objects.push(CutObject { root: root_e, tracks, shoulders: HashMap::new() });
     }
     info!("cutscene {name}: {} objects, {} anims, {} texts, camera {}", objects.len(), anims.len(), cut.texts.len(), cs.splines.is_some());
     cs.cut = cut;
@@ -558,6 +593,33 @@ pub(crate) fn update_cutscene(
             tf.rotation = q;
             if let Some(p) = p {
                 tf.translation = p;
+            }
+        }
+        if o.shoulders.is_empty() {
+            continue;
+        }
+        // CCutsceneObject::PreRender: ShoulderBoneRotation for csplay.
+        let chain_world = |chain: &[Entity]| -> Option<Mat4> {
+            let mut m = Mat4::IDENTITY;
+            for &e in chain {
+                m *= tfs.get(e).ok()?.0.to_matrix();
+            }
+            Some(m)
+        };
+        let world = |tag: i32| o.shoulders.get(&tag).and_then(|c| chain_world(c));
+        let pads: Vec<(Entity, Quat, Vec3)> = crate::clothes::shoulder_pads(world)
+            .into_iter()
+            .filter_map(|(tag, w)| {
+                let chain = o.shoulders.get(&tag)?;
+                let parent = chain_world(&chain[..chain.len() - 1])?;
+                let (_, r, tr) = (parent.inverse() * w).to_scale_rotation_translation();
+                Some((chain[chain.len() - 1], r, tr))
+            })
+            .collect();
+        for (e, r, tr) in pads {
+            if let Ok((mut tf, _)) = tfs.get_mut(e) {
+                tf.rotation = r.normalize();
+                tf.translation = tr;
             }
         }
     }

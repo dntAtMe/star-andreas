@@ -99,6 +99,8 @@ pub struct Ped {
     pub frozen_at: f32,
     /// The first unfreeze (the debug spawns) has happened.
     pub started: bool,
+    /// The model is CJ (model 0): CPed::PreRender's ShoulderBoneRotation runs.
+    pub cj: bool,
 }
 
 /// Teleport the ped's SA body (Bevy-space position, Bevy yaw).
@@ -230,12 +232,41 @@ pub fn build_ped_visual(
     // The anim clump: one frame per HAnim node, parented through the DFF frames.
     let node_frames: Vec<usize> = hroot.nodes.iter().filter_map(|&(id, _, _)| frame_of_node(id)).collect();
     let node_of_frame = |f: usize| node_frames.iter().position(|&n| n == f);
+    // The bones' rest translations come from the skin's inverse bone matrices, not the frames
+    // (the skinned anim frame data init): local = inverse(parent bone) * bone.
+    let bone_world: Vec<Mat4> = skin.inverse_bind.iter().map(|m| Mat4::from_cols_array(m).inverse()).collect();
+    let node_parent = |k: usize| -> Option<usize> {
+        let mut f = clump.frames[*node_frames.get(k)?].parent;
+        while f >= 0 {
+            if let Some(n) = node_of_frame(f as usize) {
+                return Some(n);
+            }
+            f = clump.frames[f as usize].parent;
+        }
+        None
+    };
+    let rest = |k: usize, fi: usize| -> Transform {
+        if bone_world.len() != hroot.nodes.len() {
+            return bind[fi];
+        }
+        match node_parent(k) {
+            Some(p) => {
+                let (_, r, t) = (bone_world[p].inverse() * bone_world[k]).to_scale_rotation_translation();
+                Transform { translation: t, rotation: r.normalize(), scale: Vec3::ONE }
+            }
+            None => bind[fi],
+        }
+    };
+    for (k, &fi) in node_frames.iter().enumerate() {
+        commands.entity(bones[fi]).insert(rest(k, fi));
+    }
     let anim_clump = Clump::new(
         hroot
             .nodes
             .iter()
             .zip(&node_frames)
-            .map(|(&(id, _, _), &fi)| {
+            .enumerate()
+            .map(|(k, (&(id, _, _), &fi))| {
                 let mut parent = None;
                 let mut f = clump.frames[fi].parent;
                 while f >= 0 {
@@ -245,7 +276,8 @@ pub fn build_ped_visual(
                     }
                     f = clump.frames[f as usize].parent;
                 }
-                (id, clump.frames[fi].name.clone(), bind[fi].rotation, bind[fi].translation, parent)
+                let r = rest(k, fi);
+                (id, clump.frames[fi].name.clone(), r.rotation, r.translation, parent)
             })
             .collect(),
     );
@@ -263,14 +295,30 @@ fn spawn_player(
     mut sa: ResMut<SaPhys>,
 ) -> Result<(), BevyError> {
     let world = &world.0;
-    let clump = dff::parse(world.file(&format!("{PED_MODEL}.dff")).context("ped dff")?)?;
-    let textures: HashMap<String, (Handle<Image>, bool)> =
-        txd::parse(world.file(&format!("{PED_MODEL}.txd")).context("ped txd")?)?
-            .into_iter()
-            .filter_map(|t| convert_texture(t, false))
-            .map(|t| (t.name.clone(), t.alpha, make_image(t)))
-            .map(|(n, a, img)| (n, (images.add(img), a)))
-            .collect();
+    // CJ with the new-game outfit (CClothes::RebuildPlayer); SA_PEDMODEL=<name> or a failed
+    // build falls back to a plain ped model.
+    let cj = match std::env::var("SA_PEDMODEL") {
+        Ok(_) => None,
+        Err(_) => Img::open(&root.0.join("models/player.img"))
+            .and_then(|img| crate::clothes::build_cj(world, &img, &mut images, false))
+            .inspect_err(|e| warn!("CJ model: {e:#}"))
+            .ok(),
+    };
+    let is_cj = cj.is_some();
+    let (clump, textures) = match cj {
+        Some(c) => c,
+        None => {
+            let name = std::env::var("SA_PEDMODEL").unwrap_or_else(|_| PED_MODEL.to_string());
+            let clump = dff::parse(world.file(&format!("{name}.dff")).context("ped dff")?)?;
+            let textures: HashMap<String, (Handle<Image>, bool)> = txd::parse(world.file(&format!("{name}.txd")).context("ped txd")?)?
+                .into_iter()
+                .filter_map(|t| convert_texture(t, false))
+                .map(|t| (t.name.clone(), t.alpha, make_image(t)))
+                .map(|(n, a, img)| (n, (images.add(img), a)))
+                .collect();
+            (clump, textures)
+        }
+    };
 
     let PedVisual { model_root, bones, node_frames, mut anim_clump } =
         build_ped_visual(&mut commands, &mut meshes, &mut materials, &mut bindposes, &clump, &textures)?;
@@ -321,7 +369,7 @@ fn spawn_player(
         .spawn((
             tf,
             Visibility::default(),
-            Ped { sa: id, bones, node_frames, grounded: false, frozen: true, frozen_at: 0.0, started: false },
+            Ped { sa: id, bones, node_frames, grounded: false, frozen: true, frozen_at: 0.0, started: false, cj: is_cj },
             CamFollow { height: 0.6, dist: 3.5 },
             SaBody::new(id, m),
         ))
@@ -540,6 +588,21 @@ fn animate_ped(
                 if let (0, Some(r)) = (k, swim) {
                     tf.rotation = r * tf.rotation;
                     tf.translation = r * tf.translation;
+                }
+            }
+        }
+        // CPed::PreRender → ShoulderBoneRotation for the player model: the shoulder pads
+        // (301 / 302, children of Spine1) follow the upper arms with half their twist.
+        if ped.cj {
+            let world = |tag: i32| clump.frame_of_tag(tag).map(|k| clump.ltm(k));
+            for (tag, w) in crate::clothes::shoulder_pads(world) {
+                let Some(k) = clump.frame_of_tag(tag) else { continue };
+                let parent = clump.parent(k).map_or(Mat4::IDENTITY, |p| clump.ltm(p));
+                let (_, r, t) = (parent.inverse() * w).to_scale_rotation_translation();
+                let Some(&e) = ped.node_frames.get(k).and_then(|&f| ped.bones.get(f)) else { continue };
+                if let Ok(mut tf) = bones.get_mut(e) {
+                    tf.rotation = r.normalize();
+                    tf.translation = t;
                 }
             }
         }

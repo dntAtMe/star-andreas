@@ -81,11 +81,11 @@ struct PartCpu {
 
 pub struct TexCpu {
     pub name: String,
-    width: u32,
-    height: u32,
-    format: TextureFormat,
-    mip_count: u32,
-    data: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) format: TextureFormat,
+    pub(crate) mip_count: u32,
+    pub(crate) data: Vec<u8>,
     pub alpha: bool,
 }
 
