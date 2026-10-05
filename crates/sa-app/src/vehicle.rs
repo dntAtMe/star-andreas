@@ -14,10 +14,11 @@ use bevy::{
 };
 use sa_formats::{
     col, dff, txd,
-    vehicle::{self, BoatHandling as RawBoatHandling, CarColors, Handling, VehicleDef},
+    vehicle::{self, BikeHandling as RawBikeHandling, BoatHandling as RawBoatHandling, CarColors, Handling, VehicleDef},
 };
 use sa_physics::{
     automobile::{Automobile, CarInput, VehicleHandling},
+    bike::{Bike, BikeFrames, BikeHandling},
     boat::{Boat, BoatHandling},
     collision::{ColModel as SaColModel, ColSphere, Surf},
     damage::{DamageEvent, FlyingKind, flying_component_velocity},
@@ -51,7 +52,7 @@ impl Plugin for VehiclePlugin {
             .init_resource::<SpawnQueue>()
             .add_systems(Startup, load_vehicle_db)
             .add_systems(Update, (spawn_key, auto_drive, enter_exit, debug_damage, feed_inputs).chain().before(SaStep))
-            .add_systems(Update, (update_wheels, update_boats, update_damage, expire_flying_parts).after(SaStep));
+            .add_systems(Update, (update_wheels, update_boats, update_bikes, update_damage, expire_flying_parts).after(SaStep));
     }
 }
 
@@ -65,6 +66,8 @@ struct VehicleDb {
     handling: HashMap<String, Handling>,
     /// `%` lines (tBoatHandlingData).
     boats: HashMap<String, RawBoatHandling>,
+    /// `!` lines (tBikeHandlingData).
+    bikes: HashMap<String, RawBikeHandling>,
     colors: CarColors,
     /// models/generic/vehicle.txd: shared textures (lights, grunge, ...).
     generic: HashMap<String, (Handle<Image>, bool)>,
@@ -100,6 +103,8 @@ pub struct Vehicle {
     pub lamps: Vec<Lamp>,
     /// Boat frame nodes (node id, frame, rest transform) animated by CBoat::PreRender.
     boat_nodes: Vec<(u8, Entity, Transform)>,
+    /// Bike frames (name, frame, rest transform) animated by CBike::PreRender.
+    bike_nodes: Vec<(&'static str, Entity, Transform)>,
 }
 
 /// One lamp material: index 0 FL, 1 FR, 2 RL, 3 RR.
@@ -166,13 +171,14 @@ fn load_vehicle_db(mut commands: Commands, root: Res<GameRoot>, mut images: ResM
     let handling_cfg = read("data/handling.cfg")?;
     let handling = vehicle::parse_handling(&handling_cfg);
     let boats = vehicle::parse_boat_handling(&handling_cfg);
+    let bikes = vehicle::parse_bike_handling(&handling_cfg);
     let colors = vehicle::parse_carcols(&read("data/carcols.dat")?);
     let generic = load_txd(&std::fs::read(root.0.join("models/generic/vehicle.txd"))?, &mut images)?;
     let mut models: Vec<String> =
         defs.values().filter(|d: &&VehicleDef| d.kind.eq_ignore_ascii_case("car")).map(|d| d.model.clone()).collect();
     models.sort();
     commands.insert_resource(VehicleModels(models));
-    commands.insert_resource(VehicleDb { defs, handling, boats, colors, generic, next_spawn: 0 });
+    commands.insert_resource(VehicleDb { defs, handling, boats, bikes, colors, generic, next_spawn: 0 });
     Ok(())
 }
 
@@ -468,6 +474,39 @@ fn spawn_vehicle(
         bh.map(|bh| Boat::new(vh.clone(), bh, def.id as u16, &sa_col))
     });
     let boat = boat.flatten();
+    // CBike: the '!' line, the rake from vehicles.ide (12th field), the frame positions.
+    let frame_pos = |n: &str| {
+        clump.frames.iter().position(|f| f.name.eq_ignore_ascii_case(n)).map(|i| Vec3::from(clump.frame_world(i).1))
+    };
+    let bike = if def.kind == "bike" {
+        let mut bvh = vh.clone();
+        // ConvertDataToGameUnits for bikes: reverse cap -0.05, not clamped.
+        bvh.trans.max_reverse = -0.05;
+        bvh.trans.init_gear_ratios();
+        let bh = db.bikes.get(&def.handling).or_else(|| db.bikes.get("BIKE")).map(BikeHandling::from_raw);
+        let frames = BikeFrames {
+            wheel_front: frame_pos("wheel_front").unwrap_or(Vec3::new(0.0, 0.8, 0.0)),
+            wheel_rear: frame_pos("wheel_rear").unwrap_or(Vec3::new(0.0, -0.8, 0.0)),
+            forks_front: frame_pos("forks_front"),
+            forks_rear: frame_pos("forks_rear"),
+        };
+        bh.map(|bh| {
+            let mut col = sa_col.clone();
+            let b = Bike::new(
+                bvh,
+                bh,
+                def.id as u16,
+                [def.wheel_scale_front, def.wheel_scale_rear],
+                def.wheel_model as f32,
+                frames,
+                &mut col,
+                sa.world.surfaces.clone(),
+            );
+            (b, col)
+        })
+    } else {
+        None
+    };
     let mut car_col = sa_col.clone();
     let mut auto = Automobile::new(
         vh,
@@ -475,7 +514,7 @@ fn spawn_vehicle(
         def.wheel_scale_front,
         def.wheel_scale_rear,
         dummies,
-        if boat.is_some() { &mut car_col } else { &mut sa_col },
+        if boat.is_some() || bike.is_some() { &mut car_col } else { &mut sa_col },
         sa.world.surfaces.clone(),
     );
     for c in &comps {
@@ -517,18 +556,34 @@ fn spawn_vehicle(
     let m = gta_matrix(&tf);
     let mut phys = Physical::new(EntityType::Vehicle, m);
     phys.status = Status::Abandoned;
-    let id = match boat {
-        Some(boat) => {
+    let id = match (boat, bike) {
+        (_, Some((bike, col))) => {
+            phys.vehicle = Some(VehicleInfo { class: VehicleClass::Bike, model: def.id as u16, towed_mass: None });
+            bike.setup_physical(&mut phys);
+            sa.world.add_body(phys, col, Box::new(bike))
+        }
+        (Some(boat), None) => {
             phys.vehicle = Some(VehicleInfo { class: VehicleClass::Boat, model: def.id as u16, towed_mass: None });
             boat.setup_physical(&mut phys);
             sa.world.add_body(phys, sa_col, Box::new(boat))
         }
-        None => {
+        (None, None) => {
             phys.vehicle = Some(VehicleInfo { class: VehicleClass::Automobile, model: def.id as u16, towed_mass: None });
             auto.setup_physical(&mut phys);
             sa.world.add_body(phys, sa_col, Box::new(auto))
         }
     };
+    let bike_nodes: Vec<(&'static str, Entity, Transform)> = clump
+        .frames
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
+            let n = ["chassis", "forks_front", "forks_rear", "wheel_front", "wheel_rear", "mudguard", "handlebars"]
+                .into_iter()
+                .find(|n| f.name.eq_ignore_ascii_case(n))?;
+            Some((n, frames[i], frame_transform(f)))
+        })
+        .collect();
     // Boat nodes (table 0x8A6F80).
     let boat_nodes: Vec<(u8, Entity, Transform)> = clump
         .frames
@@ -568,6 +623,7 @@ fn spawn_vehicle(
                 burnt: false,
                 lamps,
                 boat_nodes,
+                bike_nodes,
             },
         ))
         .add_child(model_root)
@@ -759,6 +815,60 @@ fn feed_inputs(
         }
         if let Some(boat) = sa.logic_mut::<Boat>(v.sa) {
             boat.input = input;
+        }
+        if let Some(bike) = sa.logic_mut::<Bike>(v.sa) {
+            bike.input = input;
+            // Lean forward / back (pad up / down): the arrow keys.
+            bike.input_lean = (key(KeyCode::ArrowUp) as i32 - key(KeyCode::ArrowDown) as i32) as f32;
+        }
+    }
+}
+
+/// `CBike::PreRender` (0x6BD090) frames: forks about the rake axis, swing arm following the
+/// rear hub, the front wheel along the forks, wheel spin, the chassis lean and drop.
+fn update_bikes(sa: Res<SaPhys>, cars: Query<&Vehicle>, mut tfs: Query<&mut Transform, Without<Vehicle>>) {
+    for v in &cars {
+        let Some(bike) = sa.logic::<Bike>(v.sa) else { continue };
+        let Some(status) = sa.world.body(v.sa).map(|b| b.phys.status) else { continue };
+        let rake = bike.rake_deg.to_radians();
+        let axis = Vec3::new(0.0, rake.sin(), -rake.cos()).normalize();
+        let fork_rot = Quat::from_axis_angle(axis, -bike.steer_actual);
+        let mut front_pos = None;
+        for &(name, e, rest) in &v.bike_nodes {
+            let Ok(mut tf) = tfs.get_mut(e) else { continue };
+            match name {
+                "forks_front" => tf.rotation = fork_rot,
+                "handlebars" => {
+                    tf.rotation = if matches!(status, Status::Abandoned | Status::Wrecked) { fork_rot } else { Quat::IDENTITY };
+                }
+                "forks_rear" if bike.swingarm_len > 0.0 => {
+                    let a = -((bike.hub_z[1] - bike.rear_node_z) / bike.swingarm_len).clamp(-1.0, 1.0).asin();
+                    tf.rotation = Quat::from_rotation_x(a);
+                }
+                "wheel_front" => {
+                    let y = rest.translation.y - (bike.hub_z[0] - bike.front_node_z) * bike.rake_tan;
+                    let z = bike.hub_z[0] - bike.head_pivot.y;
+                    tf.translation = Vec3::new(rest.translation.x, y, z);
+                    tf.rotation = Quat::from_rotation_x(bike.wheel_rot[0]);
+                    front_pos = Some(tf.translation);
+                }
+                "wheel_rear" => tf.rotation = Quat::from_rotation_x(bike.wheel_rot[1]),
+                "chassis" => {
+                    let (pitch, roll, drop) = bike.chassis_lean();
+                    tf.rotation = Quat::from_rotation_y(roll) * Quat::from_rotation_x(pitch);
+                    tf.translation = rest.translation + Vec3::new(0.0, 0.0, drop);
+                }
+                _ => {}
+            }
+        }
+        if let Some(fp) = front_pos {
+            for &(name, e, _) in &v.bike_nodes {
+                if name == "mudguard" {
+                    if let Ok(mut tf) = tfs.get_mut(e) {
+                        tf.translation = fp;
+                    }
+                }
+            }
         }
     }
 }

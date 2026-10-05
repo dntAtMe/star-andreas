@@ -69,7 +69,7 @@ pub struct Transmission {
 
 impl Transmission {
     /// 0x6D0460
-    fn init_gear_ratios(&mut self) {
+    pub fn init_gear_ratios(&mut self) {
         self.gears = [Gear::default(); 6];
         let n = self.num_gears.max(1) as usize;
         let inv_n = 1.0 / n as f32;
@@ -93,7 +93,7 @@ impl Transmission {
 
     /// 0x6D05E0. Returns per-wheel drive acceleration (units/frame for this step).
     #[allow(clippy::too_many_arguments)]
-    fn drive_acceleration(
+    pub(crate) fn drive_acceleration(
         &self,
         ts: f32,
         gas: f32,
@@ -104,11 +104,28 @@ impl Transmission {
         drive_wheels_on_ground: u8,
         cheat: u8,
     ) -> f32 {
+        self.drive_acceleration_rl(ts, gas, gear, velocity, revs, load, drive_wheels_on_ground, cheat, true)
+    }
+
+    /// The same with `rev_load = false` for callers that pass null revs / load (bikes).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn drive_acceleration_rl(
+        &self,
+        ts: f32,
+        gas: f32,
+        gear: &mut u8,
+        velocity: f32,
+        revs: &mut f32,
+        load: &mut f32,
+        drive_wheels_on_ground: u8,
+        cheat: u8,
+        rev_load: bool,
+    ) -> f32 {
         let v = velocity;
         if v < self.max_reverse {
             return 0.0;
         }
-        let (mut use_rl, mut dw, mut cheat) = (true, drive_wheels_on_ground, cheat);
+        let (mut use_rl, mut dw, mut cheat) = (rev_load, drive_wheels_on_ground, cheat);
         loop {
             if v > self.max_velocity {
                 return 0.0;

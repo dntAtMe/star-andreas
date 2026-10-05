@@ -233,3 +233,60 @@ mod boat_tests {
         assert_eq!(b.look_lr_behind_cam_height, 4.0);
     }
 }
+
+/// A `!` (bike) line of handling.cfg: `tBikeHandlingData` before ConvertBikeDataToGameUnits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BikeHandling {
+    pub id: String,
+    pub lean_fwd_com: f32,
+    pub lean_fwd_force: f32,
+    pub lean_bak_com: f32,
+    pub lean_bak_force: f32,
+    /// Degrees.
+    pub max_lean: f32,
+    pub full_anim_lean: f32,
+    pub des_lean: f32,
+    pub speed_steer: f32,
+    pub slip_steer: f32,
+    pub no_player_com_z: f32,
+    pub wheelie_ang: f32,
+    pub stoppie_ang: f32,
+    pub wheelie_steer: f32,
+    pub wheelie_stab_mult: f32,
+    pub stoppie_stab_mult: f32,
+}
+
+pub fn parse_bike_handling(text: &str) -> HashMap<String, BikeHandling> {
+    let mut out = HashMap::new();
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        if !line.starts_with('!') {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 17 {
+            continue;
+        }
+        let n = |i: usize| f[i].parse::<f32>().unwrap_or(0.0);
+        let b = BikeHandling {
+            id: f[1].to_ascii_uppercase(),
+            lean_fwd_com: n(2),
+            lean_fwd_force: n(3),
+            lean_bak_com: n(4),
+            lean_bak_force: n(5),
+            max_lean: n(6),
+            full_anim_lean: n(7),
+            des_lean: n(8),
+            speed_steer: n(9),
+            slip_steer: n(10),
+            no_player_com_z: n(11),
+            wheelie_ang: n(12),
+            stoppie_ang: n(13),
+            wheelie_steer: n(14),
+            wheelie_stab_mult: n(15),
+            stoppie_stab_mult: n(16),
+        };
+        out.insert(b.id.clone(), b);
+    }
+    out
+}

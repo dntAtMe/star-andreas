@@ -5,6 +5,7 @@
 
 pub mod anim;
 pub mod automobile;
+pub mod bike;
 pub mod boat;
 pub mod bullet;
 pub mod clock;
