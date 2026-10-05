@@ -7,9 +7,12 @@
 //! rotated with the camera heading, clipped to the disc's 24-gon, the radardisc ring, the
 //! north blip and the player arrow.
 //!
+//! The zone and vehicle name popups (text.md §4–6): `CPlaceName::Process` /
+//! `CCurrentVehicle::Process` push GXT strings every frame, `CHud::DrawAreaName` /
+//! `DrawVehicleName` run their fade state machines (change detection by string identity).
+//!
 //! Not ported: radar blips other than north and the player, the plane horizon / altimeter,
-//! zone / vehicle name popups (need GXT), the help box, messages, the vital-stats panel, the
-//! 2-player layout, button icons.
+//! the help box, messages, the vital-stats panel, the 2-player layout, button icons.
 
 use std::collections::HashMap;
 
@@ -420,11 +423,12 @@ impl FontData {
     }
 
     /// Public `PrintString(x, y, text)` (0x71A700) → `ProcessCurrentString(1, …)` (0x71A220).
-    fn print_string(&self, f: &mut Font, sc: &Scale, x: f32, y: f32, text: &str, out: &mut DrawList) {
-        let s = text.as_bytes();
+    fn print_string(&self, f: &mut Font, sc: &Scale, x: f32, y: f32, text: impl AsRef<[u8]>, out: &mut DrawList) -> u32 {
+        let s = text.as_ref();
         if s.is_empty() || s[0] == b'*' {
-            return;
+            return 0;
         }
+        let mut lines = 0;
         let saved = f.colour;
         let (mut spaces, mut last_w, mut first) = (0i16, 0.0f32, true);
         let mut cur_x = if f.centre || f.right { 0.0 } else { x };
@@ -458,6 +462,7 @@ impl FontData {
                     x
                 };
                 self.print_line(f, sc, line_x, cur_y, &s[line_start..line_end.max(line_start)], gap, out);
+                lines += 1;
                 f.new_line = false;
                 cur_y += 18.0 * f.scale.1;
                 cur_x = if f.centre || f.right { 0.0 } else { x };
@@ -479,6 +484,7 @@ impl FontData {
                         x
                     };
                     self.print_line(f, sc, line_x, cur_y, &s[line_start..], 0.0, out);
+                    lines += 1;
                 } else {
                     if !first {
                         spaces += 1;
@@ -493,7 +499,45 @@ impl FontData {
             }
         }
         f.colour = saved;
+        lines
     }
+
+    /// `PrintStringFromBottom` (0x71A820): moved up by the line count (no slant).
+    fn print_string_from_bottom(&self, f: &mut Font, sc: &Scale, x: f32, y: f32, text: &[u8], out: &mut DrawList) {
+        let n = self.print_string(&mut f.clone(), sc, x, y, text, &mut DrawList::default());
+        self.print_string(f, sc, x, y - 18.0 * f.scale.1 * n as f32, text, out);
+    }
+}
+
+/// A GXT string "pointer": None is the shared empty string of a missing key.
+type GxtPtr = Option<u32>;
+
+/// One name popup's state (`m_pZoneName` … `m_ZoneNameTimer`).
+#[derive(Default)]
+struct Popup {
+    /// m_pZoneName (None = NULL).
+    name: Option<GxtPtr>,
+    last: Option<GxtPtr>,
+    to_print: Option<GxtPtr>,
+    state: u8,
+    fade: i32,
+    timer: i32,
+}
+
+/// CPlaceName + the HUD popups.
+#[derive(Default)]
+struct NamePopups {
+    /// CPlaceName's tracked navigation zone (index into the zones).
+    place: Option<usize>,
+    zone: Popup,
+    vehicle: Popup,
+}
+
+/// A navigation zone (type 0/1) for `FindSmallestZoneForPosition`.
+struct NaviZone {
+    min: [i16; 3],
+    max: [i16; 3],
+    label: String,
 }
 
 #[derive(Resource)]
@@ -505,6 +549,199 @@ struct HudAssets {
     radar_north: Option<Handle<Image>>,
     radar_centre: Option<Handle<Image>>,
     data: FontData,
+    gxt: sa_formats::gxt::Gxt,
+    /// CTheZones' navigation zones; zone 0 is `SAN_AND`.
+    zones: Vec<NaviZone>,
+}
+
+impl HudAssets {
+    fn text(&self, p: GxtPtr) -> &[u8] {
+        match p {
+            None => &[],
+            Some(h) => self.gxt.lookup_hash(h).unwrap_or(&[]),
+        }
+    }
+
+    /// `TheText.Get(key)` as a pointer.
+    fn get(&self, key: &str) -> GxtPtr {
+        self.gxt.lookup(key).map(|(h, _)| h)
+    }
+
+    /// `CTheZones::FindSmallestZoneForPosition(pos, false)` (0x572368).
+    fn smallest_zone(&self, p: Vec3) -> usize {
+        let size = |z: &NaviZone| (z.max[0] as i32 - z.min[0] as i32 + z.max[1] as i32 - z.min[1] as i32) as u32;
+        let mut best = 0;
+        let mut best_size = self.zones.first().map_or(u32::MAX, size);
+        for (i, z) in self.zones.iter().enumerate().skip(1) {
+            let inside = (0..3).all(|k| z.min[k] as f32 <= p[k] && p[k] <= z.max[k] as f32);
+            if inside && size(z) < best_size {
+                best = i;
+                best_size = size(z);
+            }
+        }
+        best
+    }
+}
+
+/// The zone popup (`CHud::DrawAreaName` 0x58AA50) and the vehicle popup
+/// (`CHud::DrawVehicleName` 0x58AEA0) for this frame; `ms` = ftol(ts·0.02·1000).
+fn draw_name_popups(np: &mut NamePopups, assets: &HudAssets, sc: &Scale, ms: i32, out: &mut DrawList) {
+    let fd = &assets.data;
+    // Vehicle name (CHud::Draw).
+    let v = &mut np.vehicle;
+    match v.name {
+        None => {
+            v.state = 0;
+            v.timer = 0;
+            v.fade = 0;
+            v.last = None;
+        }
+        Some(n) => {
+            if v.last != Some(n) {
+                if v.state == 0 {
+                    v.state = 2;
+                    v.timer = 0;
+                    v.fade = 0;
+                    v.to_print = Some(n);
+                    if matches!(np.zone.state, 1 | 2) {
+                        np.zone.state = 3;
+                    }
+                } else if (1..=4).contains(&v.state) {
+                    v.state = 4;
+                    v.timer = 0;
+                }
+                v.last = Some(n);
+            }
+            if v.state != 0 {
+                let mut alpha = 255.0f32;
+                match v.state {
+                    1 => {
+                        if v.timer as f32 > 3000.0 {
+                            v.state = 3;
+                            v.fade = 1000;
+                        }
+                    }
+                    2 => {
+                        v.fade += ms;
+                        if v.fade as f32 > 1000.0 {
+                            v.fade = 1000;
+                            v.state = 1;
+                        }
+                        alpha = v.fade as f32 * 0.001 * 255.0;
+                    }
+                    3 => {
+                        v.fade -= ms;
+                        if v.fade < 0 {
+                            v.state = 0;
+                            v.fade = 0;
+                        }
+                        alpha = v.fade as f32 * 0.001 * 255.0;
+                    }
+                    _ => {
+                        v.fade -= ms;
+                        if v.fade < 0 {
+                            v.timer = 0;
+                            v.state = 2;
+                            v.to_print = v.last;
+                            v.fade = 0;
+                        }
+                        alpha = v.fade as f32 * 0.001 * 255.0;
+                    }
+                }
+                v.timer += ms;
+                let a = alpha as i32 as u8;
+                let mut f = Font::new(sc.w);
+                f.proportional = true;
+                f.scale = (sc.sx(1.0), sc.sy(1.5));
+                f.set_orientation(2);
+                f.right_wrap = 0.0;
+                f.set_font_style(2);
+                f.set_edge(2);
+                let g = HUD_COLOURS[1];
+                f.colour = [g[0], g[1], g[2], a];
+                f.drop = [0, 0, 0, a];
+                if let Some(p) = v.to_print {
+                    fd.print_string(&mut f, sc, sc.w - sc.sx(32.0), sc.h - sc.sy(104.0), assets.text(p), out);
+                }
+            }
+        }
+    }
+    // Zone name (CHud::DrawAfterFade → DrawAreaName).
+    let z = &mut np.zone;
+    let Some(n) = z.name else { return };
+    if z.last != Some(n) {
+        match z.state {
+            0 => {
+                z.state = 2;
+                z.timer = 0;
+                z.fade = 0;
+                z.to_print = Some(n);
+                if matches!(np.vehicle.state, 1 | 2) {
+                    np.vehicle.state = 3;
+                }
+            }
+            1..=3 => {
+                z.state = 4;
+                z.timer = 0;
+            }
+            _ => z.timer = 0,
+        }
+        z.last = Some(n);
+    }
+    if z.state == 0 {
+        return;
+    }
+    let mut alpha = 255.0f32;
+    match z.state {
+        1 => {
+            z.fade = 1000;
+            if z.timer as f32 > 3000.0 {
+                z.state = 3;
+                z.fade = 1000;
+            }
+        }
+        2 => {
+            z.fade += ms;
+            if z.fade as f32 > 1000.0 {
+                z.fade = 1000;
+                z.state = 1;
+            }
+            alpha = z.fade as f32 * 0.001 * 255.0;
+        }
+        3 => {
+            z.fade -= ms;
+            if (z.fade as f32) < 0.0 {
+                z.fade = 0;
+                z.state = 0;
+            }
+            alpha = z.fade as f32 * 0.001 * 255.0;
+        }
+        _ => {
+            z.fade -= ms;
+            if (z.fade as f32) < 0.0 {
+                z.fade = 0;
+                z.state = 2;
+                z.to_print = z.last;
+            }
+            alpha = z.fade as f32 * 0.001 * 255.0;
+        }
+    }
+    z.timer += ms;
+    let a = alpha as i32 as u8;
+    let mut f = Font::new(sc.w);
+    f.proportional = true;
+    f.scale = (sc.sx(1.2), sc.sy(1.9));
+    f.set_edge(2);
+    f.set_orientation(2);
+    f.right_wrap = sc.sx(180.0);
+    f.drop = [0, 0, 0, a];
+    f.set_font_style(0);
+    let c = HUD_COLOURS[3];
+    f.colour = [c[0], c[1], c[2], a];
+    let y = (sc.h - sc.sy(104.0)) + sc.sy(76.0);
+    if let Some(p) = z.to_print {
+        fd.print_string_from_bottom(&mut f, sc, sc.w - sc.sx(32.0), y, assets.text(p), out);
+    }
 }
 
 /// The 2D overlay camera.
@@ -532,6 +769,17 @@ fn setup_hud(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Ass
     let hud = load_txd("models/hud.txd", &mut images);
     // fonts.dat has Latin-1 comment bytes.
     let vals = std::fs::read(root.0.join("data/fonts.dat")).map(|b| sa_formats::fonts::parse_fonts_dat(&String::from_utf8_lossy(&b))).unwrap_or_default();
+    // CText::Load (american.gxt) and CTheZones (info.zon navigation zones after SAN_AND).
+    let gxt = std::fs::read(root.0.join("text/american.gxt")).ok().and_then(|d| sa_formats::gxt::Gxt::parse(&d)).unwrap_or_else(|| {
+        warn!("american.gxt missing: no zone / vehicle names");
+        Default::default()
+    });
+    let mut zones = vec![NaviZone { min: [-3000, -3000, -2000], max: [3000, 3000, 2000], label: "SAN_AND".into() }];
+    let info_zon = std::fs::read(root.0.join("data/info.zon")).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    for z in sa_formats::population::parse_zones(&info_zon).into_iter().filter(|z| z.ty <= 1) {
+        let label: String = z.text.chars().take(7).collect();
+        zones.push(NaviZone { min: z.min, max: z.max, label });
+    }
     if vals.len() < 2 {
         warn!("fonts.dat: {} fonts", vals.len());
     }
@@ -554,6 +802,8 @@ fn setup_hud(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Ass
         radar_north: hud.get("radar_north").cloned(),
         radar_centre: hud.get("radar_centre").cloned(),
         data: FontData { vals },
+        gxt,
+        zones,
     });
     commands.spawn((
         Camera2d,
@@ -587,6 +837,8 @@ fn draw_hud(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut last_level: Local<i32>,
+    mut popups: Local<NamePopups>,
+    time: Res<Time>,
 ) {
     let Some(assets) = assets else { return };
     let sc = Scale { w: window.width(), h: window.height() };
@@ -740,6 +992,29 @@ fn draw_hud(
         }
         f.set_edge(0);
     }
+
+    // CPlaceName::Process / CCurrentVehicle::Process, then the popups.
+    let car = driving.0.and_then(|e| cars.get(e).ok());
+    let place_pos = sa.world.body(car.map_or(ped.sa, |c| c.sa)).map(|b| b.phys.matrix.pos);
+    if let Some(p) = place_pos {
+        let zone = assets.smallest_zone(Vec3::new(p.x, p.y, p.z));
+        let same_label = popups.place.is_some_and(|c| assets.zones[c].label == assets.zones[zone].label);
+        if popups.place != Some(zone) && !same_label {
+            popups.place = Some(zone);
+        }
+        let ptr = popups.place.map(|i| assets.get(&assets.zones[i].label));
+        // CHud::SetZoneName(text, false): only while no zone popup runs.
+        if popups.zone.state == 0 {
+            popups.zone.name = ptr;
+        }
+    }
+    // The vehicles.ide game name: '_' → ' ' from the 2nd char, 8 bytes.
+    popups.vehicle.name = car.map(|c| {
+        let key: String = c.name.chars().enumerate().map(|(i, ch)| if i > 0 && ch == '_' { ' ' } else { ch }).take(8).collect();
+        assets.get(&key)
+    });
+    let ms = (time.delta_secs() * 50.0 * 0.02 * 1000.0) as i32;
+    draw_name_popups(&mut popups, &assets, &sc, ms, &mut out);
 
     // CHud::DrawRadar.
     let veh = driving.0.and_then(|e| cars.get(e).ok()).map(|v| v.sa);

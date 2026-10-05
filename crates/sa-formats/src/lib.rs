@@ -11,6 +11,7 @@ pub mod decision;
 pub mod dff;
 pub mod fonts;
 pub mod fxp;
+pub mod gxt;
 pub mod ide;
 pub mod ifp;
 pub mod img;
