@@ -15,6 +15,7 @@ pub mod img;
 pub mod ipl;
 pub mod meleedat;
 pub mod objdat;
+pub mod population;
 pub mod rw;
 pub mod txd;
 pub mod vehicle;

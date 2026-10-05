@@ -26,7 +26,10 @@ pub mod ped;
 pub mod peddamage;
 pub mod pedtask;
 pub mod shadows;
+pub mod npc;
+pub mod paths;
 pub mod physical;
+pub mod population;
 pub mod projectile;
 pub mod surface;
 pub mod timecycle;
@@ -55,6 +58,8 @@ pub struct Ctx {
     pub now_ms: u32,
     /// The active camera (TheCamera), for the player's tasks.
     pub cam: CamInfo,
+    /// `CTimer::m_FrameCounter`.
+    pub frame: u32,
 }
 
 /// What the ped tasks read from `TheCamera`.
@@ -108,6 +113,7 @@ impl Ctx {
             wet_roads: 0.0,
             now_ms: 0,
             cam: CamInfo::default(),
+            frame: 0,
         }
     }
 }

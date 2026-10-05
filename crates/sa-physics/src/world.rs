@@ -201,6 +201,10 @@ pub struct World {
     pub projectiles: crate::projectile::Projectiles,
     /// `CWaterLevel` (data/water.dat, set by the app).
     pub water: Option<Arc<crate::water::WaterLevel>>,
+    /// `CPopulation` (random peds), set by the app with the population data.
+    pub population: Option<Box<crate::population::Population>>,
+    /// NPC bodies the population removed this frame (for the app to despawn).
+    pub npc_removed: Vec<EntityId>,
     /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
     pub(crate) gun_fx_toggle: u8,
 }
@@ -248,6 +252,8 @@ impl World {
             bullet_traces: Default::default(),
             projectiles: Default::default(),
             water: None,
+            population: None,
+            npc_removed: Vec::new(),
             gun_fx_toggle: 0,
         }
     }
@@ -406,6 +412,8 @@ impl World {
         ctx.wet_roads = self.weather.wet_roads;
         ctx.now_ms = self.now_ms;
         ctx.cam = self.cam_info();
+        ctx.frame = self.frame;
+        self.update_population();
         self.probe_ped_ground();
         let moving: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))

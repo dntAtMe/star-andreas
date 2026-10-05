@@ -71,6 +71,7 @@ fn apply(
     lit: Query<(Entity, &MeshMaterial3d<StandardMaterial>), With<DynLit>>,
     parents: Query<&ChildOf>,
     peds: Query<&Ped>,
+    npcs: Query<&crate::peds::NpcPed>,
     vehicles: Query<&Vehicle>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -97,6 +98,10 @@ fn apply(
         let mut cur = e;
         for _ in 0..64 {
             if let Ok(p) = peds.get(cur) {
+                owner = Some((p.sa, true));
+                break;
+            }
+            if let Ok(p) = npcs.get(cur) {
                 owner = Some((p.sa, true));
                 break;
             }

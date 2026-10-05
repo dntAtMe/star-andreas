@@ -134,26 +134,27 @@ pub fn frame_transform(f: &dff::Frame) -> Transform {
     Transform { translation: f.pos.into(), rotation: Quat::from_mat3(&m).normalize(), scale: Vec3::ONE }
 }
 
-fn spawn_player(
-    mut commands: Commands,
-    world: Res<WorldRes>,
-    root: Res<GameRoot>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
-    mut sa: ResMut<SaPhys>,
-) -> Result<(), BevyError> {
-    let world = &world.0;
-    let clump = dff::parse(world.file(&format!("{PED_MODEL}.dff")).context("ped dff")?)?;
-    let textures: HashMap<String, (Handle<Image>, bool)> =
-        txd::parse(world.file(&format!("{PED_MODEL}.txd")).context("ped txd")?)?
-            .into_iter()
-            .filter_map(|t| convert_texture(t, false))
-            .map(|t| (t.name.clone(), t.alpha, make_image(t)))
-            .map(|(n, a, img)| (n, (images.add(img), a)))
-            .collect();
+/// The shared CAnimManager (ped.ifp + anim.img blocks) for every ped.
+#[derive(Resource, Clone)]
+pub struct PedAnims(pub Arc<AnimManager>);
 
+/// A ped's skinned model and its anim skeleton.
+pub struct PedVisual {
+    pub model_root: Entity,
+    pub bones: Vec<Entity>,
+    pub node_frames: Vec<usize>,
+    pub anim_clump: Clump,
+}
+
+/// Build a skinned ped model (one mesh per material) and the matching anim clump.
+pub fn build_ped_visual(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    bindposes: &mut Assets<SkinnedMeshInverseBindposes>,
+    clump: &dff::Clump,
+    textures: &HashMap<String, (Handle<Image>, bool)>,
+) -> Result<PedVisual> {
     let geo = clump.geometries.iter().find(|g| g.skin.is_some()).context("ped has no skinned geometry")?;
     let skin = geo.skin.as_ref().unwrap();
     let hroot = clump
@@ -239,25 +240,10 @@ fn spawn_player(
         commands.entity(model_root).add_child(part);
     }
 
-    // CAnimManager: ped.ifp plus the anim.img blocks.
-    let anim_img = Img::open(&root.0.join("anim/anim.img")).ok();
-    let ped_ifp = ifp::parse(&std::fs::read(root.0.join("anim/ped.ifp")).context("ped.ifp")?)?;
-    let anims = Arc::new(AnimManager::load(|block| {
-        if block.eq_ignore_ascii_case("ped") {
-            return Some(ped_ifp.clone());
-        }
-        let data = anim_img.as_ref()?.get(&format!("{}.ifp", block.to_ascii_lowercase()))?;
-        ifp::parse(data).ok()
-    }));
-    // CWeaponInfo::LoadWeaponData.
-    let weapon_dat = sa_formats::weapondat::parse(&std::fs::read(root.0.join("data/weapon.dat")).context("weapon.dat")?)?;
-    let weapons = Arc::new(WeaponInfos::load(&weapon_dat, AnimManager::group_by_name));
-    sa.world.weapon_infos = Some(weapons.clone());
-
     // The anim clump: one frame per HAnim node, parented through the DFF frames.
     let node_frames: Vec<usize> = hroot.nodes.iter().filter_map(|&(id, _, _)| frame_of_node(id)).collect();
     let node_of_frame = |f: usize| node_frames.iter().position(|&n| n == f);
-    let mut anim_clump = Clump::new(
+    let anim_clump = Clump::new(
         hroot
             .nodes
             .iter()
@@ -276,6 +262,48 @@ fn spawn_player(
             })
             .collect(),
     );
+    Ok(PedVisual { model_root, bones, node_frames, anim_clump })
+}
+
+fn spawn_player(
+    mut commands: Commands,
+    world: Res<WorldRes>,
+    root: Res<GameRoot>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    mut sa: ResMut<SaPhys>,
+) -> Result<(), BevyError> {
+    let world = &world.0;
+    let clump = dff::parse(world.file(&format!("{PED_MODEL}.dff")).context("ped dff")?)?;
+    let textures: HashMap<String, (Handle<Image>, bool)> =
+        txd::parse(world.file(&format!("{PED_MODEL}.txd")).context("ped txd")?)?
+            .into_iter()
+            .filter_map(|t| convert_texture(t, false))
+            .map(|t| (t.name.clone(), t.alpha, make_image(t)))
+            .map(|(n, a, img)| (n, (images.add(img), a)))
+            .collect();
+
+    let PedVisual { model_root, bones, node_frames, mut anim_clump } =
+        build_ped_visual(&mut commands, &mut meshes, &mut materials, &mut bindposes, &clump, &textures)?;
+
+    // CAnimManager: ped.ifp plus the anim.img blocks.
+    let anim_img = Img::open(&root.0.join("anim/anim.img")).ok();
+    let ped_ifp = ifp::parse(&std::fs::read(root.0.join("anim/ped.ifp")).context("ped.ifp")?)?;
+    let anims = Arc::new(AnimManager::load(|block| {
+        if block.eq_ignore_ascii_case("ped") {
+            return Some(ped_ifp.clone());
+        }
+        let data = anim_img.as_ref()?.get(&format!("{}.ifp", block.to_ascii_lowercase()))?;
+        ifp::parse(data).ok()
+    }));
+    // CWeaponInfo::LoadWeaponData.
+    let weapon_dat = sa_formats::weapondat::parse(&std::fs::read(root.0.join("data/weapon.dat")).context("weapon.dat")?)?;
+    let weapons = Arc::new(WeaponInfos::load(&weapon_dat, AnimManager::group_by_name));
+    sa.world.weapon_infos = Some(weapons.clone());
+    commands.insert_resource(PedAnims(anims.clone()));
+
     anim_clump.blend_animation(&anims, group::PLAYER, anim_id::IDLE, 1000.0);
 
     let spawn: Vec<f32> =
@@ -486,7 +514,7 @@ fn player_control(
 // ---------------------------------------------------------------- animation
 
 /// Copy the SA anim clump's pose (interpolated between physics steps) onto the bones.
-fn animate_ped(sa: Res<SaPhys>, peds: Query<&Ped>, mut bones: Query<&mut Transform, Without<Ped>>) {
+fn animate_ped(sa: Res<SaPhys>, peds: Query<&Ped>, mut bones: Query<&mut Transform, (Without<Ped>, Without<crate::peds::NpcPed>)>) {
     let alpha = sa.alpha();
     for ped in &peds {
         let Some(logic) = sa.logic::<PedLogic>(ped.sa) else { continue };
