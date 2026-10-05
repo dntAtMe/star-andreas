@@ -214,6 +214,8 @@ pub struct World {
     pub(crate) gun_fx_toggle: u8,
     /// `CVehicleAnimGroup` special flags per handling anim group (handling.cfg `^` rows).
     pub veh_anim_flags: Vec<u32>,
+    /// The `CVehicleAnimGroup`s (handling.cfg `^` rows) by id.
+    pub veh_anim_groups: Vec<sa_formats::vehicle::VehicleAnimGroup>,
     /// `g_breakMan`: pieces of broken breakable objects.
     pub breaks: crate::breakable::BreakManager,
     /// `CDecisionMakerTypes` (set by the app with the population data).
@@ -275,6 +277,7 @@ impl World {
             traffic: None,
             gun_fx_toggle: 0,
             veh_anim_flags: Vec::new(),
+            veh_anim_groups: Vec::new(),
             breaks: Default::default(),
             decisions: None,
             ped_events: Vec::new(),
@@ -502,6 +505,7 @@ impl World {
 
         // CPedIntelligence::ProcessAfterProcCol: seated peds follow their vehicle.
         self.process_peds_in_vehicles(ts);
+        self.process_peds_entering(ts);
         self.process_effects(ts);
         // CGame::Process: g_breakMan.Update after the world.
         self.process_breaks(ts);

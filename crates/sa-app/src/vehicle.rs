@@ -70,6 +70,7 @@ struct VehicleDb {
     bikes: HashMap<String, RawBikeHandling>,
     /// `CVehicleAnimGroup` special flags by id (`^` rows).
     anim_flags: Vec<u32>,
+    anim_groups: Vec<vehicle::VehicleAnimGroup>,
     colors: CarColors,
     /// models/generic/vehicle.txd: shared textures (lights, grunge, ...).
     generic: HashMap<String, (Handle<Image>, bool)>,
@@ -175,9 +176,12 @@ fn load_vehicle_db(mut commands: Commands, root: Res<GameRoot>, mut images: ResM
     let boats = vehicle::parse_boat_handling(&handling_cfg);
     let bikes = vehicle::parse_bike_handling(&handling_cfg);
     let mut anim_flags = vec![0u32; 30];
+    let mut anim_groups = vec![vehicle::VehicleAnimGroup::default(); 30];
     for g in vehicle::parse_vehicle_anim_groups(&handling_cfg) {
         if let Some(f) = anim_flags.get_mut(g.id as usize) {
             *f = g.special_flags;
+            let i = g.id as usize;
+            anim_groups[i] = g;
         }
     }
     let colors = vehicle::parse_carcols(&read("data/carcols.dat")?);
@@ -186,7 +190,7 @@ fn load_vehicle_db(mut commands: Commands, root: Res<GameRoot>, mut images: ResM
         defs.values().filter(|d: &&VehicleDef| d.kind.eq_ignore_ascii_case("car")).map(|d| d.model.clone()).collect();
     models.sort();
     commands.insert_resource(VehicleModels(models));
-    commands.insert_resource(VehicleDb { defs, handling, boats, bikes, anim_flags, colors, generic, next_spawn: 0 });
+    commands.insert_resource(VehicleDb { defs, handling, boats, bikes, anim_flags, anim_groups, colors, generic, next_spawn: 0 });
     Ok(())
 }
 
@@ -465,7 +469,14 @@ fn spawn_vehicle(
         .unwrap_or(Vec3::ZERO);
     if sa.world.veh_anim_flags.is_empty() {
         sa.world.veh_anim_flags = db.anim_flags.clone();
+        sa.world.veh_anim_groups = db.anim_groups.clone();
     }
+    let rear_seat = clump
+        .frames
+        .iter()
+        .position(|f| f.name.eq_ignore_ascii_case("ped_backseat"))
+        .map(|i| Vec3::from(clump.frame_world(i).1))
+        .unwrap_or(Vec3::ZERO);
 
     // SA physics body.
     let dummy_of = |n: &str| {
@@ -534,6 +545,8 @@ fn spawn_vehicle(
             auto.door_hinges[d] = Some(c.model.pos);
         }
     }
+    auto.seat_front = front_seat;
+    auto.seat_rear = rear_seat;
     // Vehicle structure dummies (PreprocessHierarchy 0x4C8E60): the frame position taken
     // through every ancestor except the root; (0,0,0) when missing.
     let structure_dummy = |n: &str| {
@@ -796,6 +809,8 @@ fn debug_damage(
 
 fn enter_exit(
     mut commands: Commands,
+    time: Res<Time>,
+    mut auto_enter: Local<bool>,
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
     mut driving: ResMut<Driving>,
@@ -825,16 +840,33 @@ fn enter_exit(
         }
         return;
     }
-    if !keys.just_pressed(KeyCode::KeyF) || *mode != Mode::Walk {
+    // The enter task seated the ped: follow the car.
+    let seated = sa.logic::<sa_physics::ped::PedLogic>(ped.sa).and_then(|p| p.vehicle.as_ref().map(|v| v.veh));
+    if let Some(veh) = seated {
+        if let Some((car, _, _)) = cars.iter().find(|(_, _, v)| v.sa == veh) {
+            driving.0 = Some(car);
+            commands.entity(ped_e).remove::<CamFollow>();
+            commands.entity(car).insert(CamFollow { height: 1.2, dist: 7.0 });
+        }
         return;
     }
-    let nearest = cars
-        .iter()
-        .map(|(e, tf, _)| (e, tf.translation.distance(ped_tf.translation)))
-        .filter(|(_, d)| *d < 5.0)
-        .min_by(|a, b| a.1.total_cmp(&b.1));
-    if let Some((car, _)) = nearest {
-        let Ok((_, _, v)) = cars.get(car) else { return };
+    let entering = sa.logic::<sa_physics::ped::PedLogic>(ped.sa).is_some_and(|p| p.enter.is_some());
+    // SA_AUTOENTER=<secs>: press enter once at that time (debug).
+    let auto = !*auto_enter
+        && std::env::var("SA_AUTOENTER").ok().and_then(|v| v.parse::<f32>().ok()).is_some_and(|t| time.elapsed_secs() > t);
+    if auto {
+        *auto_enter = true;
+    }
+    if !(keys.just_pressed(KeyCode::KeyF) || auto) || *mode != Mode::Walk || entering {
+        return;
+    }
+    // CPlayerInfo::Process: the best vehicle in the 10 m box; cars get the enter task, the
+    // others are still warped in.
+    let Some(veh) = sa.world.find_car_to_enter(ped.sa) else { return };
+    if sa.world.start_enter_car(ped.sa, veh) {
+        return;
+    }
+    if let Some((car, _, v)) = cars.iter().find(|(_, _, v)| v.sa == veh) {
         if sa.world.set_ped_in_car_direct(ped.sa, v.sa, v.front_seat) {
             driving.0 = Some(car);
             commands.entity(ped_e).remove::<CamFollow>();

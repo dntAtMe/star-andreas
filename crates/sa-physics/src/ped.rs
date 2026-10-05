@@ -117,6 +117,8 @@ pub struct PedLogic {
     pub vehicle: Option<crate::incar::InVehicle>,
     /// Knocked down by the player's car this frame (the run-over crime).
     pub run_over_by_player: bool,
+    /// CTaskComplexEnterCarAsDriver (the player getting into a car).
+    pub enter: Option<crate::entercar::EnterCar>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -158,6 +160,7 @@ impl PedLogic {
             npc: None,
             vehicle: None,
             run_over_by_player: false,
+            enter: None,
         }
     }
 
@@ -310,8 +313,26 @@ impl BodyLogic for PedLogic {
             self.tasks.cam_request = 0;
         }
 
+        // CTaskComplexEnterCar 800 GoToCarDoorAndStandStill: run to the door point.
+        if let (Some(e), Some(clump), Some(m)) = (self.enter.as_mut(), self.clump.as_deref_mut(), self.tasks.anims.clone()) {
+            if e.stage == crate::entercar::Stage::GoTo && !busy {
+                let d = (e.target - p.matrix.pos).truncate();
+                if self.tasks.pad.enter_exit_just_down && ctx.now_ms > e.started_ms() + 100 || ctx.now_ms > e.started_ms() + 30000 {
+                    e.cancel = true;
+                } else if d.length_squared() < 0.5 * 0.5 {
+                    e.reached = true;
+                } else {
+                    self.aim_rot = limit_radian_angle(crate::pedtask::radian_angle_between_points(e.target.x, e.target.y, p.matrix.pos.x, p.matrix.pos.y));
+                    if clump.get(crate::anim::anim_id::RUN).is_none_or(|a| a.blend < 1.0 && a.blend_delta <= 0.0) {
+                        clump.blend_animation(&m, self.tasks.anim_group, crate::anim::anim_id::RUN, 4.0);
+                    }
+                    self.tasks.move_state = 6;
+                }
+                self.tasks.pad.clear_just_down();
+            }
+        }
         // Step 11: CPedIntelligence::Process (the player's tasks).
-        if self.is_player && self.tasks.anims.is_some() && !busy {
+        if self.is_player && self.tasks.anims.is_some() && !busy && self.enter.is_none() {
             if let Some(clump) = self.clump.as_deref_mut() {
                 let mut core = PedCore {
                     p,

@@ -138,6 +138,12 @@ impl Hierarchy {
             .collect();
         Self { name: a.name.clone(), total_length: total, seqs }
     }
+
+    /// The root (first sequence) translation of the last key frame
+    /// (`ComputeAnimDoorOffsets`).
+    pub fn root_end_translation(&self) -> Vec3 {
+        self.seqs.first().filter(|s| s.has_trans).and_then(|s| s.keys.last()).map_or(Vec3::ZERO, |k| k.t)
+    }
 }
 
 /// Group id → anims (`CAnimBlendAssocGroup`), each with its definition flags.

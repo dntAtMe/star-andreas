@@ -18,6 +18,7 @@ pub mod colpoint;
 pub mod damage;
 pub mod duck;
 pub mod effects;
+pub mod entercar;
 pub mod explosion;
 pub mod fire;
 pub mod fxhelpers;

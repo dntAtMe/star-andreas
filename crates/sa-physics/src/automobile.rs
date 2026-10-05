@@ -234,6 +234,8 @@ pub struct VehicleHandling {
     pub flags: u32,
     /// `CVehicleAnimGroup` index (handling +0xDE).
     pub anim_group: u8,
+    /// handling +0xD4 SeatOffsetDistance.
+    pub seat_offset: f32,
     /// Converted collision damage multiplier (raw * 2000 / mass).
     pub collision_damage: f32,
     /// `fBuoyancyConstant` = mass·0.8 / nPercentSubmerged.
@@ -315,6 +317,7 @@ impl VehicleHandling {
             model_flags: h.model_flags,
             flags: h.handling_flags,
             anim_group: h.anim_group,
+            seat_offset: h.seat_offset,
             collision_damage: 1.0 / h.mass * h.collision_damage * 2000.0,
             buoyancy_constant: h.mass * 0.8 / h.percent_submerged.max(1.0),
             engine_type: h.engine_type,
@@ -399,6 +402,12 @@ pub struct Automobile {
     pub damage: CarDamage,
     /// Model-space door hinge positions (eDoors order), set by the app from the DFF.
     pub door_hinges: [Option<Vec3>; 6],
+    /// Vehicle struct dummies `ped_frontseat` / `ped_backseat` (model space, +x side). Set by
+    /// the app.
+    pub seat_front: Vec3,
+    pub seat_rear: Vec3,
+    /// +0x486 door-in-use flags by eDoors bit (a ped is opening / closing it).
+    pub doors_in_use: u8,
     /// Vehicle structure dummies 7 ("engine") and 0 ("headlights"), model space,
     /// (0,0,0) when the DFF lacks them. Set by the app.
     pub engine_pos: Vec3,
@@ -502,6 +511,9 @@ impl Automobile {
             steer_angle2: 0.0,
             damage,
             door_hinges: [None; 6],
+            seat_front: Vec3::ZERO,
+            seat_rear: Vec3::ZERO,
+            doors_in_use: 0,
             engine_pos: Vec3::ZERO,
             headlights_pos: Vec3::ZERO,
             colour: [255; 4],
@@ -1188,7 +1200,13 @@ impl BodyLogic for Automobile {
         self.damage.process_fire(p, ts);
         // PreRender: swinging doors / bonnet.
         let ok = matches!(p.status, Status::Player | Status::Physics | Status::Abandoned);
-        let hinges = self.door_hinges;
+        // Doors a ped is using are driven by its anims, not swung.
+        let mut hinges = self.door_hinges;
+        for (d, h) in hinges.iter_mut().enumerate() {
+            if self.doors_in_use & (1 << d) != 0 {
+                *h = None;
+            }
+        }
         self.damage.process_doors(p, ts, &hinges, ok);
 
         self.update_wheel_visuals(p, col, ts);
