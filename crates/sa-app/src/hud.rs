@@ -36,7 +36,47 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_hud).add_systems(PostUpdate, draw_hud);
+        app.init_resource::<Overlay>().add_systems(Startup, setup_hud).add_systems(PostUpdate, draw_hud);
+    }
+}
+
+/// Script / cutscene presentation state the HUD draws: widescreen bars
+/// (`ProcessWideScreenOn`), the current brief (subtitle), the screen fade (`CCamera::Fade`)
+/// and the mission GXT table (`CText::LoadMissionText`).
+#[derive(Resource, Default)]
+pub struct Overlay {
+    pub widescreen: bool,
+    /// GXT key of the current brief.
+    pub subtitle: Option<String>,
+    /// Black alpha 0..1 and its target / rate (per second).
+    pub fade: f32,
+    fade_target: f32,
+    fade_rate: f32,
+    /// The mission table to load (`054C`); loaded by the HUD when it changes.
+    pub mission_table: Option<String>,
+}
+
+impl Overlay {
+    /// Fade toward `target` (1 = black) over `secs` (0 = at once).
+    pub fn fade_to(&mut self, target: f32, secs: f32) {
+        self.fade_target = target;
+        if secs <= 0.0 {
+            self.fade = target;
+            self.fade_rate = 0.0;
+        } else {
+            self.fade_rate = 1.0 / secs;
+        }
+    }
+
+    /// Fading still in progress (`GetFading`).
+    pub fn fading(&self) -> bool {
+        self.fade != self.fade_target
+    }
+
+    fn step(&mut self, dt: f32) {
+        let d = self.fade_target - self.fade;
+        let s = self.fade_rate * dt;
+        self.fade = if d.abs() <= s || self.fade_rate == 0.0 { self.fade_target } else { self.fade + s * d.signum() };
     }
 }
 
@@ -85,6 +125,8 @@ struct DrawList {
     quads: Vec<Quad>,
     /// Glyph quads are buffered and drawn after everything else (RenderFontBuffer at DrawFonts).
     text: Vec<Quad>,
+    /// The screen fade, over everything.
+    top: Vec<Quad>,
 }
 
 impl DrawList {
@@ -529,6 +571,8 @@ struct Popup {
 struct HudState {
     last_level: i32,
     popups: NamePopups,
+    /// The loaded mission GXT table.
+    table: Option<String>,
     pool: Vec<(Entity, Handle<Mesh>, Handle<ColorMaterial>)>,
 }
 
@@ -832,7 +876,7 @@ fn srgb_col(c: [u8; 4]) -> [f32; 4] {
 #[allow(clippy::too_many_arguments)]
 fn draw_hud(
     mut commands: Commands,
-    assets: Option<Res<HudAssets>>,
+    assets: Option<ResMut<HudAssets>>,
     sa: Res<SaPhys>,
     window: Single<&Window>,
     ped: Single<&Ped>,
@@ -845,11 +889,18 @@ fn draw_hud(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut st: Local<HudState>,
-    time: Res<Time>,
+    (time, mut overlay, root): (Res<Time>, ResMut<Overlay>, Res<GameRoot>),
     mut hud_meshes: Query<(&mut Transform, &mut Visibility), With<HudMesh>>,
 ) {
-    let HudState { last_level, popups, pool } = &mut *st;
-    let Some(assets) = assets else { return };
+    let HudState { last_level, popups, pool, table } = &mut *st;
+    let Some(mut assets) = assets else { return };
+    if overlay.mission_table != *table {
+        *table = overlay.mission_table.clone();
+        if let (Some(name), Ok(d)) = (table.as_deref(), std::fs::read(root.0.join("text/american.gxt"))) {
+            assets.gxt.load_mission(&d, name);
+        }
+    }
+    overlay.step(time.delta_secs());
     let sc = Scale { w: window.width(), h: window.height() };
     let (w, _h) = (sc.w, sc.h);
     let mut out = DrawList::default();
@@ -1053,9 +1104,40 @@ fn draw_hud(
         draw_radar(&mut out, &sc, &assets, &sa.world, origin, heading, veh.is_some(), speed, &mut load_tile);
     }
 
+    // Widescreen (cutscenes): the HUD is suppressed; the bars and the subtitle instead.
+    if overlay.widescreen {
+        out.quads.clear();
+        out.text.clear();
+        // DrawBordersForWideScreen with GetScreenRect at 30 %.
+        let h = sc.h;
+        let top = (h as i32 / 2) as f32 * 0.3 - h / 448.0 * 22.0;
+        let bottom = h - (h as i32 / 2) as f32 * 0.3 - h / 448.0 * 14.0;
+        out.rect(-5.0, -5.0, w + 5.0, top, [0, 0, 0, 255]);
+        out.rect(-5.0, bottom, w + 5.0, sc.h + 5.0, [0, 0, 0, 255]);
+        // CHud::DrawSubtitles.
+        if let Some(key) = overlay.subtitle.as_deref() {
+            let mut f = Font::new(w);
+            f.set_font_style(1);
+            f.set_orientation(0);
+            f.proportional = true;
+            f.set_drop_shadow(0);
+            f.colour = [225, 225, 225, 255];
+            f.set_edge(2);
+            f.drop = [0, 0, 0, 255];
+            f.centre_size = w - w / 640.0 * 60.0;
+            f.scale = (w / 640.0 * 0.58, sc.h / 448.0 * 1.2);
+            let text = assets.gxt.get(key).to_vec();
+            assets.data.print_string(&mut f, &sc, (w as i32 / 2) as f32, sc.h - sc.h / 448.0 * 80.0, &text, &mut out);
+        }
+    }
+    if overlay.fade > 0.0 {
+        let a = (overlay.fade * 255.0) as u8;
+        out.top.push(Quad { tex: Tex::White, l: -5.0, t: -5.0, r: w + 5.0, b: sc.h + 5.0, uv: [[0.0; 2]; 4], col: [0, 0, 0, a], fan: Vec::new() });
+    }
+
     // Build one mesh per texture; z orders the immediate quads under the buffered text.
     let mut groups: Vec<(Tex, Vec<&Quad>, f32)> = Vec::new();
-    for (list, z) in [(&out.quads, 0.0), (&out.text, 10.0)] {
+    for (list, z) in [(&out.quads, 0.0), (&out.text, 10.0), (&out.top, 20.0)] {
         for q in list.iter() {
             match groups.iter_mut().find(|g| g.0 == q.tex && g.2 == z) {
                 Some(g) => g.1.push(q),

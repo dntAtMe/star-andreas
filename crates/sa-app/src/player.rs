@@ -34,7 +34,7 @@ use crate::{
     world::{WorldRes, b2g, g2b},
 };
 
-const PED_MODEL: &str = "fam1";
+pub(crate) const PED_MODEL: &str = "fam1";
 
 pub struct PlayerPlugin;
 
@@ -391,7 +391,7 @@ fn cursor_lock(
     cursor.visible = !lock.0;
 }
 
-fn player_control(
+pub(crate) fn player_control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -548,7 +548,7 @@ fn animate_ped(
 
 // ---------------------------------------------------------------- camera
 
-fn orbit_camera(
+pub(crate) fn orbit_camera(
     time: Res<Time>,
     lock: Res<MouseLock>,
     motion: Res<AccumulatedMouseMotion>,

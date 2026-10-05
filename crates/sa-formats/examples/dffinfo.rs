@@ -2,7 +2,7 @@
 use sa_formats::{bin::Reader, dff, img::Img, rw};
 fn main() -> anyhow::Result<()> {
     let root = std::path::PathBuf::from(r"G:\Programy\Steam\steamapps\common\Grand Theft Auto San Andreas");
-    let img = Img::open(&root.join("models/gta3.img"))?;
+    let img = Img::open(&root.join(std::env::var("SA_IMG").unwrap_or("models/gta3.img".into())))?;
     let name = std::env::args().nth(1).unwrap();
     let data = img.get(&format!("{name}.dff")).unwrap();
     let c = dff::parse(data)?;

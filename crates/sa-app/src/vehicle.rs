@@ -61,7 +61,7 @@ impl Plugin for VehiclePlugin {
 pub struct Driving(pub Option<Entity>);
 
 #[derive(Resource)]
-struct VehicleDb {
+pub(crate) struct VehicleDb {
     defs: HashMap<String, VehicleDef>,
     handling: HashMap<String, Handling>,
     /// `%` lines (tBoatHandlingData).
@@ -73,7 +73,7 @@ struct VehicleDb {
     anim_groups: Vec<vehicle::VehicleAnimGroup>,
     colors: CarColors,
     /// models/generic/vehicle.txd: shared textures (lights, grunge, ...).
-    generic: HashMap<String, (Handle<Image>, bool)>,
+    pub(crate) generic: HashMap<String, (Handle<Image>, bool)>,
     next_spawn: usize,
 }
 
@@ -223,7 +223,7 @@ fn paint_of(c: [u8; 4]) -> Paint {
 }
 
 /// Mesh of one geometry split per material, in the geometry's own frame space.
-fn geometry_meshes(geo: &dff::Geometry) -> Vec<(usize, Mesh)> {
+pub(crate) fn geometry_meshes(geo: &dff::Geometry) -> Vec<(usize, Mesh)> {
     let mut out = Vec::new();
     for mi in 0..geo.materials.len() {
         let mut remap = vec![u32::MAX; geo.positions.len()];

@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod bin;
 pub mod col;
+pub mod cutscene;
 pub mod dat;
 pub mod decision;
 pub mod dff;

@@ -180,7 +180,7 @@ fn collide(cam: &mut SaCam, sa: &mut SaPhys, pivot: Vec3, source: Vec3, ped_e: E
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sa_camera(
+pub(crate) fn sa_camera(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     lock: Res<MouseLock>,

@@ -4,6 +4,7 @@ mod camera;
 mod debug;
 mod colour_filter;
 mod coronas;
+mod cutscene;
 mod fx;
 mod gfx;
 mod heat_haze;
@@ -102,7 +103,7 @@ fn main() -> anyhow::Result<()> {
         lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
-    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin, breaks::BreaksPlugin, hud::HudPlugin, target_tri::TargetTrianglePlugin, gfx::GfxPlugin, audio::AudioPlugin))
+    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin, breaks::BreaksPlugin, hud::HudPlugin, target_tri::TargetTrianglePlugin, gfx::GfxPlugin, audio::AudioPlugin, cutscene::CutscenePlugin))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);
@@ -310,7 +311,19 @@ fn auto_screenshot(
     let settled = s.pending == 0 && s.models_loading == 0 && s.spawned > 0;
     *idle = if settled { *idle + time.delta_secs() } else { 0.0 };
     // SA_SHOT_AFTER=<secs>: shoot at a fixed time instead of when streaming settles.
-    let after: Option<f32> = std::env::var("SA_SHOT_AFTER").ok().and_then(|v| v.parse().ok());
+    // SA_SHOT_AFTER=<s1>,<s2>,...: several shots, `{}` in the path replaced by the index.
+    let times: Vec<f32> = std::env::var("SA_SHOT_AFTER").unwrap_or_default().split(',').filter_map(|v| v.trim().parse().ok()).collect();
+    if times.len() > 1 {
+        let k = (*state as usize).min(times.len());
+        if k < times.len() && time.elapsed_secs() > times[k] {
+            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.replace("{}", &k.to_string())));
+            *state += 1;
+        } else if k == times.len() && time.elapsed_secs() > times[k - 1] + 1.5 {
+            exit.write(AppExit::Success);
+        }
+        return;
+    }
+    let after: Option<f32> = times.first().copied();
     let due = match after {
         Some(t) => time.elapsed_secs() > t,
         None => *idle > 1.5 || time.elapsed_secs() > 90.0,
