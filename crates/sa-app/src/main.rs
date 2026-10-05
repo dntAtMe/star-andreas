@@ -1,3 +1,4 @@
+mod breaks;
 mod camera;
 mod debug;
 mod colour_filter;
@@ -92,7 +93,7 @@ fn main() -> anyhow::Result<()> {
         lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
-    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin))
+    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin, breaks::BreaksPlugin))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);

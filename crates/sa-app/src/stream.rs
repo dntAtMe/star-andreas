@@ -128,6 +128,8 @@ struct ColSet {
     /// 2dfx lights (positions in GTA model space) and the model name.
     lights: Arc<Vec<dff::Light2d>>,
     name: Arc<str>,
+    /// BreakablePlugin data of the intact atomic.
+    breakable: Option<Arc<dff::Breakable>>,
 }
 
 enum ModelState {
@@ -189,6 +191,7 @@ fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
                 let clump = dff::parse(data)?;
                 let parts = build_parts(&clump)?;
                 let mut cols = ColSet { lights: Arc::new(model_lights(&clump)), name: obj.model.as_str().into(), ..Default::default() };
+                cols.breakable = clump.geometries.iter().find_map(|g| g.breakable.clone()).map(Arc::new);
                 if let Some(c) = world.col(&obj.model) {
                     let m = col::parse_model(c)?;
                     cols.sa = Some(Arc::new(SaColModel::from_col(&m)));
@@ -443,6 +446,7 @@ fn finalize_models(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WorldMaterial>>,
     globals: Res<WorldGlobals>,
+    mut break_tex: ResMut<crate::breaks::BreakTextures>,
 ) {
     let bc = formats.is_some_and(|f| f.0.contains(CompressedImageFormats::BC));
     let parsed: Vec<u32> = cache
@@ -479,6 +483,19 @@ fn finalize_models(
         }
 
         let Some(ModelState::Parsed(cpu, cols)) = cache.models.remove(&id) else { continue };
+        if let Some(b) = &cols.breakable {
+            let texs = b
+                .tex_names
+                .iter()
+                .map(|name| {
+                    chain.iter().find_map(|t| match cache.txds.get(t) {
+                        Some(TxdState::Ready(m)) => m.get(&name.to_ascii_lowercase()).map(|e| e.image.clone()),
+                        _ => None,
+                    })
+                })
+                .collect();
+            break_tex.0.insert(Arc::as_ptr(b) as usize, texs);
+        }
         let mut parts = Vec::with_capacity(cpu.len());
         for p in cpu {
             let tex = p.texture.as_ref().and_then(|name| {
@@ -595,7 +612,8 @@ fn stream_instances(
                     match model.cols.prop {
                         Some(op) => {
                             let mut p = Physical::new(EntityType::Object, m);
-                            let logic = ObjectLogic::new(op, &model.cols.name.to_ascii_lowercase());
+                            let mut logic = ObjectLogic::new(op, &model.cols.name.to_ascii_lowercase());
+                            logic.breakable = model.cols.breakable.clone();
                             logic.setup_physical(&mut p);
                             let id = sa.world.add_body(p, (**sa_col).clone(), Box::new(logic));
                             ec.insert(SaBody::new(id, m));

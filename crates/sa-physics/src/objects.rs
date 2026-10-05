@@ -3,8 +3,8 @@
 //! TryToExplode / Explode, the hit / destroy FX, and the damage taken from bullets, melee,
 //! explosions and collisions (the callers are in the world code).
 //!
-//! Not ported: the breakable pieces (BreakManager_c / BreakablePlugin — breakables just
-//! vanish), glass (CGlass), ObjectFireDamage, the dummy ↔ object respawn beyond 80 m,
+//! Breakables with BreakablePlugin data fall apart into pieces (breakable.rs).
+//! Not ported: glass (CGlass), ObjectFireDamage, the dummy ↔ object respawn beyond 80 m,
 //! special collision responses (doors, hanging objects, pool balls), lamppost tilt ignore.
 
 use glam::Vec3;
@@ -36,6 +36,10 @@ pub struct ObjectLogic {
     pub flags: u32,
     pub last_weapon: u8,
     explode: bool,
+    /// The model's BreakablePlugin data (set by the app).
+    pub breakable: Option<std::sync::Arc<sa_formats::dff::Breakable>>,
+    /// `BreakManager_c::Add(this, breakVel, velRand, smash)` to send this frame.
+    pending_break: Option<bool>,
     /// (FX name, position, normal) to start this frame.
     fx: Vec<(&'static str, Vec3, Option<Vec3>)>,
 }
@@ -55,6 +59,8 @@ impl ObjectLogic {
             flags: if lamppost { of::LAMPPOST } else { 0 },
             last_weapon: 0xFF,
             explode: false,
+            breakable: None,
+            pending_break: None,
             fx: Vec::new(),
         }
     }
@@ -148,7 +154,8 @@ impl ObjectLogic {
                     }
                 }
                 200 | 202 => {
-                    // BreakManager_c::Add (pieces not ported), then HIDE.
+                    // BreakManager_c::Add (sent from process_effects), then HIDE.
+                    self.pending_break = Some(dmg * mult >= self.info.smash_multiplier * 150.0);
                     self.hide(p);
                     self.flags |= of::BROKEN;
                     changed = true;
@@ -216,7 +223,7 @@ impl BodyLogic for ObjectLogic {
     }
 
     /// `CObject::Explode` (0x5A1340) and the queued FX.
-    fn process_effects(&mut self, id: EntityId, p: &mut Physical, _col: &crate::collision::ColModel, f: &mut FrameFx) {
+    fn process_effects(&mut self, id: EntityId, p: &mut Physical, col: &crate::collision::ColModel, f: &mut FrameFx) {
         if self.explode {
             self.explode = false;
             let mut at = p.matrix.pos;
@@ -231,6 +238,10 @@ impl BodyLogic for ObjectLogic {
                 no_damage: false,
             });
             if matches!(self.info.damage_effect, 200 | 202) {
+                // ObjectDamage(10000) of the breakable.
+                if !self.hidden {
+                    self.pending_break = Some(10000.0 * self.info.damage_mult >= self.info.smash_multiplier * 150.0);
+                }
                 self.hide(p);
                 self.flags |= of::BROKEN;
             } else if p.flags & pf::DISABLE_COLLISION_FORCE == 0 {
@@ -244,6 +255,19 @@ impl BodyLogic for ObjectLogic {
                     let at = p.matrix.transform(Vec3::from(self.info.fx_offset));
                     self.fx.push((name, at, None));
                 }
+            }
+        }
+        if let Some(smash) = self.pending_break.take() {
+            if let Some(data) = &self.breakable {
+                f.requests.push(WorldRequest::BreakObject(crate::breakable::BreakRequest {
+                    data: data.clone(),
+                    matrix: p.matrix,
+                    bbox: (col.bbox_min, col.bbox_max),
+                    vel: Vec3::from(self.info.break_velocity),
+                    vel_rand: self.info.break_velocity_rand,
+                    smash,
+                    sparks: self.info.sparks_on_impact,
+                }));
             }
         }
         for (name, at, n) in self.fx.drain(..) {

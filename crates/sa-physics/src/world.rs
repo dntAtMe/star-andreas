@@ -214,6 +214,8 @@ pub struct World {
     pub(crate) gun_fx_toggle: u8,
     /// `CVehicleAnimGroup` special flags per handling anim group (handling.cfg `^` rows).
     pub veh_anim_flags: Vec<u32>,
+    /// `g_breakMan`: pieces of broken breakable objects.
+    pub breaks: crate::breakable::BreakManager,
 }
 
 impl Default for World {
@@ -265,6 +267,7 @@ impl World {
             traffic: None,
             gun_fx_toggle: 0,
             veh_anim_flags: Vec::new(),
+            breaks: Default::default(),
         }
     }
 
@@ -486,6 +489,47 @@ impl World {
         // CPedIntelligence::ProcessAfterProcCol: seated peds follow their vehicle.
         self.process_peds_in_vehicles(ts);
         self.process_effects(ts);
+        // CGame::Process: g_breakMan.Update after the world.
+        self.process_breaks(ts);
+    }
+
+    /// `BreakManager_c::Add`: the ground under the object is a vertical line against buildings.
+    fn add_break(&mut self, req: &crate::breakable::BreakRequest) {
+        let amb = self.timecycle.as_ref().map_or(Vec3::ZERO, |t| t.current.ambient) * 255.0;
+        let mut breaks = std::mem::take(&mut self.breaks);
+        let mut rng = std::mem::replace(&mut self.rng, crate::damage::Rand::new(1));
+        breaks.add(req, amb, &mut rng, |p| {
+            let o = LosOpts { bodies: false, peds: false, ..Default::default() };
+            self.process_line_of_sight(p, Vec3::new(p.x, p.y, -1000.0), &o).map(|(_, _, cp)| (cp.point.z, cp.normal))
+        });
+        self.rng = rng;
+        self.breaks = breaks;
+    }
+
+    fn process_breaks(&mut self, ts: f32) {
+        if self.breaks.objects.is_empty() {
+            return;
+        }
+        let mut requests = Vec::new();
+        let mut f = FrameFx {
+            fx: &mut self.effects,
+            requests: &mut requests,
+            now_ms: self.now_ms,
+            frame: self.frame,
+            ts,
+            rng: &mut self.rng,
+            cam: self.camera_pos,
+            cam_planes: self.camera_planes,
+            wet_roads: self.weather.wet_roads,
+            foggyness: self.weather.foggyness,
+            hours: self.clock.hours,
+            minutes: self.clock.minutes,
+            cam_fwd: self.camera_fwd,
+            sprite_brightness: self.timecycle.as_ref().map_or(10.0, |t| t.current.sprite_brightness),
+            player_in_vehicle: false,
+            surfaces: &self.surfaces,
+        };
+        self.breaks.update(ts, &mut f);
     }
 
     /// Body effect hooks, their world requests, then explosions and fires.
@@ -556,6 +600,7 @@ impl World {
                 }
                 WorldRequest::Detonate => self.use_detonator(),
                 WorldRequest::MeleeStrike(s) => self.melee_strike(s),
+                WorldRequest::BreakObject(b) => self.add_break(&b),
             }
         }
         self.bullet_traces.update(self.now_ms);

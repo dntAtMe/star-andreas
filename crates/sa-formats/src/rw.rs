@@ -27,6 +27,7 @@ pub mod id {
     pub const EFFECT_2D: u32 = 0x0253_F2F8;
     pub const EXTRA_VERT_COLOUR: u32 = 0x0253_F2F9;
     pub const COLLISION: u32 = 0x0253_F2FA;
+    pub const BREAKABLE: u32 = 0x0253_F2FD;
     pub const NODE_NAME: u32 = 0x0253_F2FE;
 }
 

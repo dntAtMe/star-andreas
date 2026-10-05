@@ -196,7 +196,7 @@ impl Effects {
 
 /// Things a body asks the world to do after its ProcessControl (they need other
 /// entities, which a body's own logic cannot reach).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum WorldRequest {
     /// `CExplosion::AddExplosion(victim, creator, type, pos, lifetime, makeSound, camShake, noDamage)`.
     Explosion {
@@ -235,6 +235,8 @@ pub enum WorldRequest {
     Detonate,
     /// `CTaskSimpleFight::FightStrike` (the owner is filled in by the ped).
     MeleeStrike(crate::melee::Strike),
+    /// `BreakManager_c::Add` of a broken breakable object.
+    BreakObject(crate::breakable::BreakRequest),
 }
 
 /// `eExplosionType`.

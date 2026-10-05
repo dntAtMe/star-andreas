@@ -72,6 +72,60 @@ pub struct Geometry {
     pub skin: Option<Skin>,
     /// 2D effects (plugin 0x253F2F8); only lights are decoded, other types are skipped.
     pub lights: Vec<Light2d>,
+    /// BreakablePlugin (0x253F2FD) data: the pieces a breakable object shatters into.
+    pub breakable: Option<Breakable>,
+}
+
+/// BreakablePlugin geometry data (object_damage.md §3.1): its own triangle soup with baked
+/// vertex colours and per-material textures.
+#[derive(Debug, Clone, Default)]
+pub struct Breakable {
+    /// 0: probe the ground from the frame position, else from the bbox centre.
+    pub position_rule: u32,
+    pub vertices: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub colors: Vec<[u8; 4]>,
+    pub triangles: Vec<[u16; 3]>,
+    pub tri_material: Vec<u16>,
+    pub tex_names: Vec<String>,
+    pub mask_names: Vec<String>,
+    pub mat_colors: Vec<[f32; 3]>,
+}
+
+/// Stream: a u32 "present" flag, the 0x34-byte in-memory header, then the arrays.
+fn parse_breakable(mut r: Reader) -> Result<Option<Breakable>> {
+    if r.u32()? == 0 {
+        return Ok(None);
+    }
+    let h = r.bytes(0x34)?;
+    let u16_at = |o: usize| u16::from_le_bytes([h[o], h[o + 1]]) as usize;
+    let (nv, nt, nm) = (u16_at(4), u16_at(0x14), u16_at(0x20));
+    let mut b = Breakable { position_rule: u32::from_le_bytes([h[0], h[1], h[2], h[3]]), ..Default::default() };
+    for _ in 0..nv {
+        b.vertices.push(r.vec3()?);
+    }
+    for _ in 0..nv {
+        b.uvs.push([r.f32()?, r.f32()?]);
+    }
+    for _ in 0..nv {
+        b.colors.push([r.u8()?, r.u8()?, r.u8()?, r.u8()?]);
+    }
+    for _ in 0..nt {
+        b.triangles.push([r.u16()?, r.u16()?, r.u16()?]);
+    }
+    for _ in 0..nt {
+        b.tri_material.push(r.u16()?);
+    }
+    for _ in 0..nm {
+        b.tex_names.push(r.fixed_str(32)?);
+    }
+    for _ in 0..nm {
+        b.mask_names.push(r.fixed_str(32)?);
+    }
+    for _ in 0..nm {
+        b.mat_colors.push(r.vec3()?);
+    }
+    Ok(Some(b))
 }
 
 /// A LIGHT 2d effect (type 0), as stored in the DFF (see docs: lights.md §1.2).
@@ -370,6 +424,7 @@ fn parse_geometry(mut r: Reader, version: u32) -> Result<Geometry> {
                 }
                 id::SKIN => g.skin = Some(parse_skin(body, num_verts).context("skin")?),
                 id::EFFECT_2D => g.lights = parse_2dfx(body).context("2dfx")?,
+                id::BREAKABLE => g.breakable = parse_breakable(body).context("breakable")?,
                 _ => {}
             }
         }
