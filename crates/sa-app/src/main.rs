@@ -73,7 +73,12 @@ fn main() -> anyhow::Result<()> {
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window { title: "sa-rs".into(), ..default() }),
+        // SA_NOVSYNC=1: uncapped frame rate (measuring).
+        primary_window: Some(Window {
+            title: "sa-rs".into(),
+            present_mode: if std::env::var("SA_NOVSYNC").is_ok() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync },
+            ..default()
+        }),
         ..default()
     }))
     .insert_resource(WorldRes(Arc::new(world)))

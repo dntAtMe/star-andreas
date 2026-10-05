@@ -17,6 +17,9 @@ struct HeatHaze {
     tiles: array<vec4<f32>, 360>,
     // per quad: (origin.xy, edgeU.xy), (edgeV.xy, alpha, unused) in pixels
     masks: array<vec4<f32>, 128>,
+    // enhanced: sun shafts (sun uv xy, intensity, keep HDR > 1 in the colour filter) and colour
+    rays: vec4<f32>,
+    rays_col: vec4<f32>,
 }
 
 @group(0) @binding(2) var<uniform> hh: HeatHaze;
@@ -40,7 +43,33 @@ fn colour_filter(c: vec3<f32>) -> vec3<f32> {
     }
     let s = to_gamma(clamp(c, vec3(0.0), vec3(1.0)));
     let p1 = min(vec3(1.0), s + s * hh.k1.rgb);
-    return to_linear(min(vec3(1.0), p1 + s * hh.k2.rgb));
+    let f = to_linear(min(vec3(1.0), p1 + s * hh.k2.rgb));
+    // Enhanced (HDR): what is above 1.0 passes through for the bloom.
+    return f + select(vec3(0.0), max(c - vec3(1.0), vec3(0.0)), hh.rays.w > 0.5);
+}
+
+// Enhanced: screen-space sun shafts. March from the pixel toward the sun, gathering the
+// bright (sky) pixels with decay; the dark skyline blocks them.
+fn sun_shafts(uv: vec2<f32>) -> vec3<f32> {
+    let k = hh.rays.z;
+    if k <= 0.0 {
+        return vec3(0.0);
+    }
+    let n = 40;
+    let delta = (hh.rays.xy - uv) / f32(n) * 0.9;
+    var p = uv;
+    var w = 1.0;
+    var acc = 0.0;
+    for (var i = 0; i < n; i++) {
+        p += delta;
+        let c = textureSampleLevel(screen_texture, texture_sampler, clamp(p, vec2(0.0), vec2(1.0)), 0.0).rgb;
+        let l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        acc += smoothstep(0.45, 0.9, l) * w;
+        w *= 0.955;
+    }
+    // Fade with the distance to the sun on screen.
+    let d = length((uv - hh.rays.xy) * vec2(1.0, 0.6));
+    return hh.rays_col.rgb * (acc / f32(n)) * k * (1.0 - smoothstep(0.2, 1.1, d));
 }
 
 fn in_mask(p: vec2<f32>) -> bool {
@@ -67,7 +96,7 @@ fn in_mask(p: vec2<f32>) -> bool {
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let raw = textureSampleLevel(screen_texture, texture_sampler, in.uv, 0.0);
-    let base = vec4(colour_filter(raw.rgb), raw.a);
+    let base = vec4(colour_filter(raw.rgb) + sun_shafts(in.uv), raw.a);
     let mode = hh.params.y;
     if mode < 0.5 {
         return base;

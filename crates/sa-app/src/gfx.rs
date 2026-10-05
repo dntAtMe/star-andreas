@@ -31,7 +31,8 @@ impl Plugin for GfxPlugin {
         app.insert_resource(Gfx { enhanced })
             .add_systems(Startup, init_sky_cubemap)
             .add_systems(Update, (toggle, apply_camera, update_sky_cubemap, apply_hdr_boost).chain())
-            .add_systems(Update, count_draws);
+            .add_systems(Update, count_draws)
+            .add_systems(PostUpdate, sun_shafts.after(bevy::transform::TransformSystems::Propagate));
     }
 }
 
@@ -90,12 +91,17 @@ fn apply_camera(
                 },
                 GfxApplied(true),
             ));
+            // Volumetric light: the sun's shafts through the haze (FogVolume follows the camera).
+            // Opt-in (SA_VOL=1): its in-scattering tints the scene toward the sky colour.
+            if std::env::var("SA_VOL").is_ok() && !skip.contains("ssao") {
+                c.insert(bevy::light::VolumetricFog { ambient_intensity: 0.0, step_count: 48, ..default() });
+            }
             if let Some(sky) = sky.as_ref() {
                 c.insert(bevy::light::GeneratedEnvironmentMapLight { environment_map: sky.0.clone(), intensity: std::env::var("SA_ENVI").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0), ..default() });
             }
-            // SSAO needs the depth + normal prepass (a whole extra render phase); SA's prelit map
-            // already has baked occlusion, so it is opt-in (SA_SSAO=1).
-            if skip.contains("ssao") || std::env::var("SA_SSAO").is_err() {
+            // SSAO (and the volumetric light) use the depth + normal prepass, cheap since the map
+            // material is bindless.
+            if skip.contains("ssao") {
                 c.remove::<(ScreenSpaceAmbientOcclusion, NormalPrepass, DepthPrepass)>();
             }
             if skip.contains("smaa") {
@@ -122,6 +128,7 @@ fn apply_camera(
         } else {
             c.remove::<(Hdr, Bloom, Smaa, DepthPrepass, NormalPrepass, ScreenSpaceAmbientOcclusion, ColorGrading)>();
             c.remove::<bevy::light::GeneratedEnvironmentMapLight>();
+            c.remove::<bevy::light::VolumetricFog>();
             c.insert((Tonemapping::None, Msaa::Sample4, GfxApplied(false)));
         }
     }
@@ -272,4 +279,60 @@ fn count_draws(
     let mats_w: std::collections::HashSet<_> = vis_w.iter().collect();
     let vis_s = std.iter().filter(|(_, v)| v.get()).count();
     info!("draws: map {} visible of {} ({} materials), standard {} visible of {}", vis_w.len(), world.iter().count(), mats_w.len(), vis_s, std.iter().count());
+}
+
+/// Enhanced: the post pass keeps HDR values above 1.0 (SA's colour filter), and the haze volume
+/// for the sun's volumetric shafts follows the camera, its density and colour from the
+/// timecycle (stronger with a low sun, none at night).
+fn sun_shafts(
+    mut commands: Commands,
+    gfx: Res<Gfx>,
+    sa: Res<crate::saphys::SaPhys>,
+    mut cams: Query<(&GlobalTransform, &mut crate::heat_haze::HeatHaze, Option<&mut bevy::light::VolumetricFog>), With<Camera3d>>,
+    mut vol: Query<(Entity, &mut Transform, &mut bevy::light::FogVolume)>,
+    mut sun: Query<(Entity, Has<bevy::light::VolumetricLight>), With<DirectionalLight>>,
+) {
+    let Some(tc) = sa.world.timecycle.as_ref() else { return };
+    let dn = sa.world.clock.dn_balance();
+    let to_sun = crate::world::g2b(tc.vector_to_sun.to_array()).normalize_or(Vec3::Y);
+    let Ok((gt, mut hh, vf)) = cams.single_mut() else { return };
+    hh.rays = Vec4::new(0.0, 0.0, 0.0, if gfx.enhanced { 1.0 } else { 0.0 });
+    let vol_on = gfx.enhanced && std::env::var("SA_VOL").is_ok();
+    for (e, has) in &mut sun {
+        if vol_on && !has {
+            commands.entity(e).insert(bevy::light::VolumetricLight);
+        } else if !vol_on && has {
+            commands.entity(e).remove::<bevy::light::VolumetricLight>();
+        }
+    }
+    let low = 1.0 - (to_sun.y / 0.7).clamp(0.0, 1.0);
+    let density = if vol_on { (1.0 - dn) * (0.0008 + 0.0025 * low) * std::env::var("SA_VOLK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0) } else { 0.0 };
+    let fog = Vec3::from(tc.current.sky_bottom) / 255.0;
+    let col = Color::srgb(fog.x, fog.y, fog.z);
+    // The haze scatters the sky's light too (no darkening).
+    if let Some(mut vf) = vf {
+        vf.ambient_color = col;
+        vf.ambient_intensity = 1.0;
+    }
+    let tf = Transform::from_translation(gt.translation()).with_scale(Vec3::new(400.0, 160.0, 400.0));
+    match vol.single_mut() {
+        Ok((_, mut t, mut v)) => {
+            *t = tf;
+            v.density_factor = density;
+            v.fog_color = col;
+        }
+        Err(_) => {
+            commands.spawn((
+                tf,
+                bevy::light::FogVolume {
+                    density_factor: density,
+                    absorption: 0.0,
+                    scattering: 1.0,
+                    scattering_asymmetry: 0.8,
+                    fog_color: col,
+                    ..default()
+                },
+            ));
+        }
+    }
 }

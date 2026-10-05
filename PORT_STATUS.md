@@ -84,11 +84,13 @@ Last updated: 2026-10-05.
 | Feature | Status | Notes |
 |---|---|---|
 | Graphics modes | ✅ | enhanced by default, `SA_GFX=classic` or F9 for the original renderer; F3 toggles the debug text |
-| Post stack | ✅ | HDR, TonyMcMapface tonemapping (SA_TONEMAP=agx/aces/filmic), bloom, SMAA, SSAO, colour grading (SA_EXPOSURE) |
-| Sun | ✅ | timecycle sun direction / core colour as a directional light with 3 shadow cascades (120 m); peds, cars and the map cast; the prelit map darkens in shadow and warms in sun |
+| Post stack | ✅ | HDR, TonyMcMapface tonemapping (SA_TONEMAP=agx/aces/filmic), bloom, SMAA, SSAO, colour grading (SA_EXPOSURE); SA's colour filter keeps HDR highlights |
+| Sun | ✅ | timecycle sun direction / core colour as a directional light with 2 shadow cascades (100 m); peds, cars and the map cast; the prelit map darkens in shadow and warms in sun |
 | Sky reflections | ✅ | HDR cubemap painted from the timecycle sky + sun every 0.5 s, GPU-filtered environment light; clearcoat car paint, glossy glass |
 | Night lights | ✅ | HDR-boosted coronas bloom; clustered point lights light the prelit map |
-| Not yet | ❌ | water reflections, volumetric fog / god rays, clouds, contact shadows, performance work (enhanced is CPU-bound: extra shadow / prepass views) |
+| Atmosphere | 🟡 | the fog glows toward a low sun (map shader + DistanceFog); volumetric sun shafts opt-in (SA_VOL=1, tints the scene) |
+| Performance | ✅ | bindless map material (one bind group, batched draws): ~90 fps uncapped enhanced, ~130 classic; draw distance at SA's max (SA_DRAWDIST); SA_NOVSYNC / SA_FPSLOG / `trace` feature for measuring |
+| Not yet | ❌ | water reflections, clouds, contact shadows |
 
 ## HUD
 

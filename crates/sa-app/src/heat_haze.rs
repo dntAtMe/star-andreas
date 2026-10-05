@@ -45,6 +45,9 @@ pub struct HeatHaze {
     params: Vec4,
     tiles: [Vec4; TILES * 2],
     masks: [Vec4; MASKS * 2],
+    /// Enhanced graphics: sun shafts (sun uv, intensity, HDR colour filter) and colour.
+    pub rays: Vec4,
+    pub rays_col: Vec4,
 }
 
 impl Default for HeatHaze {
@@ -55,6 +58,8 @@ impl Default for HeatHaze {
             params: Vec4::ZERO,
             tiles: [Vec4::ZERO; TILES * 2],
             masks: [Vec4::ZERO; MASKS * 2],
+            rays: Vec4::ZERO,
+            rays_col: Vec4::ZERO,
         }
     }
 }
