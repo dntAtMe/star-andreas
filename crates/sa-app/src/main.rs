@@ -4,6 +4,7 @@ mod debug;
 mod colour_filter;
 mod coronas;
 mod fx;
+mod gfx;
 mod heat_haze;
 mod hud;
 mod lights;
@@ -95,7 +96,7 @@ fn main() -> anyhow::Result<()> {
         lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
-    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin, breaks::BreaksPlugin, hud::HudPlugin, target_tri::TargetTrianglePlugin))
+    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin, breaks::BreaksPlugin, hud::HudPlugin, target_tri::TargetTrianglePlugin, gfx::GfxPlugin))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);
@@ -140,6 +141,7 @@ fn setup(mut commands: Commands) {
     // Noon sun for dynamic (lit) objects like peds; the map itself is prelit.
     commands.spawn((
         DirectionalLight { illuminance: 9000.0, ..default() },
+        gfx::sun_cascades(),
         Transform::from_xyz(0.0, 0.0, 0.0).looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
     ));
 
@@ -203,8 +205,30 @@ fn update_hud(
     cars: Query<&Vehicle>,
     cam: Single<(&Transform, &FlyCam)>,
     ped: Single<(&Transform, &Ped), Without<FlyCam>>,
-    mut hud: Single<&mut Text, With<Hud>>,
+    mut hud: Single<(&mut Text, &mut Visibility), With<Hud>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut shown: Local<Option<bool>>,
+    mut fps_log: Local<(f32, u32)>,
 ) {
+    // F3 toggles the debug text (hidden by default; SA_DEBUG_TEXT=1 shows it at start).
+    let on = shown.get_or_insert_with(|| std::env::var("SA_DEBUG_TEXT").is_ok());
+    if keys.just_pressed(KeyCode::F3) {
+        *on = !*on;
+    }
+    let want = if *on { Visibility::Inherited } else { Visibility::Hidden };
+    if *hud.1 != want {
+        *hud.1 = want;
+    }
+    // SA_FPSLOG=1: log the average frame rate every 2 s (debug).
+    if std::env::var("SA_FPSLOG").is_ok() {
+        fps_log.0 += time.delta_secs();
+        fps_log.1 += 1;
+        if fps_log.0 >= 2.0 {
+            info!("fps {:.1}", fps_log.1 as f32 / fps_log.0);
+            *fps_log = (0.0, 0);
+        }
+    }
+    let hud = &mut hud.0;
     let (tf, fc) = *cam;
     let (ptf, ped) = *ped;
     let p = b2g(if *mode == Mode::Walk { ptf.translation } else { tf.translation });

@@ -53,7 +53,7 @@ fn init(
         fog_enabled: false,
         ..default()
     });
-    commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat), Transform::default(), bevy::camera::visibility::NoFrustumCulling));
+    commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat), Transform::default(), bevy::camera::visibility::NoFrustumCulling, bevy::light::NotShadowCaster));
     commands.insert_resource(Streaks(mesh));
 }
 

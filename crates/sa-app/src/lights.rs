@@ -110,7 +110,7 @@ fn init(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials:
         double_sided: true,
         ..default()
     });
-    let e = commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::default(), NoFrustumCulling)).id();
+    let e = commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, crate::gfx::HdrBoost(3.0))).id();
     commands.insert_resource(LightPools { points, spots, beams: (e, h) });
 }
 

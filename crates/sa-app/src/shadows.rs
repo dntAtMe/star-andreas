@@ -79,6 +79,7 @@ fn init(
                 MeshMaterial3d(mat),
                 Transform::default(),
                 bevy::camera::visibility::NoFrustumCulling,
+                bevy::light::NotShadowCaster,
             ))
             .id();
         out.insert((ty, st), (e, mesh));

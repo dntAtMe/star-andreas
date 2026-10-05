@@ -79,6 +79,17 @@ Last updated: 2026-10-05.
 | Audio | ❌ | |
 | Save / load | ❌ | |
 
+## Enhanced graphics (non-original, optional)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Graphics modes | ✅ | enhanced by default, `SA_GFX=classic` or F9 for the original renderer; F3 toggles the debug text |
+| Post stack | ✅ | HDR, TonyMcMapface tonemapping (SA_TONEMAP=agx/aces/filmic), bloom, SMAA, SSAO, colour grading (SA_EXPOSURE) |
+| Sun | ✅ | timecycle sun direction / core colour as a directional light with 3 shadow cascades (120 m); peds, cars and the map cast; the prelit map darkens in shadow and warms in sun |
+| Sky reflections | ✅ | HDR cubemap painted from the timecycle sky + sun every 0.5 s, GPU-filtered environment light; clearcoat car paint, glossy glass |
+| Night lights | ✅ | HDR-boosted coronas bloom; clustered point lights light the prelit map |
+| Not yet | ❌ | water reflections, volumetric fog / god rays, clouds, contact shadows, performance work (enhanced is CPU-bound: extra shadow / prepass views) |
+
 ## HUD
 
 | Feature | Status | Notes |

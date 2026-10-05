@@ -93,7 +93,7 @@ fn init(
     }
     let mut spawn = |mat: StandardMaterial| {
         let h = meshes.add(empty_mesh());
-        let e = commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(materials.add(mat)), Transform::default(), NoFrustumCulling)).id();
+        let e = commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(materials.add(mat)), Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster)).id();
         (e, h)
     };
     let seabed = spawn(StandardMaterial { base_color_texture: bed_tex, unlit: true, ..default() });

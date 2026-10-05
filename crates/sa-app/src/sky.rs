@@ -88,7 +88,7 @@ fn init(
     let mut spawn = |mesh: Mesh, mat: StandardMaterial| {
         let h = meshes.add(mesh);
         let e = commands
-            .spawn((Mesh3d(h.clone()), MeshMaterial3d(materials.add(mat)), Transform::default(), NoFrustumCulling))
+            .spawn((Mesh3d(h.clone()), MeshMaterial3d(materials.add(mat)), Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster))
             .id();
         (e, h)
     };
@@ -116,8 +116,11 @@ fn init(
     commands.insert_resource(Sky { box_mesh, sprites, rng: 1 });
 }
 
-/// SA has no tonemapping: colours go to the screen as computed.
-fn no_tonemapping(mut cams: Query<&mut Tonemapping, (With<Camera3d>, Changed<Tonemapping>)>) {
+/// SA has no tonemapping: colours go to the screen as computed (classic graphics).
+fn no_tonemapping(gfx: Res<crate::gfx::Gfx>, mut cams: Query<&mut Tonemapping, (With<Camera3d>, Changed<Tonemapping>)>) {
+    if gfx.enhanced {
+        return;
+    }
     for mut t in &mut cams {
         if *t != Tonemapping::None {
             *t = Tonemapping::None;
@@ -156,11 +159,13 @@ fn update(
     mut dir_light: Query<(&mut DirectionalLight, &mut Transform), Without<Camera3d>>,
     mut tfs: Query<&mut Transform, (Without<Camera3d>, Without<DirectionalLight>)>,
     mut cam: Query<(&GlobalTransform, &mut Projection, Option<&mut DistanceFog>), With<Camera3d>>,
+    gfx: Res<crate::gfx::Gfx>,
 ) {
     let Ok((cam_gt, mut proj, fog)) = cam.single_mut() else { return };
     let Some(tc) = sa.world.timecycle.as_mut() else { return };
     tc.brightness = dbg.brightness;
     let c = tc.current;
+    let to_sun = tc.vector_to_sun;
     let bhg = tc.below_horizon_grey;
     let lights_mult = tc.lights_mult;
     let w = &sa.world.weather;
@@ -169,6 +174,9 @@ fn update(
     let extra_sunny = w.extra_sunnyness;
     let clock = sa.world.clock.clone();
     let dn = clock.dn_balance();
+    // Enhanced graphics: the sun as a shadowing light (toward the sun, its strength).
+    let sun_strength = if gfx.enhanced { (1.0 - dn) * ((to_sun.z + 0.05) / 0.3).clamp(0.0, 1.0) } else { 0.0 };
+    let sun_core = c.sun_core;
 
     let cam_pos_b = cam_gt.translation();
     let cam_pos = Vec3::from(b2g(cam_pos_b));
@@ -200,6 +208,9 @@ fn update(
             dn,
             ambient: amb,
             fog: dbg.fog.then(|| (c.fog_start, far, Vec3::from(sky_bottom) / 255.0)),
+            sun: g2b(to_sun.to_array()).normalize_or(Vec3::Y),
+            shadow: if lightning { 0.0 } else { sun_strength },
+            point_lights: gfx.enhanced,
         };
         if let Some(mut b) = buffers.get_mut(&g.0) {
             b.set_data(data.pack());
@@ -214,6 +225,18 @@ fn update(
     ambient.brightness = 0.0;
     let dir_mult = dbg.dir_mult_override.unwrap_or(c.dir_mult);
     for (mut l, mut tf) in &mut dir_light {
+        if gfx.enhanced {
+            // The timecycle sun: its core colour, from m_VectorToSun.
+            let col = Vec3::from(sun_core) / 255.0;
+            let col = (col * 0.5 + Vec3::splat(0.5)).min(Vec3::ONE);
+            l.color = Color::srgb(col.x, col.y, col.z);
+            l.illuminance = sun_strength * 0.85 * std::f32::consts::PI * 980.0;
+            l.shadow_maps_enabled = sun_strength > 0.0;
+            let d = -g2b(to_sun.to_array()).normalize_or(Vec3::Y);
+            *tf = Transform::default().looking_to(d, if d.abs_diff_eq(Vec3::Y, 1e-3) || d.abs_diff_eq(-Vec3::Y, 1e-3) { Vec3::Z } else { Vec3::Y });
+            continue;
+        }
+        l.color = Color::WHITE;
         let d = dir_mult * 0.996_093_75 * lights_mult;
         l.illuminance = d * std::f32::consts::PI * 980.0;
         // Fixed: from (-0.5, -0.5, 0.707) toward (0.5, 0.5, -0.707) (m_vecDirnLightToSun).

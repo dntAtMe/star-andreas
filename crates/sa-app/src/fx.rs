@@ -361,6 +361,7 @@ fn draw_fx(
                     Visibility::Hidden,
                     // The Aabb is not refreshed when the mesh changes.
                     bevy::camera::visibility::NoFrustumCulling,
+                    bevy::light::NotShadowCaster,
                 ))
                 .id();
             fx.batches.push((e, mesh, mat));

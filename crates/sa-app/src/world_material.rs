@@ -22,6 +22,7 @@ pub struct WorldMaterialPlugin;
 impl Plugin for WorldMaterialPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "world_material.wgsl");
+        embedded_asset!(app, "world_material_prepass.wgsl");
         app.add_plugins(MaterialPlugin::<WorldMaterial>::default()).add_systems(PreStartup, init);
     }
 }
@@ -55,6 +56,10 @@ impl Material for WorldMaterial {
         "embedded://sa_app/world_material.wgsl".into()
     }
 
+    fn prepass_fragment_shader() -> ShaderRef {
+        "embedded://sa_app/world_material_prepass.wgsl".into()
+    }
+
     fn alpha_mode(&self) -> AlphaMode {
         self.alpha_mode
     }
@@ -65,6 +70,12 @@ impl Material for WorldMaterial {
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        // Prepass / shadow pipelines keep Bevy's standard attribute locations.
+        let prepass = descriptor.vertex.shader_defs.iter().any(|d| matches!(d, bevy::shader::ShaderDefVal::Bool(n, true) if n == "PREPASS_PIPELINE"));
+        if prepass {
+            return Ok(());
+        }
         let vertex_layout = layout.0.get_layout(&[
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
             Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
@@ -87,6 +98,11 @@ pub struct GlobalsData {
     pub dn: f32,
     pub ambient: Vec3,
     pub fog: Option<(f32, f32, Vec3)>,
+    /// Enhanced graphics: toward the sun (Bevy world space) and the shadow strength (0 = off).
+    pub sun: Vec3,
+    pub shadow: f32,
+    /// Enhanced graphics: point lights light the map.
+    pub point_lights: bool,
 }
 
 impl GlobalsData {
@@ -95,12 +111,13 @@ impl GlobalsData {
         vec![
             [self.dn, 0.0, fs, fe],
             [self.ambient.x, self.ambient.y, self.ambient.z, if self.fog.is_some() { 1.0 } else { 0.0 }],
-            [fc.x, fc.y, fc.z, 0.0],
+            [fc.x, fc.y, fc.z, if self.point_lights { 1.0 } else { 0.0 }],
+            [self.sun.x, self.sun.y, self.sun.z, self.shadow],
         ]
     }
 }
 
 fn init(mut commands: Commands, mut buffers: ResMut<Assets<ShaderBuffer>>) {
-    let data = GlobalsData { dn: 0.0, ambient: Vec3::ZERO, fog: None };
+    let data = GlobalsData { dn: 0.0, ambient: Vec3::ZERO, fog: None, sun: Vec3::Y, shadow: 0.0, point_lights: false };
     commands.insert_resource(WorldGlobals(buffers.add(ShaderBuffer::from(data.pack()))));
 }

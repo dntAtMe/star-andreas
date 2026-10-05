@@ -86,7 +86,7 @@ fn init(
             depth_bias: 0.75,
             ..default()
         });
-        let e = commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::default(), NoFrustumCulling)).id();
+        let e = commands.spawn((Mesh3d(h.clone()), MeshMaterial3d(mat), Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, crate::gfx::HdrBoost(6.0))).id();
         out.insert(name, (e, h));
     }
     commands.insert_resource(Batches { meshes: out, rng: 1 });

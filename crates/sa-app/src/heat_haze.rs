@@ -90,6 +90,9 @@ fn raster(n: u32) -> i32 {
 }
 
 fn attach(mut commands: Commands, cams: Query<Entity, (With<Camera3d>, Without<HeatHaze>)>) {
+    if std::env::var("SA_GFXSKIP").is_ok_and(|v| v.contains("haze")) {
+        return;
+    }
     for e in &cams {
         commands.entity(e).insert(HeatHaze::default());
     }
