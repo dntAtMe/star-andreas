@@ -409,6 +409,7 @@ impl World {
                                     damage: f * 250.0,
                                     piece: 3,
                                     dir,
+                                    fight: None,
                                 });
                             }
                         } else {

@@ -296,6 +296,10 @@ pub struct PedTasks {
     /// The world's water (set by the world each step) and Wavyness.
     pub water: Option<Arc<crate::water::WaterLevel>>,
     pub wavyness: f32,
+    /// Ped state 0x3F ARRESTED (CTaskSimpleArrestPed): the player is busted.
+    pub arrested: bool,
+    /// ped+0x719 shooting rate (40 by default; also the knock-down time).
+    pub shooting_rate: u16,
 }
 
 impl Default for PedTasks {
@@ -342,6 +346,8 @@ impl Default for PedTasks {
             breath_request: None,
             water: None,
             wavyness: 0.3,
+            arrested: false,
+            shooting_rate: 40,
         }
     }
 }

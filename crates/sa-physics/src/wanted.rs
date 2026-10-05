@@ -58,6 +58,8 @@ pub struct Wanted {
     pub level: i32,
     pub level_before_parole: i32,
     pub crimes: [QdCrime; 16],
+    /// +0x1F4 pursuitCops[10].
+    pub pursuit_cops: [Option<EntityId>; 10],
     last_back_off: bool,
     pub max_level: i32,
     pub max_chaos: i32,
@@ -82,6 +84,7 @@ impl Default for Wanted {
             level: 0,
             level_before_parole: 0,
             crimes: [QdCrime::default(); 16],
+            pursuit_cops: [None; 10],
             last_back_off: false,
             max_level: MAX_WANTED_LEVEL,
             max_chaos: MAX_CHAOS_LEVEL,
@@ -299,6 +302,80 @@ impl Wanted {
     }
 }
 
+impl Wanted {
+    pub fn is_in_pursuit(&self, cop: EntityId) -> bool {
+        self.pursuit_cops.contains(&Some(cop))
+    }
+
+    pub fn remove_pursuit_cop(&mut self, cop: EntityId) {
+        for s in &mut self.pursuit_cops {
+            if *s == Some(cop) {
+                *s = None;
+                self.cops_in_pursuit = self.cops_in_pursuit.saturating_sub(1);
+            }
+        }
+    }
+
+    /// `ComputePursuitCopToDisplace`: the farthest cop farther than the newcomer (a dying cop
+    /// first). `dist2(c)` is the squared distance from the player.
+    fn cop_to_displace(&self, cop: Option<EntityId>, dist2: &dyn Fn(EntityId) -> Option<f32>) -> Option<EntityId> {
+        let mut best = cop.and_then(dist2).map_or(0.0, |d| d.max(1.0));
+        let mut res = None;
+        for c in self.pursuit_cops.iter().flatten() {
+            match dist2(*c) {
+                None => return Some(*c),
+                Some(d) if d > best => {
+                    best = d;
+                    res = Some(*c);
+                }
+                _ => {}
+            }
+        }
+        res
+    }
+
+    /// `CanCopJoinPursuit` (0x562FB0) on a copy of the list.
+    pub fn can_cop_join_pursuit(&self, cop: EntityId, dist2: &dyn Fn(EntityId) -> Option<f32>) -> bool {
+        if self.flags & 7 != 0 || self.max_cops_in_pursuit == 0 {
+            return false;
+        }
+        let mut copy = self.clone();
+        while copy.cops_in_pursuit >= copy.max_cops_in_pursuit {
+            let Some(d) = copy.cop_to_displace(Some(cop), dist2) else { return false };
+            copy.remove_pursuit_cop(d);
+        }
+        true
+    }
+
+    /// `SetPursuitCop`.
+    pub fn set_pursuit_cop(&mut self, cop: EntityId, dist2: &dyn Fn(EntityId) -> Option<f32>) -> bool {
+        if self.is_in_pursuit(cop) {
+            return true;
+        }
+        if !self.can_cop_join_pursuit(cop, dist2) {
+            return false;
+        }
+        while self.cops_in_pursuit >= self.max_cops_in_pursuit {
+            let Some(d) = self.cop_to_displace(Some(cop), dist2) else { return false };
+            self.remove_pursuit_cop(d);
+        }
+        if let Some(s) = self.pursuit_cops.iter_mut().find(|s| s.is_none()) {
+            *s = Some(cop);
+            self.cops_in_pursuit += 1;
+            return true;
+        }
+        false
+    }
+
+    /// `RemoveExcessPursuitCops`.
+    pub fn remove_excess_pursuit_cops(&mut self, dist2: &dyn Fn(EntityId) -> Option<f32>) {
+        while self.cops_in_pursuit > self.max_cops_in_pursuit {
+            let Some(d) = self.cop_to_displace(None, dist2).or_else(|| self.pursuit_cops.iter().flatten().next().copied()) else { break };
+            self.remove_pursuit_cop(d);
+        }
+    }
+}
+
 impl World {
     /// `WorkOutPolicePresence` (0x5625F0): living cops and police vehicles (not the player's,
     /// not abandoned / wrecked) within `radius`.
@@ -439,5 +516,104 @@ mod tests {
             w.update(t, false, false, false);
         }
         assert_eq!(w.level, 2);
+    }
+}
+
+impl World {
+    /// CTaskComplexWanderCop (0x674D80) / CTaskComplexPolicePursuit / PersistPursuit for the
+    /// cops on foot, and the arrests their CTaskSimpleArrestPed made.
+    pub(crate) fn update_police(&mut self, _views: &[impl Sized]) {
+        let Some(player) = self.player_id() else { return };
+        let Some(pp) = self.body(player).map(|b| b.phys.matrix.pos) else { return };
+        let now = self.now_ms;
+        let level = self.wanted.level;
+        let cops: Vec<(EntityId, bool)> = self
+            .body_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let p = self.body(id)?.logic.as_any().downcast_ref::<crate::ped::PedLogic>()?;
+                let n = p.npc.as_ref()?;
+                (n.ped_type == 6).then_some((id, p.tasks.health.alive()))
+            })
+            .collect();
+        // Squared distances from the player (None = dying / gone).
+        let dist: std::collections::HashMap<EntityId, f32> = cops
+            .iter()
+            .filter(|c| c.1)
+            .filter_map(|&(id, _)| self.body(id).map(|b| (id, (b.phys.matrix.pos - pp).length_squared())))
+            .collect();
+        let d2 = |c: EntityId| dist.get(&c).copied();
+        // PersistPursuit for every cop already chasing; dead ones leave the list.
+        for &(id, alive) in &cops {
+            if !alive {
+                self.wanted.remove_pursuit_cop(id);
+            }
+        }
+        self.wanted.remove_excess_pursuit_cops(&d2);
+        let player_in_veh_fast = self
+            .body(player)
+            .and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>())
+            .and_then(|p| p.vehicle.as_ref().map(|v| v.veh))
+            .and_then(|v| self.body(v))
+            .is_some_and(|b| b.phys.move_speed.length_squared() * (b.phys.matrix.pos - pp).length_squared() >= 16.0);
+        for &(id, alive) in &cops {
+            let (has, responding, rejoin) = {
+                let Some(n) = self.body(id).and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()).and_then(|p| p.npc.as_ref())
+                else {
+                    continue;
+                };
+                (n.pursuit.is_some(), n.response.is_some(), n.rejoin_after)
+            };
+            if has {
+                let keep = alive && self.wanted.is_in_pursuit(id);
+                if !keep {
+                    if let Some(n) = self.body_mut(id).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>()).and_then(|p| p.npc.as_mut()) {
+                        n.pursuit = None;
+                        n.rejoin_after = now + 3000;
+                        n.last_move_state = 0;
+                    }
+                }
+            } else if alive && level > 0 && !responding && now >= rejoin && !player_in_veh_fast {
+                // ShouldPursuePlayer → SetPursuit (the player on foot or slow).
+                if self.wanted.set_pursuit_cop(id, &d2) {
+                    let w = level;
+                    if let Some(p) = self.body_mut(id).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>()) {
+                        // SetWeapon (0x68BAD0): the nightstick (guns need the armed kill task).
+                        let _ = w;
+                        if let Some(slot) = (0..p.tasks.weapons.len()).find(|&s| p.tasks.weapons[s].ty == 3) {
+                            p.tasks.set_current_weapon(slot);
+                        }
+                        if let Some(n) = p.npc.as_mut() {
+                            n.pursuit = Some(crate::pedevents::Pursuit::new(player));
+                            n.resp_in.threat_pos = Some(pp);
+                            n.resp_in.threat_alive = true;
+                            if let Some(wd) = n.wander.as_mut() {
+                                wd.sub = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // CTaskSimpleArrestPed::StartAnim: the target becomes ARRESTED and stays down.
+        let arrests: Vec<EntityId> = cops
+            .iter()
+            .filter_map(|&(id, _)| {
+                self.body_mut(id)
+                    .and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>())
+                    .and_then(|p| p.npc.as_mut())
+                    .and_then(|n| n.arrest_request.take())
+            })
+            .collect();
+        for t in arrests {
+            if let Some(p) = self.body_mut(t).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>()) {
+                if p.tasks.health.alive() && !p.tasks.arrested {
+                    p.tasks.arrested = true;
+                    if let Some(crate::peddamage::FallAndGetUp::Fall { down_ms, .. }) = p.tasks.health.fall.as_mut() {
+                        *down_ms = 100_000;
+                    }
+                }
+            }
+        }
     }
 }

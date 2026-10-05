@@ -29,7 +29,7 @@ impl Plugin for NpcPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NpcModels>()
             .add_systems(Startup, load_population)
-            .add_systems(Update, (despawn_npcs, spawn_npcs, animate_npcs, log_responses, provoke).chain().after(SaStep));
+            .add_systems(Update, (despawn_npcs, spawn_npcs, animate_npcs, log_responses, provoke, debug_wanted).chain().after(SaStep));
     }
 }
 
@@ -244,5 +244,29 @@ fn provoke(time: Res<Time>, mut sa: ResMut<SaPhys>, mut next: Local<f32>) {
             n.damaged_by = Some(Some(pid));
             info!("SA_PROVOKE: npc {id:?} at {d:.1} m");
         }
+    }
+}
+
+/// Debug `SA_WANTED=<level>`: set the wanted level once (after 12 s) and log the cops.
+fn debug_wanted(time: Res<Time>, mut sa: ResMut<SaPhys>, mut done: Local<bool>, mut next_log: Local<f32>) {
+    let Some(level) = std::env::var("SA_WANTED").ok().and_then(|v| v.parse::<i32>().ok()) else { return };
+    if !*done && time.elapsed_secs() > 12.0 {
+        *done = true;
+        let now = sa.world.now_ms;
+        sa.world.wanted.set_wanted_level(level, now);
+    }
+    if time.elapsed_secs() > *next_log {
+        *next_log = time.elapsed_secs() + 2.0;
+        let cops: Vec<String> = sa
+            .world
+            .body_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let p = sa.logic::<PedLogic>(id)?;
+                let n = p.npc.as_ref().filter(|n| n.ped_type == 6)?;
+                Some(format!("{id:?}{}", if n.pursuit.as_ref().is_some_and(|p| p.arresting()) { " arresting" } else if n.pursuit.is_some() { " pursuing" } else { "" }))
+            })
+            .collect();
+        info!("wanted {} cops in pursuit {} | {}", sa.world.wanted.level, sa.world.wanted.cops_in_pursuit, cops.join(", "));
     }
 }

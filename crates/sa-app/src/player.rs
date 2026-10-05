@@ -95,6 +95,10 @@ pub struct Ped {
     pub node_frames: Vec<usize>,
     pub grounded: bool,
     pub frozen: bool,
+    /// When the ped was (re)frozen (the respawn waits at least 1 s for streaming too).
+    pub frozen_at: f32,
+    /// The first unfreeze (the debug spawns) has happened.
+    pub started: bool,
 }
 
 /// Teleport the ped's SA body (Bevy-space position, Bevy yaw).
@@ -317,7 +321,7 @@ fn spawn_player(
         .spawn((
             tf,
             Visibility::default(),
-            Ped { sa: id, bones, node_frames, grounded: false, frozen: true },
+            Ped { sa: id, bones, node_frames, grounded: false, frozen: true, frozen_at: 0.0, started: false },
             CamFollow { height: 0.6, dist: 3.5 },
             SaBody::new(id, m),
         ))
@@ -406,17 +410,19 @@ fn player_control(
     let s = st.stats;
     if ped.frozen {
         // Wait for collision around the spawn point before enabling gravity.
-        if s.pending == 0 && s.models_loading == 0 && s.spawned > 0 && time.elapsed_secs() > 1.0 {
+        if s.pending == 0 && s.models_loading == 0 && s.spawned > 0 && time.elapsed_secs() > ped.frozen_at + 1.0 {
             ped.frozen = false;
+            let first = !ped.started;
+            ped.started = true;
             if let Some(b) = sa.world.body_mut(id) {
                 b.phys.eflags &= !ef::IS_STATIC;
             }
             // SA_SPAWN=<model>: a car 5 m ahead (debug).
-            if let Ok(m) = std::env::var("SA_SPAWN") {
+            if let (true, Ok(m)) = (first, std::env::var("SA_SPAWN")) {
                 spawn.0.push(m);
             }
             // SA_WEAPON=<type>: start with that weapon (debug).
-            if let Some(ty) = std::env::var("SA_WEAPON").ok().and_then(|v| v.parse::<u32>().ok()) {
+            if let Some(ty) = std::env::var("SA_WEAPON").ok().and_then(|v| v.parse::<u32>().ok()).filter(|_| first) {
                 if let Some(l) = sa.logic_mut::<PedLogic>(id) {
                     let slot = l.tasks.give_weapon(ty, 500);
                     l.tasks.pd.chosen_slot = slot;

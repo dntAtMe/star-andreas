@@ -2,7 +2,9 @@
 //! type from info.zon + main.scm, the popcycle percentages, the 8 streamed-in zone models
 //! (StreamZoneModels), AddToPopulation with GeneratePedCreationCoors, and ManagePed removal.
 //!
-//! Not ported: cops, gangs, dealers, couples, beach sunbathers, skaters' skateable test,
+//! Cops (pedType 6): FindNewPedType's cop deficit and the forced cop from 3 stars, with the
+//! CCopPed city setup (nightstick + pistol).
+//! Not ported: gangs, dealers, couples, beach sunbathers, skaters' skateable test,
 //! attractors, riots, interiors, the in-vehicle creation distance multiplier.
 
 use std::{collections::HashMap, sync::Arc};
@@ -107,6 +109,16 @@ impl PopData {
     }
 
     /// `CTheZones::GetZoneInfo` (0x572400): the smallest zone containing `p`.
+    /// The level (0 country, 1 LS, 2 SF, 3 LV) of the smallest zone containing `p`.
+    pub fn level_at(&self, p: Vec3) -> u8 {
+        let (x, y) = (p.x as i32, p.y as i32);
+        self.zones
+            .iter()
+            .filter(|zn| zn.level != 0 && (zn.min[0] as i32..=zn.max[0] as i32).contains(&x) && (zn.min[1] as i32..=zn.max[1] as i32).contains(&y))
+            .min_by_key(|zn| (zn.max[0] as i32 - zn.min[0] as i32) + (zn.max[1] as i32 - zn.min[1] as i32))
+            .map_or(0, |zn| zn.level)
+    }
+
     pub fn zone_info(&self, p: Vec3) -> ZoneInfo {
         if self.zones.is_empty() {
             return ZoneInfo::default();
@@ -174,6 +186,11 @@ pub struct PopIn<'a> {
     pub clear: &'a mut dyn FnMut(Vec3) -> bool,
     /// Model usage counts of the live NPCs.
     pub usage: &'a HashMap<u32, u16>,
+    /// The player's wanted level / max cops in pursuit, in a vehicle; the live cop count.
+    pub wanted_level: i32,
+    pub max_cops: u8,
+    pub player_in_vehicle: bool,
+    pub num_cops: u32,
 }
 
 impl Population {
@@ -315,7 +332,7 @@ impl Population {
                 let mut total = total_peds;
                 let mut civ = num_civ;
                 for _ in 0..100 {
-                    if self.add_to_population(i, &info, 10.0, 50.5, 10.0, 50.5, total, civ, num_cops + num_gang + num_dealers) {
+                    if self.add_to_population(i, &info, 10.0, 50.5, 10.0, 50.5, total, civ, num_cops, num_gang + num_dealers) {
                         total += 1;
                         civ += 1;
                     }
@@ -323,7 +340,7 @@ impl Population {
             }
             return;
         }
-        self.add_to_population(i, &info, 42.5, 50.5, 15.0, 25.0, total_peds, num_civ, num_cops + num_gang + num_dealers);
+        self.add_to_population(i, &info, 42.5, 50.5, 15.0, 25.0, total_peds, num_civ, num_cops, num_gang + num_dealers);
     }
 
     /// `AddToPopulation` (0x614720), civilians only.
@@ -338,26 +355,50 @@ impl Population {
         max_off: f32,
         total_peds: u32,
         num_civ: u32,
+        num_cops_peds: f32,
         others: f32,
     ) -> bool {
-        let max_peds = 25f32.min(self.num_other + others);
-        if total_peds as f32 >= max_peds {
+        let (mut min_dist, mut max_dist) = (min_dist, max_dist);
+        // The forced cop on foot (from 3 stars, no police car can be made: none are ported).
+        let force_cop = i.wanted_level > 2 && i.num_cops < i.max_cops as u32 && !i.player_in_vehicle;
+        if force_cop {
+            min_dist = 42.5;
+            max_dist = 50.5;
+        }
+        let max_peds = 25f32.min(self.num_other + num_cops_peds + others);
+        let (model, ped_type) = if (total_peds as f32) < max_peds {
+            // FindNewPedType (0x60FBD0): the biggest deficit of cops and others (gangs and
+            // dealers are not ported).
+            let mut d_c = num_cops_peds - i.num_cops as f32;
+            if i.player.z > 950.0 {
+                d_c = -10.0;
+            }
+            let mut d_o = self.num_other - num_civ as f32;
+            if d_o < 2.0 {
+                d_o *= ((i.rand)() & 0x7FFF) as f32 * (1.0 / 32767.0);
+            }
+            if d_c < 2.0 {
+                d_c *= ((i.rand)() & 0x7FFF) as f32 * (1.0 / 32767.0);
+            }
+            if force_cop || (d_c >= d_o && d_c > 0.0) {
+                (self.cop_model(i.player), 6)
+            } else if d_o > 0.0 {
+                let Some(model) = self.choose_civilian(i, info) else { return false };
+                let Some(p) = self.data.peds.get(&model) else { return false };
+                (model, p.ped_type)
+            } else {
+                return false;
+            }
+        } else if force_cop {
+            (self.cop_model(i.player), 6)
+        } else {
             return false;
-        }
-        // FindNewPedType: the 'other' deficit only.
-        let mut d_o = self.num_other - num_civ as f32;
-        if d_o < 2.0 {
-            d_o *= ((i.rand)() & 0x7FFF) as f32 * (1.0 / 32767.0);
-        }
-        if d_o <= 0.0 {
-            return false;
-        }
-        let Some(model) = self.choose_civilian(i, info) else { return false };
+        };
         let Some(p) = self.data.peds.get(&model).cloned() else { return false };
         let paths = self.data.paths.clone();
         let (px, py) = (i.player.x, i.player.y);
         let Some((mut pos, n1, n2)) =
-            paths.generate_ped_creation_coors(px, py, min_dist, max_dist, min_off, max_off, false, i.rand, i.frand, i.visible, i.ground)
+            paths.generate_ped_creation_coors(px, py, min_dist, max_dist, min_off, max_off, ped_type == 6 && i.wanted_level > 0, i.rand, i.frand, i.visible, i.ground)
         else {
             return false;
         };
@@ -378,8 +419,14 @@ impl Population {
             return false;
         }
         let dir = ((i.frand)() * 8.0) as u8 % 8;
-        self.requests.push(SpawnPed { model, ped_type: p.ped_type, pos, dir });
+        self.requests.push(SpawnPed { model, ped_type, pos, dir });
         true
+    }
+
+    /// CCopPed city cop model by `CTheZones::m_CurrLevel` (0x8A5AA0): 0 csher, 1 lapd1,
+    /// 2 sfpd1, 3 lvpd1.
+    fn cop_model(&self, p: Vec3) -> u32 {
+        [283, 280, 281, 282][self.data.level_at(p).min(3) as usize]
     }
 }
 
@@ -443,7 +490,7 @@ impl crate::world::World {
         let visible = move |c: Vec3, r: f32| planes.iter().all(|(n, d)| n.dot(c) - d <= r);
         // ManagePopulation / ManagePed and the counters (UpdatePedCount).
         let mut usage: HashMap<u32, u16> = HashMap::new();
-        let (mut num_civ, mut total) = (0u32, 0u32);
+        let (mut num_civ, mut total, mut num_cops) = (0u32, 0u32, 0u32);
         let mut remove = Vec::new();
         for id in self.body_ids() {
             let Some(b) = self.body_mut(id) else { continue };
@@ -467,6 +514,9 @@ impl crate::world::World {
             if matches!(npc.ped_type, 4 | 5) {
                 num_civ += 1;
             }
+            if npc.ped_type == 6 {
+                num_cops += 1;
+            }
             *usage.entry(npc.model).or_insert(0) += 1;
         }
         for id in remove {
@@ -479,6 +529,9 @@ impl crate::world::World {
         let day = self.clock.current_day;
         let rain = self.weather.rain;
         let frame = self.frame;
+        let wanted_level = self.wanted.level;
+        let max_cops = self.wanted.max_cops_in_pursuit;
+        let player_in_vehicle = self.player_vehicle().is_some();
         let w = std::cell::RefCell::new(&mut *self);
         let rng_cell = std::cell::RefCell::new(&mut rng);
         let mut rand = || rng_cell.borrow_mut().next();
@@ -502,6 +555,10 @@ impl crate::world::World {
             ground: &mut ground,
             clear: &mut clear,
             usage: &usage,
+            wanted_level,
+            max_cops,
+            player_in_vehicle,
+            num_cops,
         };
         pop.update(&mut i, num_civ, total);
         drop(i);
@@ -552,6 +609,17 @@ impl crate::world::World {
         let mut npc = crate::npc::NpcState::new(req.model, req.ped_type, seed, info.anim_group, req.dir, paths, self.now_ms);
         npc.dm = dm;
         npc.resp_in.shooting_rate = shooting_rate;
+        logic.tasks.shooting_rate = 40;
+        if req.ped_type == 6 {
+            // CCopPed(0) (0x5DDC60): nightstick + delayed pistol, unarmed in hand, shooting rate 30,
+            // accuracy 60.
+            logic.tasks.give_weapon(3, 1000);
+            logic.tasks.give_weapon(22, 1000);
+            logic.tasks.set_current_weapon(0);
+            logic.tasks.accuracy = 60;
+            npc.resp_in.shooting_rate = 30;
+            logic.tasks.shooting_rate = 30;
+        }
         logic.npc = Some(npc);
         Some(self.add_body(phys, ped_col_model(), Box::new(logic)))
     }

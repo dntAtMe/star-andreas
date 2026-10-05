@@ -1712,6 +1712,7 @@ impl World {
                             damage: d,
                             piece: 3,
                             dir,
+                            fight: None,
                         });
                     }
                 }
@@ -1787,6 +1788,7 @@ fn kill_ped_with_car(car: &mut Physical, ped: &mut Physical, state: &mut PedLogi
         damage: if big { 1000.0 } else { 30.0 },
         piece: 3,
         dir,
+        fight: None,
     });
     // Braking reaction on the car.
     let up = car.matrix.up;

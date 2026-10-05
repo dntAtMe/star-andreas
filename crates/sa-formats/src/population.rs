@@ -481,3 +481,33 @@ mod tests {
         assert_eq!(p.max_peds[0], 3);
     }
 }
+
+/// `ADD_HOSPITAL_RESTART` (0x016C) / `ADD_POLICE_RESTART` (0x016D) in main.scm: four typed
+/// floats `x y z heading` each. Returns (hospitals, police stations).
+pub fn scan_scm_restarts(scm: &[u8]) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+    let (mut hosp, mut police) = (Vec::new(), Vec::new());
+    let float_at = |i: usize| -> Option<f32> {
+        if *scm.get(i)? != 6 {
+            return None;
+        }
+        Some(f32::from_le_bytes(scm.get(i + 1..i + 5)?.try_into().ok()?))
+    };
+    let mut i = 0;
+    while i + 22 <= scm.len() {
+        let op = u16::from_le_bytes([scm[i], scm[i + 1]]);
+        if matches!(op, 0x016C | 0x016D) {
+            let v: Option<Vec<f32>> = (0..4).map(|k| float_at(i + 2 + k * 5)).collect();
+            if let Some(v) = v {
+                let ok = v[0].abs() < 4000.0 && v[1].abs() < 4000.0 && (-200.0..2000.0).contains(&v[2]) && v[3].abs() <= 720.0;
+                if ok {
+                    let r = [v[0], v[1], v[2], v[3]];
+                    if op == 0x016C { hosp.push(r) } else { police.push(r) }
+                    i += 22;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    (hosp, police)
+}

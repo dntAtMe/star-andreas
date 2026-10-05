@@ -26,6 +26,20 @@ pub struct DamageIn {
     pub piece: u8,
     /// 0 front, 1 left, 2 back, 3 right.
     pub dir: u8,
+    /// The attacker's CTaskSimpleFight at the hit (FightHitPed).
+    pub fight: Option<FightHit>,
+}
+
+/// What ComputeDamageAnim reads from the attacker's fight task.
+#[derive(Debug, Clone, Copy)]
+pub struct FightHit {
+    /// +0x24 comboSet, +0x25 currentMove, the combo's anim group.
+    pub combo_set: i8,
+    pub mv: i8,
+    pub group: usize,
+    /// `IsComboFall` (FALL_n flag of the move) / `IsComboNoFall`.
+    pub fall: bool,
+    pub no_fall: bool,
 }
 
 /// ped+0x530 life state as far as the port needs it.
@@ -185,6 +199,7 @@ impl PedTasks {
                 }
                 None
             }
+            0..=15 => self.melee_damage_anim(&d, clump, m),
             49 | 50 => {
                 // CTaskComplexFallAndGetUp with the KillPedWithCar anim, 500 ms down for the player.
                 let id = match d.dir {
@@ -193,20 +208,68 @@ impl PedTasks {
                     2 => da::KO_SKID_BACK,
                     _ => da::KO_SKID_FRONT,
                 };
-                self.knock_down(id, 500, clump, m);
+                self.knock_down(id, group::DEFAULT, 500, clump, m);
                 None
             }
             _ => None,
         }
     }
 
+    /// `CEventDamage::ComputeDamageAnim` (0x4B3FC0) for a melee hit (torso) and the damage
+    /// response: a knock-down (CTaskComplexFallAndGetUp, 1000 / (rate·0.025) ms) or the hit
+    /// anim (CTaskSimpleBeHit). Returns the knock force push (source, force) for the caller.
+    fn melee_damage_anim(&mut self, d: &DamageIn, clump: &mut Clump, m: &AnimManager) -> Option<(Vec3, f32)> {
+        if matches!(self.health.fall, Some(FallAndGetUp::Fall { .. })) {
+            // Lying on the floor: FLOOR_hit.
+            clump.blend_animation(m, group::DEFAULT, 36, 8.0);
+            return None;
+        }
+        let f = d.fight;
+        let mut flag = false;
+        let mut force = 0.0;
+        if d.ty < 9 && self.health.health < 15.0 {
+            flag = true;
+            force = 1.0;
+        } else if f.is_some_and(|f| f.mv == 4) && !self.is_player && self.move_state > 4 {
+            flag = true;
+        }
+        let knocked = flag && (d.dir != 0 || f.is_none_or(|f| !f.fall && !f.no_fall));
+        if !knocked {
+            flag = false;
+        }
+        let (mut grp, mut id, delta) = match f {
+            Some(f) if d.dir == 0 && f.combo_set >= 4 && f.mv <= 2 => {
+                if f.fall {
+                    flag = true;
+                }
+                (f.group, 219 + f.mv as i16, 16.0)
+            }
+            _ => {
+                let id = if d.dir == 2 && d.ty <= 15 { 40 } else { 32 + d.dir as i16 };
+                (group::DEFAULT, id, 8.0)
+            }
+        };
+        if flag && knocked {
+            grp = group::DEFAULT;
+            id = da::KO_SKID_FRONT + d.dir as i16;
+        }
+        if flag {
+            let down = (1000.0 / (self.shooting_rate as f32 * 0.025)) as u32;
+            self.knock_down(id, grp, down, clump, m);
+            return (force > 0.0).then_some((d.src_pos?, force));
+        }
+        // CTaskSimpleBeHit.
+        clump.blend_animation(m, grp, id, delta);
+        None
+    }
+
     /// Start `CTaskComplexFallAndGetUp`.
-    fn knock_down(&mut self, anim_id: i16, down_ms: u32, clump: &mut Clump, m: &AnimManager) {
+    fn knock_down(&mut self, anim_id: i16, grp: usize, down_ms: u32, clump: &mut Clump, m: &AnimManager) {
         self.abort_fight(clump, m);
         self.gun = None;
         self.throw = None;
         self.air = AirTask::None;
-        let anim = clump.blend_animation(m, group::DEFAULT, anim_id, 8.0).map(|i| {
+        let anim = clump.blend_animation(m, grp, anim_id, 8.0).map(|i| {
             clump.assocs[i].finish_cb = true;
             clump.assocs[i].uid
         });

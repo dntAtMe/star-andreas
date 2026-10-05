@@ -315,6 +315,9 @@ pub struct RespIn {
     pub threat_is_ped: bool,
     pub threat_down: bool,
     pub threat_wanted_hp: Option<(i32, f32)>,
+    /// The threat sits in a vehicle / is in CTaskSimpleFall (FallAndGetUp's fall).
+    pub threat_in_vehicle: bool,
+    pub threat_falling: bool,
     /// The ped's pedstats shooting rate (+0x30, read as a signed byte for GUN_PANIC).
     pub shooting_rate: u16,
 }
@@ -825,6 +828,93 @@ impl NpcState {
     }
 }
 
+
+/// CTaskComplexPolicePursuit (0x44F) → CTaskComplexArrestPed (0x44D) for a cop on foot.
+#[derive(Debug, Clone)]
+pub struct Pursuit {
+    pub target: EntityId,
+    kill: KillPedOnFoot,
+    /// CTaskSimpleArrestPed (0x44C): the ARRESTgun anim.
+    arresting: Option<Option<u32>>,
+}
+
+impl Pursuit {
+    pub fn new(target: EntityId) -> Self {
+        Self { target, kill: KillPedOnFoot::new(target), arresting: None }
+    }
+
+    pub fn arresting(&self) -> bool {
+        self.arresting.is_some()
+    }
+}
+
+impl NpcState {
+    /// The cop's pursuit (the DEFAULT slot's CTaskComplexWanderCop sub-task). Returns false
+    /// when the ped has no pursuit.
+    pub fn process_pursuit(
+        &mut self,
+        me: &mut PedNow,
+        clump: &mut Clump,
+        m: &AnimManager,
+        tasks: &mut crate::pedtask::PedTasks,
+        ri: &RespIn,
+        i: &NpcIn,
+    ) -> bool {
+        let Some(mut pu) = self.pursuit.take() else { return false };
+        // The world ends the pursuit; without a living target the cop just stands.
+        let Some(tp) = ri.threat_pos.filter(|_| ri.threat_alive) else {
+            if let Some(mut f) = tasks.fight.take() {
+                f.make_abortable(tasks, clump, m, false);
+            }
+            self.move_state = 1;
+            self.pursuit = Some(pu);
+            return true;
+        };
+        if let Some(anim) = pu.arresting.as_mut() {
+            // CTaskSimpleArrestPed::ProcessPed: face the target while the anim plays.
+            self.move_state = 1;
+            self.last_move_state = 1;
+            *me.aim_rot = limit_radian_angle(radian_angle_between_points(tp.x, tp.y, me.pos.x, me.pos.y));
+            if anim.is_none() {
+                *anim = blend(clump, m, ARREST_GUN, 4.0, true);
+                self.arrest_request = Some(pu.target);
+            }
+            self.pursuit = Some(pu);
+            return true;
+        }
+        if ri.threat_in_vehicle {
+            // 0x2D2 (arrest from the car) is not ported: stand still (0xCB).
+            if let Some(mut f) = tasks.fight.take() {
+                f.make_abortable(tasks, clump, m, false);
+            }
+            pu.kill.fighting = false;
+            self.move_state = 1;
+            self.pursuit = Some(pu);
+            return true;
+        }
+        // ArrestPed CreateNextSubTask: the target is down (CTaskSimpleFall) within 2 m height
+        // and 3 m flat → SetDownTime(100000), CTaskSimpleArrestPed.
+        let d = tp - me.pos;
+        if ri.threat_falling && d.z.abs() <= 2.0 && d.truncate().length_squared() < 3.0 * 3.0 {
+            if let Some(mut f) = tasks.fight.take() {
+                f.make_abortable(tasks, clump, m, true);
+            }
+            pu.arresting = Some(None);
+            self.pursuit = Some(pu);
+            return true;
+        }
+        // 0x3E8 CTaskComplexKillPedOnFoot (the melee child).
+        let mut k = pu.kill.clone();
+        self.kill_ped_on_foot(&mut k, me, clump, m, tasks, ri, i);
+        pu.kill = k;
+        self.pursuit = Some(pu);
+        true
+    }
+}
+
+/// `ARRESTgun` (group 0, 139).
+const ARREST_GUN: i16 = 139;
+
 /// `CPedGeometryAnalyser::ComputeEntityBoundingBoxCorners` (0x5F1FA0), normal path: the
 /// entity's bbox grown by the 0.35 nav pad, flattened to a 2D box at height `z`.
 pub fn entity_bbox_corners(m: &crate::physical::Matrix, bmin: Vec3, bmax: Vec3, z: f32) -> [Vec3; 4] {
@@ -1182,7 +1272,15 @@ impl crate::world::World {
         // The responses' threats: position, alive, lying down, the player's wanted level.
         let wanted = self.wanted.level;
         for v in views.iter().filter(|v| v.npc) {
-            let threat = npc_ref(self, v.id).and_then(|n| n.response.as_ref().and_then(|r| r.threat()));
+            let threat = npc_ref(self, v.id)
+                .and_then(|n| n.response.as_ref().and_then(|r| r.threat()).or_else(|| n.pursuit.as_ref().map(|p| p.target)));
+            let (in_veh, falling) = {
+                let tl = threat.and_then(|t| self.body(t)).and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>());
+                (
+                    tl.is_some_and(|l| l.vehicle.is_some()),
+                    tl.is_some_and(|l| matches!(l.tasks.health.fall, Some(crate::peddamage::FallAndGetUp::Fall { .. }))),
+                )
+            };
             let (tp, alive, is_ped, down, wanted_hp) = {
                 let tb = threat.and_then(|t| self.body(t));
                 let tl = tb.and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>());
@@ -1200,8 +1298,11 @@ impl crate::world::World {
                 n.resp_in.threat_is_ped = is_ped;
                 n.resp_in.threat_down = down;
                 n.resp_in.threat_wanted_hp = wanted_hp;
+                n.resp_in.threat_in_vehicle = in_veh;
+                n.resp_in.threat_falling = falling;
             }
         }
+        self.update_police(&views);
     }
 }
 

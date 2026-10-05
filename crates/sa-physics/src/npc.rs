@@ -109,6 +109,11 @@ pub struct NpcState {
     pub dead_reported: bool,
     /// What the world tells the response this frame (threat position, stats).
     pub resp_in: crate::pedevents::RespIn,
+    /// A cop's CTaskComplexPolicePursuit, the 3 s wait before re-joining, and the arrest of
+    /// this frame (for the world).
+    pub pursuit: Option<crate::pedevents::Pursuit>,
+    pub rejoin_after: u32,
+    pub arrest_request: Option<crate::world::EntityId>,
     pub(crate) rng: crate::damage::Rand,
 }
 
@@ -136,6 +141,9 @@ impl NpcState {
             damaged_by: None,
             dead_reported: false,
             resp_in: Default::default(),
+            pursuit: None,
+            rejoin_after: 0,
+            arrest_request: None,
             rng: crate::damage::Rand::new(seed as u32 * 7919 + 1),
         }
     }

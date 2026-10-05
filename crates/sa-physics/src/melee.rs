@@ -140,6 +140,10 @@ pub struct Strike {
     pub damage: f32,
     pub combo: i8,
     pub mv: i8,
+    /// The combo's anim group and the move's FALL / NOFALL flags.
+    pub group: usize,
+    pub fall: bool,
+    pub no_fall: bool,
 }
 
 /// `CTaskSimpleFight` (0x28 bytes).
@@ -654,6 +658,9 @@ impl FightTask {
                                 damage: strike_damage(t, combo.damage[mv]),
                                 combo: cs,
                                 mv: mv as i8,
+                                group: combo.group,
+                                fall: combo.flags & if mv == 4 { 0x100 } else { 0x10 << mv } != 0,
+                                no_fall: mv <= 2 && combo.flags & (0x1000 << mv) != 0,
                             }));
                         }
                     } else if tt >= combo.chain_time[mv] && (11..=14).contains(&self.next_cmd) {
@@ -985,6 +992,7 @@ impl World {
             damage: s.damage as i32 as f32,
             piece: 3,
             dir,
+            fight: Some(crate::peddamage::FightHit { combo_set: s.combo, mv: s.mv, group: s.group, fall: s.fall, no_fall: s.no_fall }),
         });
         let thr = if (8..=12).contains(&s.combo) {
             100

@@ -241,6 +241,7 @@ impl PedLogic {
                     damage: (ts * 3.0) as i32 as f32,
                     piece: 3,
                     dir: 0,
+                    fight: None,
                 });
             }
         } else if pd.breath < BREATH_MAX {
@@ -335,7 +336,7 @@ impl BodyLogic for PedLogic {
             }
         }
         // Step 11: CPedIntelligence::Process (the player's tasks).
-        if self.is_player && self.tasks.anims.is_some() && !busy && self.enter.is_none() {
+        if self.is_player && self.tasks.anims.is_some() && !busy && self.enter.is_none() && !self.tasks.arrested {
             if let Some(clump) = self.clump.as_deref_mut() {
                 let mut core = PedCore {
                     p,
@@ -372,7 +373,9 @@ impl BodyLogic for PedLogic {
                     }
                     let ri = npc.resp_in;
                     let mut me = crate::pedevents::PedNow { pos: p.matrix.pos, move_speed: p.move_speed, aim_rot: &mut self.aim_rot, cur_rot: self.cur_rot };
-                    if !npc.process_response(&mut me, clump, &m, &mut self.tasks, &ri, &i) {
+                    if !npc.process_response(&mut me, clump, &m, &mut self.tasks, &ri, &i)
+                        && !npc.process_pursuit(&mut me, clump, &m, &mut self.tasks, &ri, &i)
+                    {
                         npc.process(p.matrix.pos, p.move_speed, &mut self.aim_rot, self.cur_rot, &i);
                     }
                     // Secondary slot 0: an NPC's CTaskSimpleFight.
