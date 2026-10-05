@@ -559,6 +559,9 @@ fn orbit_camera(
     target: Single<(Entity, &Transform, &CamFollow, Option<&crate::vehicle::Vehicle>)>,
     cam: Single<(&mut Transform, &mut OrbitCam), Without<CamFollow>>,
     mut sa_cam: ResMut<crate::camera::SaCam>,
+    keys: Res<ButtonInput<KeyCode>>,
+    ped: Single<&Ped>,
+    mut look: Local<Vec2>,
 ) {
     // The target's Transform is already the interpolated SA pose (SaSync).
     let (target_e, target_tf, follow, car) = *target;
@@ -569,6 +572,52 @@ fn orbit_camera(
     sa_cam.reset_from_orbit();
     let (mut tf, mut oc) = cam.into_inner();
     let dt = time.delta_secs();
+    // Home toggles the first-person view in vehicles too (not in SA).
+    if keys.just_pressed(KeyCode::Home) {
+        sa_cam.zoom = if sa_cam.zoom == 4 { 2 } else { 4 };
+        *look = Vec2::ZERO;
+    }
+    if sa_cam.zoom == 4 {
+        // The eye at the driver's head, held in the car's frame (no physics-step jitter): the
+        // head bone from the SA pose, moved into car space with the same step's car matrix.
+        let eye_local = (|| {
+            let l = sa.logic::<PedLogic>(ped.sa)?;
+            let c = l.clump.as_deref()?;
+            let f = c.frame_of_tag(5)?;
+            let pm = sa.world.body(ped.sa)?.phys.matrix;
+            let veh = l.vehicle.as_ref()?.veh;
+            let vm = sa.world.body(veh)?.phys.matrix;
+            let head = pm.transform(c.ltm(f).w_axis.truncate());
+            Some(vm.inverse().transform(head))
+        })();
+        if let Some(el) = eye_local {
+            // Look around with the mouse; recentre when it is left alone.
+            if lock.0 && motion.delta != Vec2::ZERO {
+                look.x = (look.x - motion.delta.x * 0.003).clamp(-2.4, 2.4);
+                look.y = (look.y - motion.delta.y * 0.003).clamp(-0.9, 0.7);
+                *idle = 0.0;
+            } else {
+                *idle += dt;
+                if *idle > 1.5 {
+                    let k = 1.0 - (-3.0 * dt).exp();
+                    let l0 = *look;
+                    *look = l0 - l0 * k;
+                }
+            }
+            // GTA car space: x right, y forward, z up; a little forward and up from the head.
+            let m = crate::saphys::gta_matrix(target_tf);
+            let eye = m.transform(Vec3::new(el.x, el.y + 0.12, el.z + 0.07));
+            // Look offsets: yaw about the car's up, pitch about its right.
+            let fwd = (m.fwd * look.x.cos() - m.right * look.x.sin()).normalize_or(m.fwd);
+            let right = fwd.cross(m.up).normalize_or(m.right);
+            let dir = (fwd * look.y.cos() + m.up * look.y.sin()).normalize_or(fwd);
+            let up = right.cross(dir).normalize_or(m.up);
+            let g = |v: Vec3| Vec3::from(crate::world::g2b(v.to_array()));
+            tf.translation = g(eye);
+            *tf = tf.looking_to(g(dir), g(up));
+            return;
+        }
+    }
     let moved = lock.0 && motion.delta != Vec2::ZERO;
     if moved {
         oc.yaw -= motion.delta.x * 0.003;

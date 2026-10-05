@@ -88,7 +88,7 @@ Last updated: 2026-10-05.
 | Sun | ✅ | timecycle sun direction / core colour as a directional light with 2 shadow cascades (100 m); peds, cars and the map cast; the prelit map darkens in shadow and warms in sun |
 | Sky reflections | ✅ | HDR cubemap painted from the timecycle sky + sun every 0.5 s, GPU-filtered environment light; clearcoat car paint, glossy glass |
 | Night lights | ✅ | HDR-boosted coronas bloom; clustered point lights light the prelit map |
-| First-person view | ✅ | on foot, 4th step of the Home camera cycle (SA_FP=1 to start in it): eye at the head bone, head hidden, the body turns with the view; first-person aiming with the crosshair; not in vehicles yet |
+| First-person view | ✅ | on foot, 4th step of the Home camera cycle (SA_FP=1 to start in it): eye at the head bone, head hidden, the body turns with the view; first-person aiming with the crosshair; in vehicles Home toggles a cockpit view (eye at the driver's head in the car frame, mouse look that recentres after 1.5 s) |
 | Atmosphere | 🟡 | the fog glows toward a low sun (map shader + DistanceFog); volumetric sun shafts opt-in (SA_VOL=1, tints the scene) |
 | Performance | ✅ | bindless map material (one bind group, batched draws): ~90 fps uncapped enhanced, ~130 classic; draw distance at SA's max (SA_DRAWDIST); SA_NOVSYNC / SA_FPSLOG / `trace` feature for measuring |
 | Not yet | ❌ | water reflections, clouds, contact shadows |
