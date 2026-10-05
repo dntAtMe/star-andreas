@@ -39,8 +39,8 @@ use crate::{
 };
 
 /// Extra distance beyond visibility at which instances are loaded / kept.
-const LOAD_MARGIN: f32 = 60.0;
-const UNLOAD_MARGIN: f32 = 200.0;
+const LOAD_MARGIN: f32 = 150.0;
+const UNLOAD_MARGIN: f32 = 260.0;
 const SCAN_INTERVAL: f32 = 0.2;
 const MAX_RESULTS_PER_FRAME: usize = 96;
 const MAX_SPAWNS_PER_FRAME: usize = 3000;

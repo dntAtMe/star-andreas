@@ -126,12 +126,15 @@ impl World {
             }
         }
 
+        // CRenderer's LOD distance scale (the PC menu's draw-distance slider, 0.925..1.8):
+        // SA_DRAWDIST, 1.3 by default (1.8 = max; each step costs frame rate).
+        let dd_scale: f32 = std::env::var("SA_DRAWDIST").ok().and_then(|v| v.parse().ok()).unwrap_or(1.3);
         // An instance referenced as a LOD becomes visible where its HD fades out.
         let mut lod_near = vec![0.0f32; raw.len()];
         for r in &raw {
             if let (Some(l), Some(obj)) = (r.lod, objects.get(&r.inst.id)) {
                 if l < lod_near.len() {
-                    lod_near[l] = lod_near[l].max(obj.draw_distance);
+                    lod_near[l] = lod_near[l].max(obj.draw_distance * dd_scale);
                 }
             }
         }
@@ -151,7 +154,7 @@ impl World {
                 if !(interior == 0 || interior == 13) || !noon(r.inst.id) {
                     return None;
                 }
-                let far = obj.draw_distance;
+                let far = obj.draw_distance * dd_scale;
                 let near = if lod_near[i] < far { lod_near[i] } else { 0.0 };
                 Some(Instance { id: r.inst.id, pos: g2b(r.inst.pos), rot: ipl_rot(r.inst.rot), near, far })
             })
