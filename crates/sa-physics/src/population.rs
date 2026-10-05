@@ -166,6 +166,10 @@ pub struct Population {
     /// CPopCycle's car numbers (dealers + gangs + cops + other cars) and the popcycle groups'
     /// percentages of the current zone/time, for the traffic.
     pub num_cars: f32,
+    /// `CPopulation::PedDensityMultiplier` (0x8D2530) / `CCarCtrl::CarDensityMultiplier`
+    /// (0x8A5B20), set by scripts (03DE / 01EB); they scale the popcycle maxima [I: where].
+    pub ped_density_mult: f32,
+    pub car_density_mult: f32,
     pub group_perc: [u8; 18],
     pub requests: Vec<SpawnPed>,
 }
@@ -207,6 +211,8 @@ impl Population {
             num_other: 0.0,
             num_civ: 0,
             num_cars: 0.0,
+            ped_density_mult: 1.0,
+            car_density_mult: 1.0,
             group_perc: [0; 18],
             requests: Vec::new(),
         }
@@ -315,9 +321,9 @@ impl Population {
         let other = if s <= 1.0 { 1.0 - s } else { 0.0 };
         let f = 1.0 - i.rain.sqrt() * 0.8;
         let perc_other_peds = (pc.perc_other[idx] as f32 * f) as i32 as f32;
-        let max_peds = pc.max_peds[idx] as f32;
+        let max_peds = pc.max_peds[idx] as f32 * self.ped_density_mult;
         self.num_other = perc_other_peds * other * 0.01 * max_peds;
-        let max_cars = pc.max_cars[idx] as f32;
+        let max_cars = pc.max_cars[idx] as f32 * self.car_density_mult;
         self.num_cars = (pc.perc_dealers[idx] as f32 * dealers + pc.perc_gang[idx] as f32 * gang + pc.perc_cops[idx] as f32 * cops + pc.perc_other[idx] as f32 * other)
             * 0.01
             * max_cars;
@@ -507,6 +513,9 @@ impl crate::world::World {
                 continue;
             }
             let Some(npc) = ped.npc.as_mut() else { continue };
+            if npc.mission {
+                continue;
+            }
             let d = (pos.truncate() - player.truncate()).length();
             match manage_ped(d, visible(pos, 1.0), npc.ped_type == 6, dead_for, npc.fading_out, npc.alpha, now, &mut npc.remove_at_ms) {
                 Manage::Keep => {}
@@ -646,6 +655,62 @@ impl crate::world::World {
                     c.awaiting_occupants = false;
                 }
             }
+            if !ok {
+                self.remove(id);
+                return None;
+            }
+        }
+        Some(id)
+    }
+
+    /// A script ped (`CREATE_CHAR` 009A / `CREATE_CHAR_INSIDE_CAR` / `CREATE_CHAR_AS_PASSENGER`):
+    /// created by the mission, standing still (no wander), never removed by ManagePed. `seat`
+    /// as SpawnPed (-1 = the driver).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_mission_ped(
+        &mut self,
+        model: u32,
+        ped_type: u8,
+        anim_group: usize,
+        pos: Vec3,
+        heading: f32,
+        mut clump: crate::anim::Clump,
+        anims: Arc<crate::anim::AnimManager>,
+        seat: Option<(crate::world::EntityId, i8)>,
+    ) -> Option<crate::world::EntityId> {
+        use crate::ped::{PedLogic, ped_col_model, ped_physical};
+        let mut m = crate::physical::Matrix::IDENTITY;
+        m.pos = pos;
+        let phys = ped_physical(m);
+        let mut logic = PedLogic::new(false, heading);
+        clump.blend_animation(&anims, anim_group, crate::anim::anim_id::IDLE, 1000.0);
+        logic.prev_pose = clump.pose.clone();
+        logic.clump = Some(Box::new(clump));
+        logic.tasks.anims = Some(anims);
+        logic.tasks.anim_group = anim_group;
+        if let Some(pl) = self.player_id().and_then(|p| self.body(p)).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()) {
+            logic.tasks.melee = pl.tasks.melee.clone();
+            logic.tasks.infos = pl.tasks.infos.clone();
+        }
+        let paths = self.population.as_ref().map(|p| p.data.paths.clone()).unwrap_or_default();
+        let seed = (self.rng.next() & 0xFFFF) as u16;
+        let mut npc = crate::npc::NpcState::new(model, ped_type, seed, anim_group, 0, paths, self.now_ms);
+        npc.mission = true;
+        npc.wander = None;
+        npc.alpha = 255;
+        logic.tasks.accuracy = 60;
+        logic.tasks.shooting_rate = 40;
+        logic.tasks.ped_type = ped_type;
+        logic.tasks.rng = crate::damage::Rand::new(pos.x.to_bits() ^ pos.y.to_bits());
+        logic.npc = Some(npc);
+        let id = self.add_body(phys, ped_col_model(), Box::new(logic));
+        if let Some((veh, seat)) = seat {
+            let car = self.body(veh).and_then(|b| b.logic.as_any().downcast_ref::<crate::automobile::Automobile>()).map(|c| c.seat_front);
+            let ok = match car {
+                Some(f) if seat < 0 => self.set_ped_in_car_direct(id, veh, f),
+                Some(_) => self.set_ped_in_car_as_passenger(id, veh, seat),
+                None => false,
+            };
             if !ok {
                 self.remove(id);
                 return None;

@@ -86,6 +86,8 @@ pub struct Cutscene {
     track: Option<Entity>,
     /// `ms_wasCutsceneSkipped`.
     pub skipped: bool,
+    /// Cleared objects / track waiting to be despawned, and the presentation to restore.
+    despawn: Vec<Entity>,
     clear_request: bool,
 }
 
@@ -113,8 +115,15 @@ impl Cutscene {
             _ => true,
         }
     }
-    /// 02EA CLEAR_CUTSCENE (DeleteCutsceneData).
+    /// 02EA CLEAR_CUTSCENE (DeleteCutsceneData): the state goes at once (a LOAD may follow in
+    /// the same frame); the entities and the presentation are restored by the next update.
     pub fn clear(&mut self) {
+        let objs: Vec<Entity> = self.objects.drain(..).map(|o| o.root).collect();
+        self.despawn.extend(objs);
+        self.despawn.extend(self.track.take());
+        self.status = Status::Idle;
+        self.message = None;
+        self.splines = None;
         self.clear_request = true;
     }
     pub fn running(&self) -> bool {
@@ -255,23 +264,23 @@ fn test_driver(
             // The scripts set the time of day before the cutscene (06:30 before PROLOG3).
             let now = sa.world.now_ms;
             sa.world.clock.set(now, 6, 30);
-            overlay.fade_to(1.0, 0.0);
+            overlay.fade(0.0, 0);
             cs.load(&name);
             *stage = 1;
         }
         1 if cs.has_loaded() => {
             cs.start();
-            overlay.fade_to(0.0, 1.0);
+            overlay.fade(1.0, 1);
             *stage = 2;
         }
         2 if cs.status == Status::Running && cs.has_finished() => {
-            overlay.fade_to(1.0, 0.0);
+            overlay.fade(0.0, 0);
             cs.clear();
             *stage = 3;
             *wait = 0.0;
         }
         3 if *wait > 0.5 => {
-            overlay.fade_to(0.0, 1.0);
+            overlay.fade(1.0, 1);
             *stage = 4;
         }
         _ => {}
@@ -384,8 +393,49 @@ fn load(
 }
 
 /// MakePlayerSafe: no player control while a cutscene runs.
-fn freeze_player(cs: Res<Cutscene>, mut sa: ResMut<SaPhys>, ped: Single<&Ped>) {
-    if !cs.running() {
+fn freeze_player(
+    cs: Res<Cutscene>,
+    control: Res<crate::script::PlayerControl>,
+    mut walk: ResMut<crate::script::ScriptWalk>,
+    mut sa: ResMut<SaPhys>,
+    ped: Single<&Ped>,
+) {
+    if let Some((id, target, ms)) = walk.0 {
+        let pos = sa.world.body(id).map(|b| b.phys.matrix.pos);
+        let orient = sa.world.cam_info().orientation;
+        let Some(pos) = pos else {
+            walk.0 = None;
+            return;
+        };
+        let d = (target - pos).truncate();
+        if d.length() < 0.5 {
+            walk.0 = None;
+        } else if let Some(l) = sa.logic_mut::<PedLogic>(id) {
+            // PlayerControlZelda: heading = RadianAngleBetweenPoints(0, 0, -lr, ud) - cam
+            // orientation; pick the stick direction that gives the heading to the target.
+            let want = (-d.x).atan2(d.y);
+            let mag = if ms >= 6 { 128.0 } else { 60.0 };
+            let mut best = (f32::MAX, 0.0, 0.0);
+            for k in 0..360 {
+                let a = (k as f32).to_radians();
+                let (lr, ud) = (a.sin() * mag, a.cos() * mag);
+                let h = sa_physics::pedtask::radian_angle_between_points(0.0, 0.0, -lr, ud) - orient;
+                let mut e = (h - want).rem_euclid(std::f32::consts::TAU);
+                if e > std::f32::consts::PI {
+                    e = std::f32::consts::TAU - e;
+                }
+                if e < best.0 {
+                    best = (e, lr, ud);
+                }
+            }
+            l.tasks.pad = Default::default();
+            l.tasks.pad.walk_lr = best.1;
+            l.tasks.pad.walk_ud = best.2;
+            l.tasks.pad.sprint = ms >= 7;
+            return;
+        }
+    }
+    if !cs.running() && control.0 {
         return;
     }
     if let Some(l) = sa.logic_mut::<PedLogic>(ped.sa) {
@@ -395,7 +445,7 @@ fn freeze_player(cs: Res<Cutscene>, mut sa: ResMut<SaPhys>, ped: Single<&Ped>) {
 
 /// `CCutsceneMgr::Update_overlay` + the flyby camera + the object anims, one frame.
 #[allow(clippy::too_many_arguments)]
-fn update_cutscene(
+pub(crate) fn update_cutscene(
     mut commands: Commands,
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -412,20 +462,17 @@ fn update_cutscene(
     if cs.clear_request {
         cs.clear_request = false;
         // DeleteCutsceneData.
-        for o in cs.objects.drain(..) {
-            commands.entity(o.root).despawn();
+        for e in cs.despawn.drain(..) {
+            commands.entity(e).despawn();
         }
-        if let Some(t) = cs.track.take() {
-            commands.entity(t).despawn();
-        }
-        cs.status = Status::Idle;
-        cs.message = None;
         overlay.widescreen = false;
         overlay.subtitle = None;
         for mut v in &mut player_vis {
             *v = Visibility::Inherited;
         }
-        return;
+        if !cs.running() {
+            return;
+        }
     }
     let dt = time.delta_secs();
     let (mut cam_tf, mut proj) = cam.into_inner();
@@ -487,10 +534,11 @@ fn update_cutscene(
         let finish = Flyby::finish_ms(sp);
         if time_ms + 1000 > finish && !cs.fade_started {
             cs.fade_started = true;
-            overlay.fade_to(1.0, 1.0);
+            overlay.fade(1.0, 0);
         }
         // IsCutsceneSkipButtonBeingPressed → FinishCutscene.
-        let skip = keys.any_just_pressed([KeyCode::Space, KeyCode::Enter, KeyCode::NumpadEnter]) || mouse.just_pressed(MouseButton::Left);
+        // SA_CUTSKIP=1 (testing): skip every cutscene at once.
+        let skip = keys.any_just_pressed([KeyCode::Space, KeyCode::Enter, KeyCode::NumpadEnter]) || mouse.just_pressed(MouseButton::Left) || std::env::var("SA_CUTSKIP").is_ok();
         if skip && cs.flyby.along < 1.0 {
             cs.skipped = true;
             cs.timer = finish as f32 * 0.001;

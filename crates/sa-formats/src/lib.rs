@@ -6,6 +6,7 @@
 
 pub mod audio;
 pub mod bin;
+pub mod carrec;
 pub mod col;
 pub mod cutscene;
 pub mod dat;

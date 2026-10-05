@@ -285,3 +285,61 @@ fn debug_wanted(time: Res<Time>, mut sa: ResMut<SaPhys>, mut done: Local<bool>, 
         info!("wanted {} cops in pursuit {} hp {hp:.0} | {}", sa.world.wanted.level, sa.world.wanted.cops_in_pursuit, cops.join(", "));
     }
 }
+
+/// A script ped to create (`CREATE_CHAR` and friends): model name (dff / txd), peds.ide id,
+/// ped type, anim group, GTA position and heading, optional seat.
+pub(crate) struct ScriptPedReq {
+    pub model: String,
+    pub id: u32,
+    pub ped_type: u8,
+    pub anim_group: usize,
+    pub pos: Vec3,
+    pub heading: f32,
+    pub seat: Option<(EntityId, i8)>,
+}
+
+/// Build a script ped's model and add it to the physics world as a mission ped.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_script_ped(
+    In(req): In<ScriptPedReq>,
+    mut commands: Commands,
+    world: Res<WorldRes>,
+    anims: Option<Res<PedAnims>>,
+    mut sa: ResMut<SaPhys>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+) -> Option<EntityId> {
+    let anims = anims?;
+    let clump = world.0.file(&format!("{}.dff", req.model)).and_then(|d| dff::parse(d).ok())?;
+    let textures: HashMap<String, (Handle<Image>, bool)> = world
+        .0
+        .file(&format!("{}.txd", req.model))
+        .and_then(|d| txd::parse(d).ok())
+        .map(|t| {
+            t.into_iter()
+                .filter_map(|t| convert_texture(t, false))
+                .map(|t| (t.name.clone(), t.alpha, make_image(t)))
+                .map(|(n, a, img)| (n, (images.add(img), a)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let vis = match build_ped_visual(&mut commands, &mut meshes, &mut materials, &mut bindposes, &clump, &textures) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("script ped {}: {e:#}", req.model);
+            return None;
+        }
+    };
+    let Some(id) = sa.world.add_mission_ped(req.id, req.ped_type, req.anim_group, req.pos, req.heading, vis.anim_clump, anims.0.clone(), req.seat) else {
+        commands.entity(vis.model_root).despawn();
+        return None;
+    };
+    let tf = Transform::from_translation(g2b(req.pos.to_array()));
+    let m = gta_matrix(&tf);
+    commands
+        .spawn((tf, Visibility::Hidden, NpcPed { sa: id, bones: vis.bones, node_frames: vis.node_frames }, SaBody::new(id, m)))
+        .add_child(vis.model_root);
+    Some(id)
+}

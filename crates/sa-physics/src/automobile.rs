@@ -374,6 +374,8 @@ pub struct Automobile {
     pub wheel_lighting: [u8; 4],
     /// `CAutoPilot` of a random traffic car (None for the player's / parked cars).
     pub autopilot: Option<crate::traffic::AutoPilot>,
+    /// veh+0x424: the CVehicleRecording slot playing this car (AI and pad input off).
+    pub rec_slot: Option<u8>,
     /// veh+0x460 driver, +0x464.. passengers, +0x488 max passengers, model class (+0x4D).
     pub driver: Option<crate::world::EntityId>,
     pub passengers: [Option<crate::world::EntityId>; 3],
@@ -495,6 +497,7 @@ impl Automobile {
             wheel_cp: [ColPoint::default(); 4],
             wheel_lighting: [0x48; 4],
             autopilot: None,
+            rec_slot: None,
             driver: None,
             passengers: [None; 3],
             max_passengers: 1,

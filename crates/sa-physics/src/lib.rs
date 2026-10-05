@@ -8,6 +8,7 @@ pub mod armed;
 pub mod automobile;
 pub mod bike;
 pub mod breakable;
+pub mod carrec;
 pub mod boat;
 pub mod bullet;
 pub mod clock;

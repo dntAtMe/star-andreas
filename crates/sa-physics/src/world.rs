@@ -213,6 +213,8 @@ pub struct World {
     pub population: Option<Box<crate::population::Population>>,
     /// NPC bodies the population removed this frame (for the app to despawn).
     pub npc_removed: Vec<EntityId>,
+    /// `CVehicleRecording` playback slots.
+    pub recordings: crate::carrec::Recordings,
     /// `CCarCtrl` (road traffic), set by the app with the path and car group data.
     pub traffic: Option<Box<crate::traffic::Traffic>>,
     /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
@@ -286,6 +288,7 @@ impl World {
             water: None,
             population: None,
             npc_removed: Vec::new(),
+            recordings: Default::default(),
             traffic: None,
             gun_fx_toggle: 0,
             veh_anim_flags: Vec::new(),
@@ -540,6 +543,8 @@ impl World {
             }
         }
 
+        // CVehicleRecording::Update (after the collision / shift passes).
+        self.update_recordings();
         // CPedIntelligence::ProcessAfterProcCol: seated peds follow their vehicle.
         self.process_peds_in_vehicles(ts);
         self.process_peds_entering(ts);

@@ -85,6 +85,8 @@ pub struct NpcState {
     pub last_move_state: u8,
     /// ped+0x54C off-screen removal timer.
     pub remove_at_ms: u32,
+    /// `SetCharCreatedBy(2)`: a script ped (never removed by the population code, no wander).
+    pub mission: bool,
     /// Clump alpha and the fade-out flag (ped+0x470 & 8).
     pub alpha: u8,
     pub fading_out: bool,
@@ -137,6 +139,7 @@ impl NpcState {
             move_state: 1,
             last_move_state: 0,
             remove_at_ms: now_ms + 4000,
+            mission: false,
             alpha: 0,
             fading_out: false,
             wander: Some(Wander::new(dir)),

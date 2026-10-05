@@ -13,6 +13,7 @@ mod lights;
 mod peds;
 mod player;
 mod saphys;
+mod script;
 mod shadows;
 mod sky;
 mod target_tri;
@@ -103,7 +104,7 @@ fn main() -> anyhow::Result<()> {
         lights::LightsPlugin,
         colour_filter::ColourFilterPlugin,
     ))
-    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin, breaks::BreaksPlugin, hud::HudPlugin, target_tri::TargetTrianglePlugin, gfx::GfxPlugin, audio::AudioPlugin, cutscene::CutscenePlugin))
+    .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin, breaks::BreaksPlugin, hud::HudPlugin, target_tri::TargetTrianglePlugin, gfx::GfxPlugin, audio::AudioPlugin, cutscene::CutscenePlugin, script::ScriptPlugin))
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);

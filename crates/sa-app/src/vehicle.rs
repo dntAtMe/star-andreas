@@ -1238,3 +1238,26 @@ fn expire_flying_parts(mut commands: Commands, time: Res<Time>, parts: Query<(En
         }
     }
 }
+
+/// A script car (`CREATE_CAR`): model name, GTA position and heading (radians).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_script_car(
+    In((name, pos, heading)): In<(String, Vec3, f32)>,
+    mut commands: Commands,
+    world: Res<WorldRes>,
+    db: Option<Res<VehicleDb>>,
+    mut sa: ResMut<SaPhys>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) -> Option<(Entity, EntityId)> {
+    let db = db?;
+    let bpos = crate::world::g2b(pos.to_array());
+    match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, &name, bpos, heading, 0) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            warn!("script car {name}: {e:#}");
+            None
+        }
+    }
+}

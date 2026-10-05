@@ -36,8 +36,17 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Overlay>().add_systems(Startup, setup_hud).add_systems(PostUpdate, draw_hud);
+        app.init_resource::<Overlay>()
+            .add_systems(Startup, setup_hud)
+            .add_systems(Update, process_fade.after(crate::saphys::SaStep))
+            .add_systems(PostUpdate, draw_hud);
     }
+}
+
+/// CCamera::Process → ProcessFade, once per frame (clipped time step).
+fn process_fade(time: Res<Time>, mut overlay: ResMut<Overlay>) {
+    let ts = (time.delta_secs() * 50.0).min(3.0);
+    overlay.process_fade(ts);
 }
 
 /// Script / cutscene presentation state the HUD draws: widescreen bars
@@ -48,35 +57,99 @@ pub struct Overlay {
     pub widescreen: bool,
     /// GXT key of the current brief.
     pub subtitle: Option<String>,
-    /// Black alpha 0..1 and its target / rate (per second).
-    pub fade: f32,
-    fade_target: f32,
-    fade_rate: f32,
+    /// `CDraw::FadeValue` source (+0xBFC, 0..255) and the fade state (+0x51 fading, +0xC30
+    /// direction 0 out / 1 in, +0xC04 duration s).
+    pub fade_value: f32,
+    fading: bool,
+    fade_dir: u8,
+    fade_dur: f32,
     /// The mission table to load (`054C`); loaded by the HUD when it changes.
     pub mission_table: Option<String>,
+    /// This frame's script text lines (`IntroTextLines`, DISPLAY_TEXT).
+    pub texts: Vec<IntroText>,
+}
+
+/// One `IntroTextLines` entry (scm.md §11), in the 640×448 script screen space.
+#[derive(Clone, Debug)]
+pub struct IntroText {
+    pub scale: (f32, f32),
+    pub colour: [u8; 4],
+    pub justify: bool,
+    pub centre: bool,
+    pub background: bool,
+    pub wrap_x: f32,
+    pub centre_size: f32,
+    pub background_colour: [u8; 4],
+    pub proportional: bool,
+    pub drop_colour: [u8; 4],
+    pub shadow: u8,
+    pub outline: u8,
+    pub draw_before_fade: bool,
+    pub right: bool,
+    pub font: u8,
+    pub x: f32,
+    pub y: f32,
+    pub key: String,
+}
+
+impl Default for IntroText {
+    /// The per-frame defaults from CTheScripts::Process.
+    fn default() -> Self {
+        Self {
+            scale: (0.48, 1.12),
+            colour: [225, 225, 225, 255],
+            justify: false,
+            centre: false,
+            background: false,
+            wrap_x: 182.0,
+            centre_size: 640.0,
+            background_colour: [128, 128, 128, 128],
+            proportional: true,
+            drop_colour: [0, 0, 0, 255],
+            shadow: 2,
+            outline: 0,
+            draw_before_fade: false,
+            right: false,
+            font: 1,
+            x: 0.0,
+            y: 0.0,
+            key: String::new(),
+        }
+    }
 }
 
 impl Overlay {
-    /// Fade toward `target` (1 = black) over `secs` (0 = at once).
-    pub fn fade_to(&mut self, target: f32, secs: f32) {
-        self.fade_target = target;
-        if secs <= 0.0 {
-            self.fade = target;
-            self.fade_rate = 0.0;
-        } else {
-            self.fade_rate = 1.0 / secs;
-        }
+    /// `CCamera::Fade(seconds, dir)` (0x50AC20): dir 0 fades out to black, 1 fades in.
+    pub fn fade(&mut self, secs: f32, dir: u8) {
+        self.fade_dur = secs;
+        self.fading = true;
+        self.fade_dir = dir;
     }
 
-    /// Fading still in progress (`GetFading`).
+    /// `GetFading` (0x50ADE0).
     pub fn fading(&self) -> bool {
-        self.fade != self.fade_target
+        self.fading
     }
 
-    fn step(&mut self, dt: f32) {
-        let d = self.fade_target - self.fade;
-        let s = self.fade_rate * dt;
-        self.fade = if d.abs() <= s || self.fade_rate == 0.0 { self.fade_target } else { self.fade + s * d.signum() };
+    /// `ProcessFade` (0x50B5D0), `ts` in 1/50 s frames: linear; a fade-out reports "fading" for
+    /// one more frame after reaching black.
+    pub fn process_fade(&mut self, ts: f32) {
+        if !self.fading {
+            return;
+        }
+        let step = if self.fade_dur > 0.0 { ts * 0.02 / self.fade_dur * 255.0 } else { f32::INFINITY };
+        if self.fade_dir == 1 {
+            self.fade_value = if self.fade_dur == 0.0 { 0.0 } else { self.fade_value - step };
+            if self.fade_value <= 0.0 {
+                self.fade_value = 0.0;
+                self.fading = false;
+            }
+        } else {
+            if self.fade_value >= 255.0 {
+                self.fading = false;
+            }
+            self.fade_value = if self.fade_dur == 0.0 { 255.0 } else { (self.fade_value + step).min(255.0) };
+        }
     }
 }
 
@@ -127,6 +200,8 @@ struct DrawList {
     text: Vec<Quad>,
     /// The screen fade, over everything.
     top: Vec<Quad>,
+    /// Script text drawn after the fade.
+    after: Vec<Quad>,
 }
 
 impl DrawList {
@@ -900,7 +975,7 @@ fn draw_hud(
             assets.gxt.load_mission(&d, name);
         }
     }
-    overlay.step(time.delta_secs());
+
     let sc = Scale { w: window.width(), h: window.height() };
     let (w, _h) = (sc.w, sc.h);
     let mut out = DrawList::default();
@@ -1122,22 +1197,80 @@ fn draw_hud(
             f.proportional = true;
             f.set_drop_shadow(0);
             f.colour = [225, 225, 225, 255];
-            f.set_edge(2);
+            f.set_drop_shadow(2);
             f.drop = [0, 0, 0, 255];
             f.centre_size = w - w / 640.0 * 60.0;
             f.scale = (w / 640.0 * 0.58, sc.h / 448.0 * 1.2);
             let text = assets.gxt.get(key).to_vec();
-            assets.data.print_string(&mut f, &sc, (w as i32 / 2) as f32, sc.h - sc.h / 448.0 * 80.0, &text, &mut out);
+            let mut tmp = DrawList::default();
+            assets.data.print_string(&mut f, &sc, (w as i32 / 2) as f32, sc.h - sc.h / 448.0 * 80.0, &text, &mut tmp);
+            out.after.append(&mut tmp.text);
         }
     }
-    if overlay.fade > 0.0 {
-        let a = (overlay.fade * 255.0) as u8;
+    // Briefs outside widescreen.
+    if !overlay.widescreen {
+        if let Some(key) = overlay.subtitle.as_deref() {
+            let mut f = Font::new(w);
+            f.set_font_style(1);
+            f.set_orientation(0);
+            f.proportional = true;
+            f.set_drop_shadow(0);
+            f.colour = [225, 225, 225, 255];
+            f.set_edge(2);
+            f.drop = [0, 0, 0, 255];
+            // CHud::DrawSubtitles, normal layout.
+            f.set_drop_shadow(2);
+            f.set_edge(0);
+            let (sx, sy) = (w / 640.0, sc.h / 448.0);
+            f.scale = (sx * 0.58, sy * 1.22);
+            let l = sx * 140.0 + sx * 8.0;
+            f.centre_size = w - sx * 20.0 - sx * 8.0 - l;
+            let text = assets.gxt.get(key).to_vec();
+            let mut tmp = DrawList::default();
+            let cx = f.centre_size * 0.5 + l;
+            assets.data.print_string(&mut f, &sc, cx, sc.h - sy * 105.0 - 2.0 * sy, &text, &mut tmp);
+            out.after.append(&mut tmp.text);
+        }
+    }
+    // Script text (DISPLAY_TEXT): 640×448 coordinates.
+    for t in &overlay.texts {
+        let (kx, ky) = (w / 640.0, sc.h / 448.0);
+        let mut f = Font::new(w);
+        f.set_font_style(t.font);
+        f.set_orientation(if t.right { 2 } else if t.centre { 0 } else { 1 });
+        f.justify = t.justify;
+        f.proportional = t.proportional;
+        // CHud::DrawScriptText: SY(scaleY) * 0.5.
+        f.scale = (t.scale.0 * kx, t.scale.1 * ky * 0.5);
+        f.colour = t.colour;
+        f.drop = t.drop_colour;
+        f.set_drop_shadow(t.shadow as i8);
+        if t.outline > 0 {
+            f.set_edge(t.outline as i8);
+        } else {
+            f.set_edge(0);
+        }
+        f.wrap_x = t.wrap_x * kx;
+        f.centre_size = t.centre_size * kx;
+        let text = assets.gxt.get(&t.key).to_vec();
+        // The 640x448 screen anchored at the bottom-right.
+        let (px, py) = (w - kx * (640.0 - t.x), sc.h - ky * (448.0 - t.y));
+        if t.draw_before_fade {
+            assets.data.print_string(&mut f, &sc, px, py, &text, &mut out);
+        } else {
+            let mut tmp = DrawList::default();
+            assets.data.print_string(&mut f, &sc, px, py, &text, &mut tmp);
+            out.after.append(&mut tmp.text);
+        }
+    }
+    let a = overlay.fade_value as u8;
+    if a > 0 {
         out.top.push(Quad { tex: Tex::White, l: -5.0, t: -5.0, r: w + 5.0, b: sc.h + 5.0, uv: [[0.0; 2]; 4], col: [0, 0, 0, a], fan: Vec::new() });
     }
 
     // Build one mesh per texture; z orders the immediate quads under the buffered text.
     let mut groups: Vec<(Tex, Vec<&Quad>, f32)> = Vec::new();
-    for (list, z) in [(&out.quads, 0.0), (&out.text, 10.0), (&out.top, 20.0)] {
+    for (list, z) in [(&out.quads, 0.0), (&out.text, 10.0), (&out.top, 20.0), (&out.after, 30.0)] {
         for q in list.iter() {
             match groups.iter_mut().find(|g| g.0 == q.tex && g.2 == z) {
                 Some(g) => g.1.push(q),
