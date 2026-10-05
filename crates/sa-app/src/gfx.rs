@@ -90,7 +90,7 @@ fn apply_camera(
                 GfxApplied(true),
             ));
             if let Some(sky) = sky.as_ref() {
-                c.insert(bevy::light::GeneratedEnvironmentMapLight { environment_map: sky.0.clone(), intensity: 700.0, ..default() });
+                c.insert(bevy::light::GeneratedEnvironmentMapLight { environment_map: sky.0.clone(), intensity: std::env::var("SA_ENVI").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0), ..default() });
             }
             if skip.contains("ssao") {
                 c.remove::<(ScreenSpaceAmbientOcclusion, NormalPrepass, DepthPrepass)>();
@@ -219,6 +219,10 @@ fn update_sky_cubemap(
                 .normalize();
                 let mut col = if d.y >= 0.0 { bottom.lerp(top, d.y.powf(0.6)) } else { ground.lerp(bottom, (1.0 + d.y * 4.0).max(0.0)) };
                 let s = d.dot(to_sun).max(0.0);
+                // Mostly neutral: the env light also lights diffusely, and a saturated blue sky
+                // would tint the paint (SA's ambient already carries the sky colour).
+                let l = col.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+                col = Vec3::splat(l).lerp(col, 0.3);
                 col += sun_col * s.powf(400.0) + sun_col * 0.01 * s.powf(8.0);
                 for k in [col.x, col.y, col.z, 1.0] {
                     data.extend_from_slice(&k.to_le_bytes());

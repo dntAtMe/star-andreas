@@ -319,11 +319,11 @@ fn spawn_vehicle(
             } else {
                 AlphaMode::Opaque
             },
-            perceptual_roughness: if body { 0.3 } else if c[3] < 255 { 0.05 } else { 0.7 },
-            reflectance: if body { 0.6 } else if c[3] < 255 { 0.9 } else { 0.3 },
+            perceptual_roughness: if body { 0.4 } else if c[3] < 255 { 0.08 } else { 0.7 },
+            reflectance: if body { 0.4 } else if c[3] < 255 { 0.6 } else { 0.3 },
             // A clear lacquer over the paint (only visible with the enhanced graphics' sun and
             // sky reflections; the classic lighting has neither).
-            clearcoat: if body { 1.0 } else { 0.0 },
+            clearcoat: if body { 0.6 } else { 0.0 },
             clearcoat_perceptual_roughness: 0.06,
             double_sided: true,
             cull_mode: None,
