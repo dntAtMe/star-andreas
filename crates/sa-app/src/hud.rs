@@ -3,8 +3,13 @@
 //! Everything is laid out in the 640×448 virtual screen scaled per axis, and drawn as 2D
 //! quads (glyphs from fonts.txd with the exact UV insets, bars as untextured rects).
 //!
-//! Not ported: the radar, zone / vehicle name popups (need GXT), the help box, messages,
-//! the vital-stats panel, the 2-player layout, button icons.
+//! `CHud::DrawRadar` / `CRadar` (hud.md §6–7): the 3×3 radarNN map tiles around the player
+//! rotated with the camera heading, clipped to the disc's 24-gon, the radardisc ring, the
+//! north blip and the player arrow.
+//!
+//! Not ported: radar blips other than north and the player, the plane horizon / altimeter,
+//! zone / vehicle name popups (need GXT), the help box, messages, the vital-stats panel, the
+//! 2-player layout, button icons.
 
 use std::collections::HashMap;
 
@@ -67,6 +72,8 @@ struct Quad {
     b: f32,
     uv: [[f32; 2]; 4],
     col: [u8; 4],
+    /// A triangle fan (screen point, uv) instead of the rect, when not empty.
+    fan: Vec<([f32; 2], [f32; 2])>,
 }
 
 #[derive(Default)]
@@ -80,12 +87,24 @@ struct DrawList {
 impl DrawList {
     /// `CSprite2d::DrawRect`.
     fn rect(&mut self, l: f32, t: f32, r: f32, b: f32, col: [u8; 4]) {
-        self.quads.push(Quad { tex: Tex::White, l, t, r, b, uv: [[0.0; 2]; 4], col });
+        self.quads.push(Quad { tex: Tex::White, l, t, r, b, uv: [[0.0; 2]; 4], col, fan: Vec::new() });
+    }
+
+    /// A textured (or untextured) triangle fan.
+    fn fan(&mut self, img: Option<&Handle<Image>>, pts: Vec<([f32; 2], [f32; 2])>, col: [u8; 4]) {
+        let tex = match img {
+            Some(h) => {
+                self.images.insert(h.id(), h.clone());
+                Tex::Image(h.id())
+            }
+            None => Tex::White,
+        };
+        self.quads.push(Quad { tex, l: 0.0, t: 0.0, r: 0.0, b: 0.0, uv: [[0.0; 2]; 4], col, fan: pts });
     }
 
     fn sprite(&mut self, img: &Handle<Image>, l: f32, t: f32, r: f32, b: f32, col: [u8; 4]) {
         self.images.insert(img.id(), img.clone());
-        self.quads.push(Quad { tex: Tex::Image(img.id()), l, t, r, b, uv: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], col });
+        self.quads.push(Quad { tex: Tex::Image(img.id()), l, t, r, b, uv: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], col, fan: Vec::new() });
     }
 
     /// `CSprite2d::DrawBarChart` (0x728640) as the HUD calls it (border on, no add / text).
@@ -385,6 +404,7 @@ impl FontData {
                         b: bottom,
                         uv: [[u, v + 0.0021], [u + 0.0615, v + 0.0021], [u, bl], [u + 0.0615, br]],
                         col,
+                        fan: Vec::new(),
                     });
                 }
             }
@@ -481,6 +501,9 @@ struct HudAssets {
     font_tex: [Handle<Image>; 2],
     white: Handle<Image>,
     fist: Option<Handle<Image>>,
+    radar_disc: Option<Handle<Image>>,
+    radar_north: Option<Handle<Image>>,
+    radar_centre: Option<Handle<Image>>,
     data: FontData,
 }
 
@@ -523,7 +546,15 @@ fn setup_hud(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Ass
         warn!("fonts.txd: font1/font2 missing, no HUD");
         return;
     };
-    commands.insert_resource(HudAssets { font_tex: [f2, f1], white, fist: hud.get("fist").cloned(), data: FontData { vals } });
+    commands.insert_resource(HudAssets {
+        font_tex: [f2, f1],
+        white,
+        fist: hud.get("fist").cloned(),
+        radar_disc: hud.get("radardisc").cloned(),
+        radar_north: hud.get("radar_north").cloned(),
+        radar_centre: hud.get("radar_centre").cloned(),
+        data: FontData { vals },
+    });
     commands.spawn((
         Camera2d,
         Camera { order: 5, clear_color: ClearColorConfig::None, ..default() },
@@ -548,6 +579,11 @@ fn draw_hud(
     window: Single<&Window>,
     ped: Single<&Ped>,
     icons: Res<crate::weapons::WeaponIcons>,
+    world_res: Res<crate::world::WorldRes>,
+    mut tiles: Local<HashMap<usize, Option<Handle<Image>>>>,
+    mut images: ResMut<Assets<Image>>,
+    driving: Res<crate::vehicle::Driving>,
+    cars: Query<&crate::vehicle::Vehicle>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut last_level: Local<i32>,
@@ -705,6 +741,34 @@ fn draw_hud(
         f.set_edge(0);
     }
 
+    // CHud::DrawRadar.
+    let veh = driving.0.and_then(|e| cars.get(e).ok()).map(|v| v.sa);
+    let player_pos = sa.world.body(veh.unwrap_or(ped.sa)).map(|b| b.phys.matrix.pos);
+    let heading = sa.world.body(veh.unwrap_or(ped.sa)).map_or(0.0, |b| {
+        if veh.is_some() { (-b.phys.matrix.fwd.x).atan2(b.phys.matrix.fwd.y) } else { l.cur_rot }
+    });
+    let speed = veh.and_then(|v| sa.world.body(v)).map_or(0.0, |b| b.phys.move_speed.length());
+    if let Some(origin) = player_pos {
+        let mut load_tile = |i: usize| -> Option<Handle<Image>> {
+            tiles
+                .entry(i)
+                .or_insert_with(|| {
+                    let data = world_res.0.file(&format!("radar{i:02}.txd"))?;
+                    let t = txd::parse(data).ok()?.into_iter().next()?;
+                    let mut img = make_image(convert_texture(t, false)?);
+                    // TEXTUREADDRESS clamp (DrawMap's render state).
+                    img.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
+                        mag_filter: bevy::image::ImageFilterMode::Linear,
+                        min_filter: bevy::image::ImageFilterMode::Linear,
+                        ..bevy::image::ImageSamplerDescriptor::default()
+                    });
+                    Some(images.add(img))
+                })
+                .clone()
+        };
+        draw_radar(&mut out, &sc, &assets, &sa.world, origin, heading, veh.is_some(), speed, &mut load_tile);
+    }
+
     // Build one mesh per texture; z orders the immediate quads under the buffered text.
     let mut groups: Vec<(Tex, Vec<&Quad>, f32)> = Vec::new();
     for (list, z) in [(&out.quads, 0.0), (&out.text, 10.0)] {
@@ -725,6 +789,18 @@ fn draw_hud(
         let mut idx = Vec::with_capacity(n * 6);
         for q in quads {
             let b = pos.len() as u32;
+            if !q.fan.is_empty() {
+                let c = srgb_col(q.col);
+                for (p, t) in &q.fan {
+                    pos.push([p[0] - hw, hh - p[1], 0.0]);
+                    uv.push(*t);
+                    colv.push(c);
+                }
+                for k in 1..q.fan.len().saturating_sub(1) as u32 {
+                    idx.extend_from_slice(&[b, b + k, b + k + 1]);
+                }
+                continue;
+            }
             for (px, py) in [(q.l, q.t), (q.r, q.t), (q.l, q.b), (q.r, q.b)] {
                 pos.push([px - hw, hh - py, 0.0]);
             }
@@ -757,4 +833,176 @@ fn draw_hud(
             world.spawn((Mesh2d(mesh), MeshMaterial2d(mat), Transform::from_xyz(0.0, 0.0, z), HudMesh));
         }
     });
+}
+
+/// `CRadar` state for one draw.
+struct Radar {
+    origin: Vec2,
+    range: f32,
+    sin: f32,
+    cos: f32,
+}
+
+impl Radar {
+    /// `TransformRealWorldPointToRadarSpace` (0x583530).
+    fn to_radar(&self, p: Vec2) -> Vec2 {
+        let d = (p - self.origin) / self.range;
+        Vec2::new(self.cos * d.x + self.sin * d.y, self.cos * d.y - self.sin * d.x)
+    }
+
+    /// The inverse (world point of a radar point).
+    fn to_world(&self, r: Vec2) -> Vec2 {
+        let d = Vec2::new(self.cos * r.x - self.sin * r.y, self.sin * r.x + self.cos * r.y);
+        d * self.range + self.origin
+    }
+}
+
+/// `TransformRadarPointToScreenSpace` (0x583480).
+fn radar_to_screen(sc: &Scale, r: Vec2) -> [f32; 2] {
+    [sc.sx(94.0) * 0.5 * r.x + sc.sx(40.0) + sc.sx(94.0) * 0.5, sc.sy(76.0) * 0.5 + (sc.h - sc.sy(104.0)) - sc.sy(76.0) * 0.5 * r.y]
+}
+
+/// Sutherland–Hodgman clip of a polygon against a convex polygon (counter-clockwise).
+fn clip_convex(poly: Vec<Vec2>, clip: &[Vec2]) -> Vec<Vec2> {
+    let mut out = poly;
+    for i in 0..clip.len() {
+        let (a, b) = (clip[i], clip[(i + 1) % clip.len()]);
+        let inside = |p: Vec2| (b - a).perp_dot(p - a) >= 0.0;
+        let input = std::mem::take(&mut out);
+        for j in 0..input.len() {
+            let (p, q) = (input[j], input[(j + 1) % input.len()]);
+            let (ip, iq) = (inside(p), inside(q));
+            if ip {
+                out.push(p);
+            }
+            if ip != iq {
+                let d = q - p;
+                let den = (b - a).perp_dot(d);
+                if den.abs() > 1e-12 {
+                    let t = (b - a).perp_dot(a - p) / den;
+                    out.push(p + d * t);
+                }
+            }
+        }
+        if out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// The disc mask (DrawRadarMask 0x585700): a 24-gon on the unit circle in radar space.
+fn disc_polygon() -> Vec<Vec2> {
+    (0..24).map(|i| {
+        let a = i as f32 * std::f32::consts::PI / 12.0;
+        Vec2::new(a.cos(), a.sin())
+    }).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_radar(
+    out: &mut DrawList,
+    sc: &Scale,
+    assets: &HudAssets,
+    world: &sa_physics::world::World,
+    origin3: Vec3,
+    heading: f32,
+    in_vehicle: bool,
+    speed: f32,
+    load_tile: &mut dyn FnMut(usize) -> Option<Handle<Image>>,
+) {
+    // DrawMap: the range (on foot 180 m; in a vehicle 180..350 m by speed).
+    let range = if !in_vehicle {
+        180.0
+    } else if speed < 0.3 {
+        180.0
+    } else if speed < 0.9 {
+        (speed - 0.3) * 283.333_34 + 180.0
+    } else {
+        350.0
+    };
+    // CalculateCachedSinCos: the camera heading.
+    let cam = world.cam_info();
+    let angle = (-cam.front.x).atan2(cam.front.y);
+    let r = Radar { origin: origin3.truncate(), range, sin: angle.sin(), cos: angle.cos() };
+    let disc = disc_polygon();
+    let tx = ((r.origin.x + 3000.0) * 0.002).floor() as i32;
+    let ty = (11.0 - (r.origin.y + 3000.0) * 0.002).ceil() as i32;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            // DrawRadarSection (0x586110).
+            let (x, y) = (tx + dx, ty + dy);
+            let x0 = (x - 6) as f32 * 500.0;
+            let y0 = (5 - y) as f32 * 500.0;
+            let corners = [
+                Vec2::new(x0, y0),
+                Vec2::new(x0 + 500.0, y0),
+                Vec2::new(x0 + 500.0, y0 + 500.0),
+                Vec2::new(x0, y0 + 500.0),
+            ];
+            let poly: Vec<Vec2> = corners.iter().map(|&c| r.to_radar(c)).collect();
+            // Square clip then the disc (the square clip is implied by the disc).
+            let clipped = clip_convex(poly, &disc);
+            if clipped.len() < 3 {
+                continue;
+            }
+            let inside = (0..12).contains(&x) && (0..12).contains(&y);
+            let tex = if inside { load_tile((x + 12 * y) as usize) } else { None };
+            if inside && tex.is_none() {
+                continue;
+            }
+            let pts = clipped
+                .iter()
+                .map(|&p| {
+                    let w = r.to_world(p);
+                    let u = (w.x - (x as f32 * 500.0 - 3000.0)) * 0.002;
+                    let v = (w.y - ((12 - y) as f32 * 500.0 - 3000.0)) * -0.002;
+                    (radar_to_screen(sc, p), [u, v])
+                })
+                .collect();
+            let col = if inside { [255, 255, 255, 255] } else { [111, 137, 170, 255] };
+            out.fan(tex.as_ref(), pts, col);
+        }
+    }
+    // The radardisc ring: one quarter texture drawn four times mirrored, in black.
+    if let Some(disc_tex) = assets.radar_disc.as_ref() {
+        let left = sc.sx(40.0);
+        let top = sc.h - sc.sy(104.0);
+        let cx = sc.sx(40.0) + sc.sx(47.0);
+        let cy = top + sc.sy(38.0);
+        let x_l = left - sc.sx(4.0);
+        let x_r = left + sc.sx(94.0) + sc.sx(4.0);
+        let y_t = top - sc.sy(4.0);
+        let y_b = top + sc.sy(76.0) + sc.sy(4.0);
+        for (x1, y2) in [(x_l, y_t), (x_r, y_t), (x_l, y_b), (x_r, y_b)] {
+            // CSprite2d::Draw: uv (0,0) at (x1, y2), (1,1) at the centre.
+            let pts = vec![([x1, y2], [0.0, 0.0]), ([cx, y2], [1.0, 0.0]), ([cx, cy], [1.0, 1.0]), ([x1, cy], [0.0, 1.0])];
+            out.fan(Some(disc_tex), pts, [0, 0, 0, 255]);
+        }
+    }
+    // DrawBlips: north on the rim, then the player arrow.
+    if let Some(north) = assets.radar_north.as_ref() {
+        let mut n = r.to_radar(Vec2::new(r.origin.x, r.origin.y + range * 1.414_213_5));
+        if n.length() > 1.0 {
+            n /= n.length();
+        }
+        let p = radar_to_screen(sc, n);
+        let (hw, hh) = (sc.sx(8.0) as i32 as f32, sc.sy(8.0) as i32 as f32);
+        out.sprite(north, p[0] - hw, p[1] - hh, p[0] + hw, p[1] + hh, [255, 255, 255, 255]);
+    }
+    if let Some(arrow) = assets.radar_centre.as_ref() {
+        let p = radar_to_screen(sc, Vec2::ZERO);
+        let a = heading - (angle + std::f32::consts::PI);
+        let w = sc.sx(8.0) as i32 as f32;
+        // DrawRotatingRadarSprite: v_i = (x + sin(a_i)·w, y + cos(a_i)·h), Draw(v3, v2, v0, v1);
+        // CSprite2d::Draw(p1, p2, p3, p4) (0x727590) puts uv (0,0) at p3, (1,0) p4, (1,1) p2, (0,1) p1.
+        let v: Vec<[f32; 2]> = (0..4)
+            .map(|i| {
+                let ai = i as f32 * std::f32::consts::FRAC_PI_2 + a - std::f32::consts::FRAC_PI_4;
+                [p[0] + ai.sin() * w, p[1] + ai.cos() * w]
+            })
+            .collect();
+        let pts = vec![(v[0], [0.0, 0.0]), (v[1], [1.0, 0.0]), (v[2], [1.0, 1.0]), (v[3], [0.0, 1.0])];
+        out.fan(Some(arrow), pts, [255, 255, 255, 255]);
+    }
 }

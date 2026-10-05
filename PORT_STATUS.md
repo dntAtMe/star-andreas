@@ -83,6 +83,7 @@ Last updated: 2026-10-05.
 |---|---|---|
 | CFont | 🟡 | fonts.txd glyph grid with the exact UV insets, fonts.dat widths, style remaps (pricedown / menu), colour and `~n~` tokens, shadow (1 pass) and outline (8 passes), proportional advance with edge, orientation and word wrapping (ProcessCurrentString), justify gap; no button icons, slant, background box |
 | CHud player info | 🟡 | clock, money ($%08d with the rolling display), weapon icon (fist / `<model>icon`), ammo `reserve-clip`, health (flashing < 10 hp, max-health width), armour and breath bars (DrawBarChart), wanted stars (2 s flash, parole stars, empty slots); no radar, zone / vehicle names, help box, messages |
+| Radar (CRadar) | 🟡 | 3×3 radarNN tiles around the player, rotated with the camera heading, range 180 m on foot / 180–350 m by vehicle speed, clipped to the disc 24-gon, sea colour off the map, radardisc ring, north blip on the rim, player arrow (CSprite2d::Draw vertex order); no other blips, plane horizon / altimeter, gang overlay |
 
 ## Cameras
 
@@ -151,7 +152,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Vehicle exit sequence (stage C), carjacking, bikes mount, radar and zone/vehicle names (docs ready), traffic drivers and SIMPLE rails mode, glass, bicycles, NPC armed combat 1002 (docs ready), wanted level and police (docs ready), pickups and flight (docs ready).
+1. Vehicle exit sequence (stage C), carjacking, bikes mount, radar blips and zone/vehicle names (docs ready), traffic drivers and SIMPLE rails mode, glass, bicycles, NPC armed combat 1002 (docs ready), wanted level and police (docs ready), pickups and flight (docs ready).
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.
