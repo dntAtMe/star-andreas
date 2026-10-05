@@ -813,13 +813,15 @@ impl World {
 }
 
 /// CTaskComplexLeaveCar stages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LeaveStage {
     /// 719 / 809 CarWaitToSlowDown (the car brakes).
     Wait,
     /// 813 GetOut, 806 CloseDoorFromOutside.
     GetOut,
     Close,
+    /// 814 CTaskSimpleCarJumpOut: rolling out of a moving car (`out` once SetPedOut ran).
+    JumpOut { shift: f32, out: bool },
 }
 
 /// CTaskComplexLeaveCar (704) for the player.
@@ -834,6 +836,9 @@ pub struct LeaveCar {
     door_to_open: bool,
     /// 823 CAR_jacked (dragged out by `jacker`).
     pub jacked_by: Option<EntityId>,
+    /// +0x18 sensible: false for the script's TASK_LEAVE_CAR_IMMEDIATELY (no waiting for the
+    /// car to slow down: a moving car is jumped out of).
+    pub sensible: bool,
 }
 
 impl LeaveCar {
@@ -858,6 +863,17 @@ pub fn can_ped_step_out_car(m: &Matrix, v: Vec3, w: Vec3, is_boat: bool) -> bool
 }
 
 impl World {
+    /// `TASK_LEAVE_CAR_IMMEDIATELY` (0622): CTaskComplexLeaveCar(veh, 0, 0, 0, 0), not sensible.
+    pub fn start_leave_car_immediately(&mut self, ped: EntityId) -> bool {
+        if !self.start_leave_car(ped) {
+            return false;
+        }
+        if let Some(lv) = self.body_mut(ped).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()).and_then(|p| p.leave.as_mut()) {
+            lv.sensible = false;
+        }
+        true
+    }
+
     /// The player presses enter in a car: CTaskComplexLeaveCar(veh, 0, 0, sensible, false).
     /// Returns false for other vehicles (the caller warps the ped out).
     pub fn start_leave_car(&mut self, ped: EntityId) -> bool {
@@ -878,7 +894,7 @@ impl World {
                 2 => 9,
                 _ => DOOR_FL,
             };
-            p.leave = Some(LeaveCar { veh, door, stage: LeaveStage::Wait, anim: None, anim_id: 0, door_to_open: false, jacked_by: None });
+            p.leave = Some(LeaveCar { veh, door, stage: LeaveStage::Wait, anim: None, anim_id: 0, door_to_open: false, jacked_by: None, sensible: true });
         }
         true
     }
@@ -902,7 +918,7 @@ impl World {
                 c.assocs[i].uid
             })
         });
-        p.leave = Some(LeaveCar { veh, door, stage: LeaveStage::GetOut, anim: uid, anim_id: id, door_to_open: false, jacked_by: Some(jacker) });
+        p.leave = Some(LeaveCar { veh, door, stage: LeaveStage::GetOut, anim: uid, anim_id: id, door_to_open: false, jacked_by: Some(jacker), sensible: true });
     }
 
     /// The leaving ped's tasks after the vehicles moved.
@@ -928,9 +944,25 @@ impl World {
         };
         match lv.stage {
             LeaveStage::Wait => {
-                // 809: done when the car can be stepped out of.
+                // 809: done when the car can be stepped out of; not sensible: at once, a car
+                // that cannot be stepped out of is jumped out of (814).
                 let w = self.body(lv.veh).map_or(Vec3::ZERO, |b| b.phys.turn_speed);
-                if can_ped_step_out_car(&info.m, info.move_speed, w, false) {
+                let step = can_ped_step_out_car(&info.m, info.move_speed, w, false);
+                if !step && !lv.sensible {
+                    // StartAnim 0x64BF00: CAR_rollout_LHS / RHS, blend 8.0.
+                    let id = if matches!(lv.door, 10 | 11) { 384 } else { 385 };
+                    let grp = anim_group_of(&info.g, id);
+                    let uid = self.body_mut(ped).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()).and_then(|p| {
+                        let c = p.clump.as_deref_mut()?;
+                        c.blend_animation(&m, grp, id, 8.0).map(|i| {
+                            c.assocs[i].finish_cb = true;
+                            c.assocs[i].uid
+                        })
+                    });
+                    lv.anim = uid;
+                    lv.anim_id = id;
+                    lv.stage = LeaveStage::JumpOut { shift: info.move_speed.length(), out: false };
+                } else if step {
                     // 813 StartAnim: RemoveCarSitAnim, BlendAnimation(…, 1000).
                     let id = match lv.door {
                         10 => 373,
@@ -958,6 +990,70 @@ impl World {
                         c.doors_in_use |= 1 << e_door(lv.door);
                     }
                 }
+            }
+            LeaveStage::JumpOut { mut shift, out } => {
+                // ProcessPed 0x64DD60.
+                let (t, done) = {
+                    let Some(b) = self.body_mut(ped) else { return };
+                    let Some(pl) = b.logic.as_any_mut().downcast_mut::<PedLogic>() else { return };
+                    let Some(clump) = pl.clump.as_deref_mut() else { return };
+                    if !out {
+                        // In the car the ped's own processing does not run its anims.
+                        pl.prev_pose.clone_from(&clump.pose);
+                        clump.update(ts * 0.02);
+                    }
+                    let a = lv.anim.and_then(|u| clump.by_uid(u));
+                    (a.map_or(1.0, |a| a.time), a.is_none_or(|a| a.is_finished()))
+                };
+                if out {
+                    // The roll keeps going forward: shift *= 0.96^ts while t <= 0.45.
+                    if t <= 0.45 && !done {
+                        shift *= 0.96f32.powf(ts);
+                        if let Some(b) = self.body_mut(ped) {
+                            let f = b.phys.matrix.fwd;
+                            b.phys.matrix.pos += f * shift * ts;
+                        }
+                    } else {
+                        // 206 CTaskComplexGetUpAndStandStill.
+                        let now = self.now_ms;
+                        if let Some(p) = self.body_mut(ped).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()) {
+                            p.tasks.health.fall = Some(crate::peddamage::FallAndGetUp::Fall { anim: None, down_ms: 0, landed_at: Some(now) });
+                        }
+                        return;
+                    }
+                } else if t >= 0.07 {
+                    // SetPedOut at the door, heading = the car's, velocity = the car's.
+                    let door_pos = info.m.pos + info.m.rotate(info.local_target(&m, lv.door, 1.0));
+                    let mut h = heading_of(&info.m);
+                    if info.m.up.z <= 0.0 {
+                        h = crate::ped::limit_radian_angle(h + std::f32::consts::PI);
+                    }
+                    let vel = info.move_speed;
+                    let (anim_id, grp) = (lv.anim_id, anim_group_of(&info.g, lv.anim_id));
+                    self.set_ped_out(ped, &lv);
+                    if let Some(b) = self.body_mut(ped) {
+                        b.phys.matrix.pos = door_pos;
+                        b.phys.move_speed = vel;
+                        crate::ped::set_heading(&mut b.phys.matrix, h);
+                        if let Some(p) = b.logic.as_any_mut().downcast_mut::<PedLogic>() {
+                            p.cur_rot = h;
+                            p.aim_rot = h;
+                            // The rollout anim carries on from where it was.
+                            if let Some(c) = p.clump.as_deref_mut() {
+                                lv.anim = c.blend_animation(&m, grp, anim_id, 1000.0).map(|i| {
+                                    c.assocs[i].time = t;
+                                    c.assocs[i].uid
+                                });
+                            }
+                        }
+                    }
+                    lv.stage = LeaveStage::JumpOut { shift, out: true };
+                    if let Some(p) = self.body_mut(ped).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()) {
+                        p.leave = Some(lv);
+                    }
+                    return;
+                }
+                lv.stage = LeaveStage::JumpOut { shift, out };
             }
             LeaveStage::GetOut | LeaveStage::Close => {
                 let (done, t, p) = {

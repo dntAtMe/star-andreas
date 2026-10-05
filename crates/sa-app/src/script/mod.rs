@@ -445,7 +445,17 @@ impl Host for WorldHost<'_> {
                     }
                 }
             }
-            0x0792 | 0x0687 | 0x048F => {
+            0x0792 | 0x0687 => {
+                // CLEAR_CHAR_TASKS(_IMMEDIATELY): the scripted walk ends.
+                let h = x.int();
+                if let Some(id) = self.ped(h) {
+                    let mut w = self.world.resource_mut::<ScriptWalk>();
+                    if w.0.is_some_and(|(p, _, _)| p == id) {
+                        w.0 = None;
+                    }
+                }
+            }
+            0x048F => {
                 x.int();
             }
             0x0223 => {
@@ -606,7 +616,7 @@ impl Host for WorldHost<'_> {
                 let [p, _v] = x.ints::<2>();
                 if let Some(p) = self.ped(p) {
                     let mut sa = self.sa();
-                    if !sa.world.start_leave_car(p) {
+                    if !sa.world.start_leave_car_immediately(p) {
                         // No door to leave by: out beside the car.
                         warp_out_beside(&mut sa.world, p);
                     }
@@ -960,9 +970,12 @@ impl Host for WorldHost<'_> {
 
 /// A ped out of its vehicle at the vehicle's left side.
 fn warp_out_beside(w: &mut sa_physics::world::World, p: EntityId) {
-    let veh = w.body(p).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()).and_then(|l| l.vehicle.as_ref().map(|v| v.veh));
-    let Some(m) = veh.and_then(|v| w.body(v)).map(|b| b.phys.matrix) else { return };
-    let pos = m.pos - m.right * 1.8 + Vec3::Z * 0.2;
+    let seat = w.body(p).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()).and_then(|l| l.vehicle.as_ref().map(|v| (v.veh, v.seat_index)));
+    let Some((veh, idx)) = seat else { return };
+    let Some(m) = w.body(veh).map(|b| b.phys.matrix) else { return };
+    // Driver and rear-left (seat 1) get out on the left, the others on the right.
+    let side = if idx < 0 || idx == 1 { -1.0 } else { 1.0 };
+    let pos = m.pos + m.right * (1.8 * side) + Vec3::Z * 0.2;
     let heading = (-m.fwd.x).atan2(m.fwd.y);
     w.set_ped_out_of_car(p, pos, heading);
 }

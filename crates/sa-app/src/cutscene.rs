@@ -428,6 +428,9 @@ fn freeze_player(
                     best = (e, lr, ud);
                 }
             }
+            if std::env::var("SA_SCMLOG").is_ok() && (pos.x * 10.0) as i32 % 7 == 0 {
+                info!("walk: pos {pos:?} target {target:?} want {want:.2} cur {:.2} stick ({:.0},{:.0}) cam {orient:.2}", l.cur_rot, best.1, best.2);
+            }
             l.tasks.pad = Default::default();
             l.tasks.pad.walk_lr = best.1;
             l.tasks.pad.walk_ud = best.2;
