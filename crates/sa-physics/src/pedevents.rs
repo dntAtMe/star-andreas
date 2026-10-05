@@ -1203,6 +1203,51 @@ impl crate::world::World {
         }
     }
 
+    /// `CPlayerPed::Compute3rdPersonMouseTarget(bGun)` (0x60B650) while the player aims on
+    /// foot (PC mouse mode): the living ped on the crosshair ray within the weapon's target
+    /// range (guns) or straight out of the camera from the ped's plane (melee); peds only. It
+    /// lingers 1 s and is cleared when the aim button is released.
+    pub(crate) fn compute_mouse_target(&mut self) {
+        let now = self.now_ms;
+        let Some(pid) = self.player_id() else { return };
+        let Some((aim, ty, skill, pos)) = self.body(pid).and_then(|b| {
+            let p = b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()?;
+            let ty = p.tasks.active_weapon().ty;
+            Some((p.tasks.pad.aim && p.vehicle.is_none() && p.tasks.health.alive(), ty, p.tasks.weapon_skill(ty), b.phys.matrix.pos))
+        }) else {
+            return;
+        };
+        if !aim {
+            self.mouse_target = None;
+            return;
+        }
+        let Some(infos) = self.weapon_infos.clone() else { return };
+        let info = infos.get(ty, skill);
+        let range = info.target_range;
+        let gun = info.fire_type != crate::weapon::fire::MELEE;
+        let cam = self.cam_info();
+        let (src, end) = if gun {
+            cam.target_vector(range, pos)
+        } else {
+            let mut src = cam.pos;
+            let k = (src - pos).dot(cam.front);
+            if k < 0.0 {
+                src -= cam.front * k;
+            }
+            (src, src + cam.front * range)
+        };
+        let o = crate::world::LosOpts { buildings: false, peds_only: true, ignore: Some(pid), ..Default::default() };
+        let hit = self.process_line_of_sight(src, end, &o).map(|h| h.0).filter(|&e| {
+            e != pid && self.body(e).and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()).is_some_and(|p| p.tasks.health.alive())
+        });
+        if let Some(h) = hit {
+            self.mouse_target = Some(h);
+            self.mouse_target_until = now + 1000;
+        } else if self.mouse_target.is_some() && self.mouse_target_until < now {
+            self.mouse_target = None;
+        }
+    }
+
     /// The player's gun aimed at a ped (0x6860B4 free-aim path): a camera ray of the weapon
     /// range hitting a ped that can see the player.
     fn gun_aimed_at_target(&mut self, views: &[PedView]) -> Option<(EntityId, EntityId)> {

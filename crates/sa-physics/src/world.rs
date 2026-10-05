@@ -234,6 +234,10 @@ pub struct World {
     pub display_money: i32,
     /// Vehicles the player has already been reported for stealing (`+0x42A & 2`).
     pub stolen: std::collections::HashSet<EntityId>,
+    /// The player's ped+0x79C mouse target and +0x7A0 its linger time
+    /// (`Compute3rdPersonMouseTarget`).
+    pub mouse_target: Option<EntityId>,
+    pub mouse_target_until: u32,
 }
 
 impl Default for World {
@@ -293,6 +297,8 @@ impl World {
             money: 0,
             display_money: 0,
             stolen: Default::default(),
+            mouse_target: None,
+            mouse_target_until: 0,
         }
     }
 
@@ -459,6 +465,7 @@ impl World {
         ctx.cam = self.cam_info();
         ctx.frame = self.frame;
         self.update_population();
+        self.compute_mouse_target();
         self.process_ped_events();
         self.update_wanted();
         // CPlayerInfo::Process: the displayed money rolls toward the real value, per frame.
@@ -1563,6 +1570,9 @@ impl World {
                 if !o.peds && b.phys.kind == EntityType::Ped {
                     continue;
                 }
+                if o.peds_only && b.phys.kind != EntityType::Ped {
+                    continue;
+                }
                 let tyres = if o.car_tyres && b.phys.kind == EntityType::Vehicle {
                     b.logic.tyre_spheres(&b.col)
                 } else {
@@ -1593,6 +1603,8 @@ pub struct LosOpts {
     /// `CWorld::pIgnoreEntity` (and the caller's own entity).
     pub ignore: Option<EntityId>,
     pub ignore2: Option<EntityId>,
+    /// Only peds among the bodies (vehicles and objects off).
+    pub peds_only: bool,
 }
 
 impl Default for LosOpts {
@@ -1606,6 +1618,7 @@ impl Default for LosOpts {
             car_tyres: false,
             ignore: None,
             ignore2: None,
+            peds_only: false,
         }
     }
 }
