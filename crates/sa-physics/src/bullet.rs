@@ -507,6 +507,14 @@ impl World {
                 if visible {
                     self.weapon_fx(|f| f.add_bullet_impact(point, normal, surface, fx_count, light));
                 }
+                let damager = self.body(h.owner).map(|b| (b.phys.kind, b.phys.status == crate::physical::Status::Player, b.phys.vehicle.map_or(0, |v| v.model)));
+                if let Some(b) = self.body_mut(victim) {
+                    let crate::world::Body { phys, logic, .. } = b;
+                    if let Some(o) = logic.as_any_mut().downcast_mut::<crate::objects::ObjectLogic>() {
+                        let d = o.bullet_damage();
+                        o.object_damage(phys, d, Some(point), Some(normal), damager, h.ty as u8);
+                    }
+                }
                 let uproot = self.body(victim).and_then(|b| b.logic.uproot_limit());
                 if let Some(b) = self.body_mut(victim) {
                     if b.phys.is_static() && uproot.is_some_and(|u| u <= 0.0) {

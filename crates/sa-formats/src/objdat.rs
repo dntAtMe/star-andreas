@@ -17,6 +17,19 @@ pub struct ObjectPhysics {
     pub damage_effect: u32,
     /// 0 none, 1 lamppost, 2 small box, 3 big box, 4 fence part, ...
     pub special: u32,
+    pub camera_avoid: u8,
+    pub causes_explosion: bool,
+    /// 0 none, 1 on hit (dmg > 30), 2 on destroy, 3 always.
+    pub fx_type: u8,
+    /// x <= -500: at the hit position.
+    pub fx_offset: [f32; 3],
+    pub fx_name: Option<&'static str>,
+    pub smash_multiplier: f32,
+    pub break_velocity: [f32; 3],
+    pub break_velocity_rand: f32,
+    /// 1: bullets do 151, 2: bullets do smashMult·151.
+    pub gun_break_mode: i32,
+    pub sparks_on_impact: bool,
 }
 
 impl ObjectPhysics {
@@ -36,7 +49,7 @@ pub fn parse(text: &str) -> HashMap<String, ObjectPhysics> {
         if f.len() < 11 {
             continue;
         }
-        let n = |i: usize| f[i].parse::<f32>();
+        let n = |i: usize| f.get(i).map(|v| v.parse::<f32>()).unwrap_or(Ok(0.0));
         let (Ok(mass), Ok(turn_mass), Ok(air), Ok(elasticity), Ok(uproot), Ok(cd_mult), Ok(cd_eff), Ok(special)) =
             (n(1), n(2), n(3), n(4), n(6), n(7), n(8), n(9))
         else {
@@ -54,6 +67,19 @@ pub fn parse(text: &str) -> HashMap<String, ObjectPhysics> {
                 damage_mult: cd_mult,
                 damage_effect: cd_eff as u32,
                 special: special as u32,
+                camera_avoid: n(10).unwrap_or(0.0) as u8,
+                causes_explosion: n(11).unwrap_or(0.0) != 0.0,
+                fx_type: n(12).unwrap_or(0.0) as u8,
+                fx_offset: [n(13).unwrap_or(0.0), n(14).unwrap_or(0.0), n(15).unwrap_or(0.0)],
+                fx_name: f
+                    .get(16)
+                    .filter(|s| n(12).unwrap_or(0.0) > 0.0 && !s.eq_ignore_ascii_case("none"))
+                    .map(|s| &*Box::leak(s.to_ascii_lowercase().into_boxed_str())),
+                smash_multiplier: n(17).unwrap_or(1.0),
+                break_velocity: [n(18).unwrap_or(0.0), n(19).unwrap_or(0.0), n(20).unwrap_or(0.0)],
+                break_velocity_rand: n(21).unwrap_or(0.0),
+                gun_break_mode: n(22).unwrap_or(0.0) as i32,
+                sparks_on_impact: n(23).unwrap_or(0.0) != 0.0,
             },
         );
     }

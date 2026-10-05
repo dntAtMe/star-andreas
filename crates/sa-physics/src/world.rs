@@ -804,6 +804,12 @@ impl World {
         if self.b(i).phys.has(pf::PROBE) {
             return Hit::Hard;
         }
+        // Object damage from the impact; a destroyed object lets A through.
+        if let EntityId::Body(j) = other {
+            if self.object_hit(i, j as usize, &cps[..n]) {
+                return Hit::None;
+            }
+        }
         let static_path = match other {
             EntityId::Building(_) => true,
             EntityId::Body(j) => {

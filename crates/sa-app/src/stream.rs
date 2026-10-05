@@ -26,10 +26,10 @@ use bevy::{
     tasks::AsyncComputeTaskPool,
 };
 use sa_formats::{col, dff, objdat::ObjectPhysics, txd};
+use sa_physics::objects::ObjectLogic;
 use sa_physics::{
     collision::ColModel as SaColModel,
-    physical::{EntityType, Physical, ef},
-    world::BodyLogic,
+    physical::{EntityType, Physical},
 };
 
 use crate::{
@@ -53,7 +53,8 @@ impl Plugin for StreamPlugin {
         app.insert_resource(Loader { tx, rx: Mutex::new(rx) })
             .init_resource::<Cache>()
             .init_resource::<Streamer>()
-            .add_systems(Update, (receive_loaded, finalize_models, stream_instances).chain());
+            .add_systems(Update, (receive_loaded, finalize_models, stream_instances).chain())
+            .add_systems(Update, object_damage_visuals.after(crate::saphys::SaStep));
     }
 }
 
@@ -74,6 +75,8 @@ struct PartCpu {
     color: [u8; 4],
     /// rpGEOMETRYLIGHT: the timecyc ambient is added.
     lit: bool,
+    /// From the "_dam" atomic (CDamageAtomicModelInfo's damaged version).
+    damaged: bool,
 }
 
 pub struct TexCpu {
@@ -103,7 +106,12 @@ struct Loader {
 struct Part {
     mesh: Handle<Mesh>,
     material: Handle<WorldMaterial>,
+    damaged: bool,
 }
+
+/// A model part of a map object: intact (false) or the damaged version (true).
+#[derive(Component)]
+pub struct ObjectPart(pub bool);
 
 struct Model {
     parts: Vec<Part>,
@@ -184,7 +192,8 @@ fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
                 if let Some(c) = world.col(&obj.model) {
                     let m = col::parse_model(c)?;
                     cols.sa = Some(Arc::new(SaColModel::from_col(&m)));
-                    cols.prop = world.physics.get(&obj.model).filter(|p| !p.is_static()).copied();
+                    // Every object.dat model is a CObject (doors' hinge physics is not ported).
+                    cols.prop = world.physics.get(&obj.model).filter(|p| !matches!(p.special, 6 | 7)).copied();
                 }
                 Ok((parts, cols))
             })();
@@ -235,10 +244,11 @@ fn build_parts(clump: &dff::Clump) -> Result<Vec<PartCpu>> {
     for atomic in &clump.atomics {
         let frame = atomic.frame as usize;
         let name = clump.frames.get(frame).map(|f| f.name.to_ascii_lowercase()).unwrap_or_default();
-        // Damage / very-low variants are not part of the intact model.
-        if name.ends_with("_dam") || name.ends_with("_vlo") {
+        // Very-low variants are not used; "_dam" atomics are the damaged version.
+        if name.ends_with("_vlo") {
             continue;
         }
+        let damaged = name.ends_with("_dam");
         let Some(geo) = clump.geometries.get(atomic.geometry as usize) else { continue };
         if geo.positions.is_empty() {
             continue;
@@ -267,6 +277,7 @@ fn build_parts(clump: &dff::Clump) -> Result<Vec<PartCpu>> {
                 texture: mat.texture.as_ref().map(|t| t.name.to_ascii_lowercase()),
                 color: mat.color,
                 lit,
+                damaged,
             };
             for t in tris {
                 for &v in &t.v {
@@ -517,7 +528,7 @@ fn finalize_models(
                 mesh.duplicate_vertices();
                 mesh.compute_flat_normals();
             }
-            parts.push(Part { mesh: meshes.add(mesh), material });
+            parts.push(Part { mesh: meshes.add(mesh), material, damaged: p.damaged });
         }
         cache.models.insert(id, ModelState::Ready(Arc::new(Model { parts, cols })));
     }
@@ -584,12 +595,9 @@ fn stream_instances(
                     match model.cols.prop {
                         Some(op) => {
                             let mut p = Physical::new(EntityType::Object, m);
-                            p.eflags |= ef::IS_STATIC;
-                            p.mass = op.mass.clamp(1.0, 50000.0);
-                            p.turn_mass = op.turn_mass.max(1.0);
-                            p.elasticity = op.elasticity;
-                            p.air_resistance = op.air_resistance;
-                            let id = sa.world.add_body(p, (**sa_col).clone(), Box::new(PropLogic { uproot: op.uproot, percent_submerged: op.percent_submerged }));
+                            let logic = ObjectLogic::new(op, &model.cols.name.to_ascii_lowercase());
+                            logic.setup_physical(&mut p);
+                            let id = sa.world.add_body(p, (**sa_col).clone(), Box::new(logic));
                             ec.insert(SaBody::new(id, m));
                         }
                         None => {
@@ -609,7 +617,8 @@ fn stream_instances(
                 let e = ec
                     .with_children(|c| {
                         for p in model.parts.iter() {
-                            c.spawn((Mesh3d(p.mesh.clone()), MeshMaterial3d(p.material.clone()), range.clone()));
+                            let vis = if p.damaged { Visibility::Hidden } else { Visibility::Inherited };
+                            c.spawn((Mesh3d(p.mesh.clone()), MeshMaterial3d(p.material.clone()), range.clone(), vis, ObjectPart(p.damaged)));
                         }
                     })
                     .id();
@@ -641,23 +650,28 @@ fn stream_instances(
     };
 }
 
-/// object.dat prop: static until a hit exceeds its uproot impulse (SA units).
-struct PropLogic {
-    uproot: f32,
-    percent_submerged: f32,
-}
 
-impl BodyLogic for PropLogic {
-    fn uproot_limit(&self) -> Option<f32> {
-        Some(self.uproot)
-    }
-    fn buoyancy(&self, phys: &sa_physics::physical::Physical) -> Option<f32> {
-        (self.percent_submerged > 0.0).then(|| 100.0 / self.percent_submerged * phys.mass * 0.008)
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
+/// `CObject` visuals: hidden when smashed, the "_dam" parts once damaged.
+pub fn object_damage_visuals(
+    sa: Res<SaPhys>,
+    objects: Query<(&SaBody, &Children)>,
+    mut vis: Query<&mut Visibility>,
+    parts: Query<&ObjectPart>,
+) {
+    for (body, children) in &objects {
+        let Some(o) = sa.world.body(body.id).and_then(|b| b.logic.as_any().downcast_ref::<ObjectLogic>()) else { continue };
+        if !(o.hidden || o.render_damaged) {
+            continue;
+        }
+        for c in children.iter() {
+            let Ok(part) = parts.get(c) else { continue };
+            let show = !o.hidden && part.0 == o.render_damaged;
+            if let Ok(mut v) = vis.get_mut(c) {
+                let want = if show { Visibility::Inherited } else { Visibility::Hidden };
+                if *v != want {
+                    *v = want;
+                }
+            }
+        }
     }
 }

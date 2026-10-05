@@ -28,6 +28,7 @@ pub mod peddamage;
 pub mod pedtask;
 pub mod shadows;
 pub mod npc;
+pub mod objects;
 pub mod paths;
 pub mod physical;
 pub mod population;

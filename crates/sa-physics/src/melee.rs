@@ -967,16 +967,24 @@ impl World {
     }
 
     /// `FightHitObj` (0x61D400) without ObjectDamage.
-    fn fight_hit_obj(&mut self, _s: &Strike, id: EntityId, pos: Vec3, normal: Vec3) {
+    fn fight_hit_obj(&mut self, s: &Strike, id: EntityId, pos: Vec3, normal: Vec3) {
         let uproot = self.body(id).and_then(|b| b.logic.uproot_limit());
+        let skip_push = self
+            .body(id)
+            .and_then(|b| b.logic.as_any().downcast_ref::<crate::objects::ObjectLogic>())
+            .is_some_and(|o| o.info.damage_effect >= 200 || o.info.damage_mult >= 99.9);
         if let Some(b) = self.body_mut(id) {
             if b.phys.is_static() && uproot.is_some_and(|u| u <= 0.0) {
                 b.phys.eflags &= !crate::physical::ef::IS_STATIC;
             }
-            if !b.phys.is_static() {
+            if !b.phys.is_static() && !skip_push {
                 let k = if b.phys.flags & 0x80 != 0 { -0.1 } else { -0.5 };
                 let rel = pos - b.phys.matrix.pos;
                 b.phys.apply_force(normal * k, rel, true);
+            }
+            let crate::world::Body { phys, logic, .. } = b;
+            if let Some(o) = logic.as_any_mut().downcast_mut::<crate::objects::ObjectLogic>() {
+                o.object_damage(phys, s.damage * 10.0, Some(pos), Some(normal), Some((EntityType::Ped, s.is_player, 0)), s.weapon as u8);
             }
         }
         self.weapon_fx(|f| f.add_punch_impact(pos, normal));

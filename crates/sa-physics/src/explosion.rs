@@ -302,7 +302,15 @@ impl World {
                 if !(dist < radius) {
                     continue;
                 }
+                if kind == EntityType::Object {
+                    if let Some(o) = b.logic.as_any_mut().downcast_mut::<crate::objects::ObjectLogic>() {
+                        o.try_to_explode();
+                    }
+                }
                 let p = &mut b.phys;
+                if p.flags & pf::EXPLOSION_PROOF != 0 {
+                    continue;
+                }
                 if kind == EntityType::Ped && !p.has_e(ef::USES_COLLISION) {
                     continue; // in a vehicle
                 }
@@ -317,6 +325,14 @@ impl World {
                         p.eflags &= !(ef::IS_STATIC | ef::STATIC_WAITING_FOR_COLLISION);
                     }
                 }
+                if kind == EntityType::Object && p.is_static() {
+                    let crate::world::Body { phys, logic, .. } = &mut *b;
+                    if let Some(o) = logic.as_any_mut().downcast_mut::<crate::objects::ObjectLogic>() {
+                        o.object_damage(phys, f * 300.0, None, None, None, 51);
+                    }
+                    continue;
+                }
+                let p = &mut b.phys;
                 if p.is_static() || !p.has_e(ef::USES_COLLISION) {
                     continue;
                 }
@@ -410,6 +426,12 @@ impl World {
                             let k = (p.turn_mass / p.mass).min(1.0);
                             let arm = Vec3::new(0.0, 0.0, b.col.bound_radius * 0.5);
                             p.apply_turn_force(dir * k, arm);
+                        }
+                        if kind == EntityType::Object {
+                            let crate::world::Body { phys, logic, .. } = &mut *b;
+                            if let Some(o) = logic.as_any_mut().downcast_mut::<crate::objects::ObjectLogic>() {
+                                o.object_damage(phys, f * 300.0, None, None, None, 51);
+                            }
                         }
                     }
                 }

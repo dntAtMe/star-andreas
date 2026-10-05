@@ -24,6 +24,7 @@ Last updated: 2026-10-05.
 | Pedestrian population (CPopulation, CPopCycle, ped paths) | 🟡 | peds.ide / pedstats / popcycle / pedgrp / info.zon + main.scm zone settings, nodes0..63 ped nodes, the zone's 8 streamed models, civilian AddToPopulation with GeneratePedCreationCoors, ManagePed removal and fade; no cops, gangs, dealers, couples, attractors, interiors |
 | NPC wandering (CTaskComplexWanderStandard, GoToPoint) | 🟡 | FindNextNodeWandering, junction turns, u-turns, crossings with the ped light cycle, scratch-head when stuck, NPC SetMoveAnim; no avoidance, events (flee / fight), ambient tasks |
 | Motorbikes (CBike, ProcessBikeWheel) | 🟡 | bike handling (! lines), suspension lines, ProcessBikeWheel, visual lean from lateral g, balance damping, upright torque, wheelies / stoppies, lean torques (arrow keys), steer limit, burnout, knock-off detection, fork / swing arm / wheel / chassis frames; no rider (hidden) or rider anims, bicycles (CBmx), quad, bike buoyancy, AI, rest detection, fire |
+| Object damage (CObject::ObjectDamage) | 🟡 | all object.dat columns, every object.dat model a CObject (mass >= 99998 static-collide), health / change-model ("_dam" atomics) / smash / breakable hide, TryToExplode / Explode (type 9, credited to the player), hit / destroy FX, damage from bullets (gun break modes), melee (×10), explosions (f×300) and impacts (> 20, bikes ×3, pass-through when destroyed); no breakable pieces, glass, dummy respawn, doors, lamppost tilt rule |
 | Boats (CBoat, ProcessBoatControl, ProcessBuoyancyBoat) | 🟡 | boat handling (`%` lines), 3×3 boat buoyancy with volume tables and wave-normal damping, thrust / rudder / aquaplaning / sideslip / handbrake drag / water and turn resistance / wave slam, prop and rudder animation, wake trail and rendering, bow splashes, damage / burning / blow-up and sinking; no hull water mask, boat AI, anchoring, marquis boom, flying radar, fire FX, boat camera |
 | Swimming (CTaskComplexInWater / CTaskSimpleSwim, player) | 🟡 | tread / breaststroke / crawl / dive / underwater / jump-out states, surface hold, resurfacing pitch, breath drain and refill, render pitch and roll, exit in shallow water; no climbing out, NPC swimmers, torso twist, swim fx, camera tilt |
 | Buoyancy (cBuoyancy) | 🟡 | peds (float, breath, drowning), cars (sinking, engine off), object.dat objects; no boats, no splashes |
@@ -140,7 +141,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Traffic (RE in progress), breakable objects and glass (docs ready), bike riders and bicycles, NPC reactions.
+1. Traffic (docs ready), breakable pieces and glass (docs ready), vehicle enter/exit and riders (RE in progress), bicycles, NPC reactions.
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.
