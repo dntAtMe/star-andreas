@@ -36,6 +36,7 @@ pub mod projectile;
 pub mod surface;
 pub mod timecycle;
 pub mod vehicle_lights;
+pub mod traffic;
 pub mod water;
 pub mod melee;
 pub mod swim;

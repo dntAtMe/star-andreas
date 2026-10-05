@@ -58,7 +58,17 @@ fn load_population(root: Res<GameRoot>, mut sa: ResMut<SaPhys>) -> Result<(), Be
         .map(|i| read(&format!("data/Paths/NODES{i}.DAT")).ok().and_then(|d| pd::parse_nodes(&d)))
         .collect();
     let paths = Arc::new(PathFind::new(areas));
-    let data = PopData::load(&peds, stats, popcycle, &groups, zones, &scm, paths, AnimManager::group_by_name);
+    let data = PopData::load(&peds, stats, popcycle, &groups, zones, &scm, paths.clone(), AnimManager::group_by_name);
+    // CCarCtrl: cargrp.dat and the car models (vehicles.ide 'car' entries).
+    let car_groups = pd::parse_cargrp(&text("data/cargrp.dat")?);
+    let cars: std::collections::HashSet<String> = sa_formats::vehicle::parse_vehicles_ide(&text("data/vehicles.ide")?)
+        .into_iter()
+        .filter(|d| d.kind == "car")
+        .map(|d| d.model)
+        .collect();
+    if std::env::var("SA_NOTRAFFIC").is_err() {
+        sa.world.traffic = Some(Box::new(sa_physics::traffic::Traffic::new(paths, car_groups, cars)));
+    }
     info!("population: {} ped models, {} groups, {} zones", data.peds.len(), data.groups.len(), data.zones.len());
     if std::env::var("SA_NOPEDS").is_err() {
         sa.world.population = Some(Box::new(Population::new(Arc::new(data))));

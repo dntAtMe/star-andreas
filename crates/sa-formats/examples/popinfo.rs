@@ -16,6 +16,25 @@ fn main() {
         }
     }
     println!("ped nodes {peds}, ped link intersections {hist:?}");
+    // Navi links: attachedTo must be the lower node of the link.
+    let (mut ok, mut all) = (0, 0);
+    for i in 0..64 {
+        let a = parse_nodes(&read(&format!("data/Paths/NODES{i}.DAT"))).unwrap();
+        for (ni, n) in a.nodes[..a.num_veh_nodes].iter().enumerate() {
+            for k in 0..n.num_links() {
+                let l = n.base_link as usize + k;
+                let nb = a.links[l];
+                let nv = a.navi_links[l];
+                let (na, nidx) = ((nv >> 10) as usize, (nv & 0x3FF) as usize);
+                if na != i { continue; }
+                let link = a.navi[nidx];
+                let lower = if (i as u16, ni as u16) < nb { (i as u16, ni as u16) } else { nb };
+                all += 1;
+                if link.attached == lower { ok += 1; }
+            }
+        }
+    }
+    println!("navi attachedTo check {ok}/{all}");
     let s = scan_scm_zone_settings(&read("data/script/main.scm"));
     println!("scm: popType {} race {} gang {}", s.pop_type.len(), s.race.len(), s.gang.len());
     println!("GAN1 {:?} {:?} {:?}", s.pop_type.get("GAN1"), s.race.get("GAN1"), s.gang.get("GAN1"));

@@ -51,7 +51,7 @@ impl Plugin for VehiclePlugin {
         app.init_resource::<Driving>()
             .init_resource::<SpawnQueue>()
             .add_systems(Startup, load_vehicle_db)
-            .add_systems(Update, (spawn_key, auto_drive, enter_exit, debug_damage, feed_inputs).chain().before(SaStep))
+            .add_systems(Update, (traffic_cars, spawn_key, auto_drive, enter_exit, debug_damage, feed_inputs).chain().before(SaStep))
             .add_systems(Update, (update_wheels, update_boats, update_bikes, update_damage, expire_flying_parts).after(SaStep));
     }
 }
@@ -257,7 +257,7 @@ fn spawn_vehicle(
     pos: Vec3,
     yaw: f32,
     color_seed: usize,
-) -> Result<Entity> {
+) -> Result<(Entity, EntityId)> {
     let def = db.defs.get(name).with_context(|| format!("no vehicle {name}"))?;
     let h = db.handling.get(&def.handling).with_context(|| format!("no handling {}", def.handling))?.clone();
     let clump = dff::parse(world.file(&format!("{}.dff", def.model)).context("vehicle dff")?)?;
@@ -628,7 +628,52 @@ fn spawn_vehicle(
         ))
         .add_child(model_root)
         .id();
-    Ok(car)
+    Ok((car, id))
+}
+
+// ---------------------------------------------------------------- traffic
+
+/// `CCarCtrl`: create the cars the traffic asks for (with their CAutoPilot) and remove the
+/// ones it dropped.
+#[allow(clippy::too_many_arguments)]
+fn traffic_cars(
+    mut commands: Commands,
+    world: Res<WorldRes>,
+    db: Option<Res<VehicleDb>>,
+    mut sa: ResMut<SaPhys>,
+    cars: Query<(Entity, &Vehicle)>,
+    driving: Res<Driving>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(db) = db else { return };
+    let Some(tr) = sa.world.traffic.as_mut() else { return };
+    let removed = std::mem::take(&mut tr.removed);
+    let reqs = std::mem::take(&mut tr.requests);
+    for (e, v) in &cars {
+        if removed.contains(&v.sa) && driving.0 != Some(e) {
+            commands.entity(e).despawn();
+        }
+    }
+    for req in reqs {
+        let pos = g2b(req.pos.to_array());
+        let yaw = (-req.fwd.x).atan2(req.fwd.y);
+        let seed = sa.world.rng.next() as usize;
+        match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, &req.model, pos, yaw, seed) {
+            Ok((_, id)) => {
+                if let Some(b) = sa.world.body_mut(id) {
+                    b.phys.status = Status::Physics;
+                    b.phys.move_speed = req.fwd * req.speed;
+                    if let Some(c) = b.logic.as_any_mut().downcast_mut::<Automobile>() {
+                        c.autopilot = Some(req.ap.clone());
+                        c.engine_on = true;
+                    }
+                }
+            }
+            Err(e) => warn!("traffic {}: {e:#}", req.model),
+        }
+    }
 }
 
 // ---------------------------------------------------------------- input
@@ -695,7 +740,7 @@ fn auto_drive(
     let yaw = tf.rotation.to_euler(EulerRot::YXZ).0;
     let pos = tf.translation + Vec3::Y;
     match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, &name, pos, yaw, 0) {
-        Ok(car) => {
+        Ok((car, _)) => {
             info!("SA_DRIVE: spawned {name} as {car:?}");
             driving.0 = Some(car);
             ped_set_in_vehicle(&mut sa, p.sa, true);
@@ -804,9 +849,16 @@ fn feed_inputs(
             brake: if key(KeyCode::KeyS) { 1.0 } else { 0.0 },
             handbrake: key(KeyCode::Space),
         };
+        let ai = sa.logic::<Automobile>(v.sa).is_some_and(|c| c.autopilot.is_some());
         if let Some(body) = sa.world.body_mut(v.sa) {
             if body.phys.status != Status::Wrecked {
-                body.phys.status = if driving.0 == Some(e) { Status::Player } else { Status::Abandoned };
+                body.phys.status = if driving.0 == Some(e) {
+                    Status::Player
+                } else if ai {
+                    Status::Physics
+                } else {
+                    Status::Abandoned
+                };
             }
             v.speed = body.phys.move_speed.dot(body.phys.matrix.fwd) * 50.0;
         }

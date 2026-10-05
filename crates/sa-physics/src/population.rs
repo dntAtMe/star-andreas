@@ -149,6 +149,10 @@ pub struct Population {
     /// The current numbers (CPopCycle::m_NumOther_Peds …).
     pub num_other: f32,
     pub num_civ: u32,
+    /// CPopCycle's car numbers (dealers + gangs + cops + other cars) and the popcycle groups'
+    /// percentages of the current zone/time, for the traffic.
+    pub num_cars: f32,
+    pub group_perc: [u8; 18],
     pub requests: Vec<SpawnPed>,
 }
 
@@ -183,6 +187,8 @@ impl Population {
             countdown_at_start: 2,
             num_other: 0.0,
             num_civ: 0,
+            num_cars: 0.0,
+            group_perc: [0; 18],
             requests: Vec::new(),
         }
     }
@@ -292,6 +298,11 @@ impl Population {
         let perc_other_peds = (pc.perc_other[idx] as f32 * f) as i32 as f32;
         let max_peds = pc.max_peds[idx] as f32;
         self.num_other = perc_other_peds * other * 0.01 * max_peds;
+        let max_cars = pc.max_cars[idx] as f32;
+        self.num_cars = (pc.perc_dealers[idx] as f32 * dealers + pc.perc_gang[idx] as f32 * gang + pc.perc_cops[idx] as f32 * cops + pc.perc_other[idx] as f32 * other)
+            * 0.01
+            * max_cars;
+        self.group_perc = pc.perc_group[idx];
         let num_cops = pc.perc_cops[idx] as f32 * cops * 0.01 * max_peds;
         let num_gang = pc.perc_gang[idx] as f32 * gang * 0.01 * max_peds;
         let num_dealers = pc.perc_dealers[idx] as f32 * dealers * 0.01 * max_peds;

@@ -215,6 +215,19 @@ pub fn parse_pedgrp(text: &str) -> Vec<Vec<String>> {
     out
 }
 
+/// cargrp.dat (`LoadCarGroups` 0x5BD1A0): up to 23 model names per group.
+pub fn parse_cargrp(text: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let l = raw.split('#').next().unwrap_or("").replace([',', '\r'], " ");
+        let names: Vec<String> = l.split_whitespace().take(23).map(|s| s.to_ascii_lowercase()).collect();
+        if !names.is_empty() {
+            out.push(names);
+        }
+    }
+    out
+}
+
 /// `m_TranslationArray[33][3]` (0x8D2540): pop group × island → ped group.
 pub fn ped_group_of(pop_group: usize, island: usize) -> usize {
     match pop_group {
@@ -359,11 +372,30 @@ impl PathNode {
     }
 }
 
+/// `CCarPathLink` (14 bytes).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NaviLink {
+    /// x, y × 8.
+    pub pos: [i16; 2],
+    /// The lower-addressed node of the link (area, node); `dir` points towards it.
+    pub attached: (u16, u16),
+    /// Direction × 100.
+    pub dir: [i8; 2],
+    pub median_width: u8,
+    /// Bits 0..2 lanes towards `attached`, 3..5 lanes against, bit 6 traffic-light direction.
+    pub lanes: u8,
+    /// Bits 0..1 traffic light type, bit 2 bridge.
+    pub flags: u8,
+}
+
 /// One nodesN.dat.
 #[derive(Debug, Clone, Default)]
 pub struct PathArea {
     pub num_veh_nodes: usize,
     pub nodes: Vec<PathNode>,
+    pub navi: Vec<NaviLink>,
+    /// Navi address per node link: area = v >> 10, index = v & 0x3FF.
+    pub navi_links: Vec<u16>,
     /// (area, node).
     pub links: Vec<(u16, u16)>,
     pub link_lengths: Vec<u8>,
@@ -393,11 +425,24 @@ pub fn parse_nodes(d: &[u8]) -> Option<PathArea> {
         });
         o += 28;
     }
-    o += 14 * nn;
+    for _ in 0..nn {
+        a.navi.push(NaviLink {
+            pos: [i16_at(o), i16_at(o + 2)],
+            attached: (u16_at(o + 4), u16_at(o + 6)),
+            dir: [d[o + 8] as i8, d[o + 9] as i8],
+            median_width: d[o + 10],
+            lanes: d[o + 11],
+            flags: d[o + 12],
+        });
+        o += 14;
+    }
     for i in 0..nl {
         a.links.push((u16_at(o + 4 * i), u16_at(o + 4 * i + 2)));
     }
     o += 4 * nl + 768; // links + the 768-byte filler
+    for i in 0..nl {
+        a.navi_links.push(u16_at(o + 2 * i));
+    }
     o += 2 * nl; // navi links
     a.link_lengths = d[o..o + nl].to_vec();
     o += nl + 192;

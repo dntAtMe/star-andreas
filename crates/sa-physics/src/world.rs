@@ -156,6 +156,9 @@ pub struct World {
     sectors: Vec<Vec<u32>>,
     bodies: Vec<Option<Body>>,
     free_bodies: Vec<u32>,
+    /// Freed body slots and the frame they were freed: reused only a few frames later, so
+    /// the app sees the removal before an id comes back.
+    freed_bodies: Vec<(u32, u32)>,
     scan_code: u16,
     pub surfaces: SurfaceInfos,
     pub(crate) last_ts: f32,
@@ -205,6 +208,8 @@ pub struct World {
     pub population: Option<Box<crate::population::Population>>,
     /// NPC bodies the population removed this frame (for the app to despawn).
     pub npc_removed: Vec<EntityId>,
+    /// `CCarCtrl` (road traffic), set by the app with the path and car group data.
+    pub traffic: Option<Box<crate::traffic::Traffic>>,
     /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
     pub(crate) gun_fx_toggle: u8,
 }
@@ -223,6 +228,7 @@ impl World {
             sectors: vec![Vec::new(); (SECTORS * SECTORS) as usize],
             bodies: Vec::new(),
             free_bodies: Vec::new(),
+            freed_bodies: Vec::new(),
             scan_code: 0,
             surfaces,
             last_ts: 1.0,
@@ -254,6 +260,7 @@ impl World {
             water: None,
             population: None,
             npc_removed: Vec::new(),
+            traffic: None,
             gun_fx_toggle: 0,
         }
     }
@@ -315,7 +322,7 @@ impl World {
             EntityId::Body(i) => {
                 if let Some(mut b) = self.bodies.get_mut(i as usize).and_then(Option::take) {
                     b.logic.on_remove(&mut self.effects);
-                    self.free_bodies.push(i);
+                    self.freed_bodies.push((i, self.frame));
                     if let Some(f) = self.fire_on(id) {
                         self.extinguish(f);
                     }
@@ -405,6 +412,10 @@ impl World {
         self.time_ms += ts as f64 * 20.0;
         self.now_ms = self.time_ms as u32;
         self.frame = self.frame.wrapping_add(1);
+        let frame = self.frame;
+        let (ready, wait): (Vec<_>, Vec<_>) = self.freed_bodies.drain(..).partition(|&(_, f)| frame.wrapping_sub(f) >= 4);
+        self.freed_bodies = wait;
+        self.free_bodies.extend(ready.into_iter().map(|(i, _)| i));
         self.effects.lights.clear();
         // CGame::Process: clock and weather before the world.
         self.update_clock_and_weather(ts);
@@ -414,6 +425,8 @@ impl World {
         ctx.cam = self.cam_info();
         ctx.frame = self.frame;
         self.update_population();
+        self.update_traffic();
+        self.traffic_ai();
         self.probe_ped_ground();
         let moving: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))

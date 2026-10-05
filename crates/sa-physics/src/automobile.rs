@@ -366,6 +366,8 @@ pub struct Automobile {
     pub wheel_cp: [ColPoint; 4],
     /// +0x574[4]: the collision lighting byte under each wheel (ctor 0x48).
     pub wheel_lighting: [u8; 4],
+    /// `CAutoPilot` of a random traffic car (None for the player's / parked cars).
+    pub autopilot: Option<crate::traffic::AutoPilot>,
     pub wheel_timer: [f32; 4],
     pub wheel_state: [WheelState; 4],
     pub wheel_speed: [f32; 4],
@@ -471,6 +473,7 @@ impl Automobile {
             comp_prev: [1.0; 4],
             wheel_cp: [ColPoint::default(); 4],
             wheel_lighting: [0x48; 4],
+            autopilot: None,
             wheel_timer: [0.0; 4],
             wheel_state: [WheelState::Normal; 4],
             wheel_speed: [0.0; 4],
