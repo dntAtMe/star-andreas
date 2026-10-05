@@ -274,7 +274,9 @@ fn debug_wanted(time: Res<Time>, mut sa: ResMut<SaPhys>, mut done: Local<bool>, 
                     w.ammo_in_clip,
                     if p.tasks.gun.is_some() { " gun" } else { "" },
                     n.resp_in.threat_visible
-                ))
+                ) + &p.clump.as_deref().map_or(String::new(), |c| {
+                    c.assocs.iter().filter(|a| a.blend > 0.05).map(|a| format!(" {}:{}@{:.2}", a.group, a.id, a.blend)).collect::<String>()
+                }))
             })
             .collect();
         let hp = sa.world.player_id().and_then(|id| sa.logic::<PedLogic>(id)).map_or(0.0, |p| p.tasks.health.health);

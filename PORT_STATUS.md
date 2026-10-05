@@ -45,7 +45,7 @@ Last updated: 2026-10-05.
 | Burst tyres (BurstTyre, DoBurstAndSoftGroundRatios, burst ProcessWheel) | ✅ | also sand sinking and bumpy surfaces |
 | CPed collision / movement | 🟡 | player only; root motion from the anim blend clump |
 | Bikes, boats, helis, planes, trains | ❌ | |
-| Ped health, damage, death (player) | 🟡 | CPedDamageResponseCalculator (×0.33, armour, kill test), falls, explosions, car hits, bullet flinches, knock-down + get-up, death anims, WASTED + hospital respawn; no NPCs yet, no burning / drowning / choking, hospitals hard-coded (no main.scm) |
+| Ped health, damage, death (player, NPCs) | 🟡 | CPedDamageResponseCalculator (player ×0.33, NPC pedstats defendWeakness, armour, kill test, NPC headshot force-death: rifles always, player free aim always, else 1 in 8), skinned bullet hit col model (12 bone spheres, piece types), NPC gun reactions (body-part dam_* via BeHit, partial flinch while moving, shotgun torso knock-down, FLOOR_hit), cop pistol skill COP (colt_cop two-handed), player stamina regen (run +0.15, idle/walk +0.5, in car), respawn flushes tasks and IK, falls, explosions, car hits, bullet flinches, knock-down + get-up, death anims, WASTED + hospital respawn; no NPCs yet, no burning / drowning / choking, hospitals hard-coded (no main.scm) |
 | Ragdoll / falls | ❌ | |
 
 ## Gameplay

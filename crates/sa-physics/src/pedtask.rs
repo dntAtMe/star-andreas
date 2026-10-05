@@ -300,6 +300,11 @@ pub struct PedTasks {
     pub arrested: bool,
     /// ped+0x719 shooting rate (40 by default; also the knock-down time).
     pub shooting_rate: u16,
+    /// pedstats defendWeakness (NPC damage multiplier).
+    pub defend_weakness: f32,
+    /// ped+0x598 ped type (0 the player, 6 cops).
+    pub ped_type: u8,
+    pub(crate) rng: crate::damage::Rand,
 }
 
 impl Default for PedTasks {
@@ -348,6 +353,9 @@ impl Default for PedTasks {
             wavyness: 0.3,
             arrested: false,
             shooting_rate: 40,
+            defend_weakness: 1.0,
+            ped_type: 0,
+            rng: crate::damage::Rand::new(0x5EED),
         }
     }
 }
@@ -388,10 +396,11 @@ impl PedTasks {
     }
 
     /// `CPed::GetWeaponSkill(type)` for the player.
+    /// `CPed::GetWeaponSkill(type)` (0x5E3B60): NPCs use COP for a cop's pistol, else
+    /// ped+0x72C (STD).
     pub fn weapon_skill(&self, ty: u32) -> u8 {
-        // NPCs: ped+0x71B (STD).
         if !self.is_player {
-            return 1;
+            return if ty == wt::PISTOL && self.ped_type == 6 { 3 } else { 1 };
         }
         let Some(infos) = self.infos.as_deref() else { return 1 };
         if !(22..=32).contains(&ty) {
@@ -747,6 +756,22 @@ impl PedTasks {
         // Jump (0x6886C5): not while aiming, not with heavy weapons.
         if !self.in_the_air && !heavy && self.pad.jump_just_down && !self.pad.aim && c.standing {
             self.air = AirTask::Jump { launch: None, launch_done: false };
+        }
+    }
+
+    /// CPlayerPed::ProcessControl's stamina regen (0x60F17C): running +0.15·ts, sprinting
+    /// none, other move states `HandleSprintEnergy(false, 1.0)` (+0.5·ts); move state 0 only
+    /// regenerates in a vehicle (bicycles excepted [not checked]); capped at the stat maximum.
+    pub fn regen_stamina(&mut self, in_vehicle: bool, ts: f32) {
+        let pd = &mut self.pd;
+        let rate = match self.move_state {
+            0 if !in_vehicle => return,
+            6 => 0.15,
+            7 => return,
+            _ => 0.5,
+        };
+        if pd.time_can_run < TIME_CAN_RUN_MAX {
+            pd.time_can_run += ts * rate;
         }
     }
 

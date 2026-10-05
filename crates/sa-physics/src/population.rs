@@ -610,6 +610,11 @@ impl crate::world::World {
         npc.dm = dm;
         npc.resp_in.shooting_rate = shooting_rate;
         logic.tasks.shooting_rate = 40;
+        // CPed ctor: accuracy 60; pedstats defendWeakness.
+        logic.tasks.accuracy = 60;
+        logic.tasks.ped_type = req.ped_type;
+        logic.tasks.defend_weakness = stat.map_or(1.0, |s| s.defend_weakness);
+        logic.tasks.rng = crate::damage::Rand::new(req.pos.x.to_bits() ^ req.pos.y.to_bits());
         if req.ped_type == 6 {
             // CCopPed(0) (0x5DDC60): nightstick + delayed pistol, unarmed in hand, shooting rate 30,
             // accuracy 60.

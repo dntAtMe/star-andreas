@@ -28,6 +28,8 @@ pub struct DamageIn {
     pub dir: u8,
     /// The attacker's CTaskSimpleFight at the hit (FightHitPed).
     pub fight: Option<FightHit>,
+    /// `ComputeWillForceDeath` (decided by the source: headshots).
+    pub force_death: bool,
 }
 
 /// What ComputeDamageAnim reads from the attacker's fight task.
@@ -73,6 +75,11 @@ pub struct Health {
     /// PlayerInfo+0xE4 / +0xE8: last health / armour hit (HUD flash).
     pub last_health_hit: u32,
     pub last_armour_hit: u32,
+    /// An NPC's CTaskSimpleBeHit anim (the ped stands until it ends) and the last damage anim.
+    pub be_hit: Option<u32>,
+    pub last_hit_anim: i16,
+    /// A physical-response task ended: the NPC re-picks its move anim.
+    pub anim_reset: bool,
 }
 
 impl Default for Health {
@@ -86,6 +93,9 @@ impl Default for Health {
             fall: None,
             last_health_hit: 0,
             last_armour_hit: 0,
+            be_hit: None,
+            last_hit_anim: -1,
+            anim_reset: false,
         }
     }
 }
@@ -131,8 +141,8 @@ impl PedTasks {
     /// returns (health lost, armour lost, killed).
     fn compute_damage_response(&mut self, d: &DamageIn, now: u32) -> (f32, f32, bool) {
         let h = &mut self.health;
-        // AccountForPedDamageStats: the player always takes a third.
-        let mut dmg = d.damage * 0.33;
+        // AccountForPedDamageStats: the player takes a third, NPCs pedstats defendWeakness.
+        let mut dmg = d.damage * if self.is_player { 0.33 } else { self.defend_weakness };
         // AccountForPedArmour: drowning and falls ignore it.
         let mut armour_lost = 0.0;
         if h.armour != 0.0 && d.ty != 53 && d.ty != 54 {
@@ -150,7 +160,7 @@ impl PedTasks {
         // ComputeWillKillPed (the player is never force-killed).
         let health_lost;
         let killed;
-        if h.health - dmg < 1.0 {
+        if (d.force_death && !self.is_player) || h.health - dmg < 1.0 {
             health_lost = h.health;
             h.health = 0.0;
             killed = true;
@@ -175,9 +185,9 @@ impl PedTasks {
         if killed {
             return self.die(&d, clump, m);
         }
-        let _ = (lost, armour_lost);
-        // Reactions (ComputeDamageAnim / ComputeDamageResponse for the player).
+        // Reactions (ComputeDamageAnim / the event handler's ComputeDamageResponse).
         match d.ty {
+            22..=33 if !self.is_player => self.npc_gun_damage_anim(&d, lost + armour_lost, clump, m),
             22..=33 => {
                 let shotgun_like = matches!(d.ty, 24..=27 | 33);
                 let partial = !shotgun_like || self.move_state > 1 || self.ducking;
@@ -212,6 +222,69 @@ impl PedTasks {
                 None
             }
             _ => None,
+        }
+    }
+
+    /// `ComputeDamageAnim` (0x4B3FC0) for an NPC hit by a gun, and the handler's response:
+    /// FLOOR_hit on the ground, a knock-down for a shotgun-like torso hit, the partial flinch
+    /// while moving, else the body-part `dam_*` anim through CTaskSimpleBeHit.
+    fn npc_gun_damage_anim(&mut self, d: &DamageIn, _lost: f32, clump: &mut Clump, m: &AnimManager) -> Option<(Vec3, f32)> {
+        if matches!(self.health.fall, Some(FallAndGetUp::Fall { .. })) {
+            clump.blend_animation(m, group::DEFAULT, 36, 8.0);
+            return None;
+        }
+        let shotgun_like = matches!(d.ty, 24..=27 | 33);
+        let dir = d.dir as i16;
+        if d.piece == 3 && shotgun_like && !self.ducking && d.src.is_some() {
+            // Knocked down (knock force 5): CTaskComplexFallAndGetUp, 1000 / (rate·0.025) ms.
+            self.end_be_hit(clump);
+            let down = (1000.0 / (self.shooting_rate as f32 * 0.025)) as u32;
+            self.knock_down(da::KO_SKID_FRONT + dir, group::DEFAULT, down, clump, m);
+            return d.src_pos.map(|p| (p, 1.0));
+        }
+        if !shotgun_like && (self.move_state > 1 || self.ducking) {
+            let id = da::SHOT_PARTIAL + dir;
+            let i = clump.index_of(id).or_else(|| clump.add_animation(m, group::DEFAULT, id));
+            if let Some(i) = i {
+                let a = &mut clump.assocs[i];
+                a.blend = 0.0;
+                a.blend_delta = 8.0;
+                a.start(0.0);
+            }
+            return None;
+        }
+        // Body-part anims, a different one than the last damage anim.
+        let last = self.health.last_hit_anim;
+        let mut pick = |first: i16, n: i32, by_dir: i16| {
+            let mut id = by_dir;
+            while id == last {
+                id = first + crate::pedevents::rand_range(&mut self.rng, 0, n) as i16;
+            }
+            id
+        };
+        let id = match d.piece {
+            5 => pick(171, 3, match d.dir { 2 => 171, 1 => 173, _ => 172 }),
+            6 => pick(174, 3, match d.dir { 2 => 174, 3 => 176, _ => 175 }),
+            7 => pick(177, 3, match d.dir { 2 => 177, 1 => 179, _ => 178 }),
+            8 => pick(180, 3, match d.dir { 2 => 180, 3 => 182, _ => 181 }),
+            3 | 4 => pick(183, 4, [184, 185, 183, 186][d.dir as usize & 3]),
+            _ => da::HIT_FRONT + dir,
+        };
+        self.health.last_hit_anim = id;
+        self.end_be_hit(clump);
+        self.health.be_hit = clump.blend_animation(m, group::DEFAULT, id, 8.0).map(|i| {
+            let a = &mut clump.assocs[i];
+            a.start(0.0);
+            a.finish_cb = true;
+            a.uid
+        });
+        None
+    }
+
+    fn end_be_hit(&mut self, clump: &mut Clump) {
+        if let Some(a) = self.health.be_hit.take().and_then(|u| clump.by_uid_mut(u)) {
+            a.flags |= af::DELETE_BLENDED_OUT;
+            a.blend_delta = -4.0;
         }
     }
 
@@ -266,6 +339,7 @@ impl PedTasks {
     /// Start `CTaskComplexFallAndGetUp`.
     fn knock_down(&mut self, anim_id: i16, grp: usize, down_ms: u32, clump: &mut Clump, m: &AnimManager) {
         self.abort_fight(clump, m);
+        self.end_be_hit(clump);
         self.gun = None;
         self.throw = None;
         self.air = AirTask::None;
@@ -279,6 +353,9 @@ impl PedTasks {
     /// `ComputeDeathAnim` (0x4B3A60) + `CTaskComplexDie` / `CTaskSimpleDie`. Returns the push.
     fn die(&mut self, d: &DamageIn, clump: &mut Clump, m: &AnimManager) -> Option<(Vec3, f32)> {
         let (anim_id, force) = match d.ty {
+            // forceDeath: KO_shot_face for melee, KO_shot_front for guns, no push.
+            0..=15 | 46 if d.force_death && !self.is_player => (19, 0.0),
+            22..=34 | 38 | 52 if d.force_death && !self.is_player => (da::KO_SHOT_FRONT, 0.0),
             0 | 1 | 3 | 9 | 46 => (da::KO_SKID_FRONT + d.dir as i16, 0.5),
             2 | 5..=8 | 10 => (da::KO_SKID_FRONT + d.dir as i16, 1.5),
             4 | 11..=15 => (da::KO_SKID_FRONT + d.dir as i16, 0.0),
@@ -344,6 +421,16 @@ impl PedTasks {
             }
             Life::Wasted { .. } => return true,
         }
+        if let Some(u) = self.health.be_hit {
+            // CTaskSimpleBeHit: until the anim ends.
+            if clump.finished.contains(&u) || clump.by_uid(u).is_none_or(|a| a.is_finished()) {
+                self.end_be_hit(clump);
+                self.health.anim_reset = true;
+                clump.blend_animation(m, self.anim_group, crate::anim::anim_id::IDLE, 4.0);
+            } else {
+                return true;
+            }
+        }
         let Some(f) = self.health.fall else { return false };
         match f {
             FallAndGetUp::Fall { anim, down_ms, landed_at } => {
@@ -376,6 +463,7 @@ impl PedTasks {
                         }
                     }
                     clump.blend_animation(m, self.anim_group, crate::anim::anim_id::IDLE, 4.0);
+                    self.health.anim_reset = true;
                     return false;
                 }
                 true
@@ -393,6 +481,20 @@ impl PedTasks {
         self.weapons = Default::default();
         self.set_current_weapon(0);
         self.pd = Default::default();
+        // FlushImmediately: every task (gun / throw / fight / duck / air / swim) and the IK.
+        self.gun = None;
+        self.throw = None;
+        self.fight = None;
+        self.duck = None;
+        self.ducking = false;
+        self.swim = None;
+        self.air = crate::pedtask::AirTask::None;
+        self.ik = Default::default();
+        self.ikm = Default::default();
+        self.torso_ik_mode = None;
+        self.gun_flash = Default::default();
+        self.cam_request = 0;
+        self.move_state = 1;
         clump.assocs.clear();
         clump.blend_animation(m, self.anim_group, crate::anim::anim_id::IDLE, 1000.0);
     }

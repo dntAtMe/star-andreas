@@ -537,10 +537,10 @@ impl World {
                 let ped_of = |w: &World, id: EntityId| {
                     let b = w.body(id)?;
                     let l = b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()?;
-                    Some((l.npc.as_ref().map_or(0, |n| n.ped_type), l.is_player, l.cur_rot, b.phys.matrix.pos))
+                    Some((l.npc.as_ref().map_or(0, |n| n.ped_type), l.is_player, l.cur_rot, b.phys.matrix.pos, l.vehicle.is_some(), l.tasks.pd.free_aim))
                 };
                 let owner = ped_of(self, h.owner);
-                let Some((v_type, _, v_rot, v_pos)) = ped_of(self, victim) else { return };
+                let Some((v_type, v_player, v_rot, v_pos, v_in_veh, _)) = ped_of(self, victim) else { return };
                 if let Some((o_type, o_player, ..)) = owner {
                     if o_type == v_type && !matches!(o_type, 4 | 5) && !o_player {
                         return;
@@ -557,6 +557,13 @@ impl World {
                     if owner.is_some_and(|o| o.1) && (v_pos - start).length() < 1.0 && !matches!(h.ty, 25 | 27) {
                         dmg = 150.0;
                     }
+                    // ComputeWillForceDeath (0x4AD610): NPC head hits — always from a rifle, in a
+                    // vehicle or from the player's free aim, else 1 in 8.
+                    let head = cp.piece_b == 9;
+                    let force_death = !v_player && matches!(h.ty, 22..=34 | 38 | 52) && {
+                        let r = if matches!(h.ty, 33 | 34) { 0 } else { self.rng.next() & 7 };
+                        if v_in_veh || owner.is_some_and(|o| o.1 && o.5) { head } else { r == 0 && head }
+                    };
                     if let Some(l) = self.body_mut(victim).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>()) {
                         l.pending_damage.push(crate::peddamage::DamageIn {
                             src: Some(h.owner),
@@ -566,6 +573,7 @@ impl World {
                             piece: cp.piece_b,
                             dir,
                             fight: None,
+                            force_death,
                         });
                     }
                 }

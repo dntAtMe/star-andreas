@@ -95,6 +95,11 @@ pub trait BodyLogic: Send + Sync + 'static {
         None
     }
 
+    /// Peds: the skinned bullet hit col model (CWorld line tests).
+    fn hit_col_model(&self) -> Option<ColModel> {
+        None
+    }
+
     /// Objects: `CObjectData` buoyancy `(100 / percentSubmerged)·mass·0.008`, if the object floats.
     fn buoyancy(&self, phys: &Physical) -> Option<f32> {
         let _ = phys;
@@ -1560,7 +1565,8 @@ impl World {
                 } else {
                     Vec::new()
                 };
-                test(id, &b.phys.matrix, &b.col, &tyres, &mut min_t);
+                let hit = if b.phys.kind == EntityType::Ped { b.logic.hit_col_model() } else { None };
+                test(id, &b.phys.matrix, hit.as_ref().unwrap_or(&b.col), &tyres, &mut min_t);
             }
         }
         best
@@ -1713,6 +1719,7 @@ impl World {
                             piece: 3,
                             dir,
                             fight: None,
+                            force_death: false,
                         });
                     }
                 }
@@ -1789,6 +1796,7 @@ fn kill_ped_with_car(car: &mut Physical, ped: &mut Physical, state: &mut PedLogi
         piece: 3,
         dir,
         fight: None,
+        force_death: false,
     });
     // Braking reaction on the car.
     let up = car.matrix.up;

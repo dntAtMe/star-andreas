@@ -993,6 +993,7 @@ impl World {
             piece: 3,
             dir,
             fight: Some(crate::peddamage::FightHit { combo_set: s.combo, mv: s.mv, group: s.group, fall: s.fall, no_fall: s.no_fall }),
+            force_death: false,
         });
         let thr = if (8..=12).contains(&s.combo) {
             100

@@ -49,6 +49,39 @@ pub fn ped_col_model() -> ColModel {
     }
 }
 
+/// `CPedModelInfo::ms_pHitColTable` (0x8A630C, stride 0x1C): bone tag, piece type, offset
+/// along the bone's X axis, radius.
+const HIT_COL: [(i32, u8, f32, f32); 12] = [
+    (5, 9, 0.05, 0.15),
+    (3, 3, 0.2, 0.2),
+    (3, 3, 0.0, 0.2),
+    (2, 4, -0.1, 0.2),
+    (32, 5, 0.06, 0.14),
+    (22, 6, 0.06, 0.14),
+    (33, 5, 0.05, 0.14),
+    (23, 6, 0.05, 0.14),
+    (42, 7, -0.1, 0.18),
+    (52, 8, -0.1, 0.18),
+    (43, 7, -0.18, 0.16),
+    (53, 8, -0.18, 0.16),
+];
+
+/// `CPedModelInfo::AnimatePedColModelSkinned` (0x4C6F70): the bullet hit col model posed
+/// from the skinned clump (ped model space).
+pub fn hit_col_model(clump: &crate::anim::Clump) -> Option<ColModel> {
+    let mut spheres = Vec::with_capacity(HIT_COL.len());
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for (tag, piece, x, r) in HIT_COL {
+        let f = clump.frame_of_tag(tag)?;
+        let center = clump.ltm(f).transform_point3(Vec3::new(x, 0.0, 0.0));
+        lo = lo.min(center - Vec3::splat(r));
+        hi = hi.max(center + Vec3::splat(r));
+        spheres.push(ColSphere { center, radius: r, surf: Surf { material: SURFACE_PED, piece, lighting: 0 } });
+    }
+    let c = (lo + hi) * 0.5;
+    Some(ColModel { bbox_min: lo, bbox_max: hi, bound_center: c, bound_radius: (hi - c).length(), spheres, ..Default::default() })
+}
+
 /// A Physical configured like the CPed constructor (0x5E8030).
 pub fn ped_physical(matrix: Matrix) -> Physical {
     let mut p = Physical::new(EntityType::Ped, matrix);
@@ -242,6 +275,7 @@ impl PedLogic {
                     piece: 3,
                     dir: 0,
                     fight: None,
+                    force_death: false,
                 });
             }
         } else if pd.breath < BREATH_MAX {
@@ -262,6 +296,10 @@ pub fn set_heading(m: &mut Matrix, h: f32) {
 }
 
 impl BodyLogic for PedLogic {
+    fn hit_col_model(&self) -> Option<ColModel> {
+        hit_col_model(self.clump.as_deref()?)
+    }
+
     /// CPed::ProcessControl (0x5E8CD0), the physics-relevant steps.
     fn process_control(&mut self, p: &mut Physical, _col: &mut ColModel, ctx: &Ctx, _lines: &LineHits) {
         let ts = ctx.ts;
@@ -298,6 +336,9 @@ impl BodyLogic for PedLogic {
             for d in std::mem::take(&mut self.pending_damage) {
                 if let Some(n) = self.npc.as_mut() {
                     n.damaged_by = Some(d.src);
+                }
+                if let Some(n) = self.npc.as_ref() {
+                    self.tasks.move_state = n.move_state;
                 }
                 if let Some((src, force)) = self.tasks.take_damage(d, clump, &m, ctx.now_ms) {
                     let dd = (src - p.matrix.pos).truncate().normalize_or_zero();
@@ -359,9 +400,16 @@ impl BodyLogic for PedLogic {
             self.tasks.pad.clear_just_down();
         }
 
+        if self.is_player {
+            self.tasks.regen_stamina(self.vehicle.is_some(), ts);
+        }
+
         // NPCs: CPedIntelligence::Process (the wander task) and SetMoveAnim (step 17).
         let alive = self.tasks.health.alive();
         if let (Some(npc), Some(clump), Some(m)) = (self.npc.as_mut(), self.clump.as_deref_mut(), self.tasks.anims.clone()) {
+            if std::mem::take(&mut self.tasks.health.anim_reset) {
+                npc.last_move_state = 0;
+            }
             if alive && !busy && self.knocked_down <= 0.0 {
                 if let Some(paths) = npc.paths.clone() {
                     let i = crate::npc::NpcIn { paths: &paths, anims: &m, now_ms: ctx.now_ms, frame: ctx.frame, ts };

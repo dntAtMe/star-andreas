@@ -410,6 +410,7 @@ impl World {
                                     piece: 3,
                                     dir,
                                     fight: None,
+                                    force_death: false,
                                 });
                             }
                         } else {
