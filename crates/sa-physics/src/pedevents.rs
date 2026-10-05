@@ -10,7 +10,7 @@
 //! FleeEntity 909, InvestigateDeadPed 600, the drive-away car responses, ambient speech.
 
 use glam::{Vec2, Vec3};
-use sa_formats::decision::{Decision, NUM_DECISIONS};
+use sa_formats::decision::Decision;
 
 use crate::{
     anim::{AnimManager, Clump, af},
@@ -1071,7 +1071,7 @@ mod tests {
         d.task[1] = 300;
         d.prob[1] = [20, 20, 0, 0];
         d.flag[1] = [true, false];
-        let mut table = vec![Decision::default(); NUM_DECISIONS];
+        let mut table = vec![Decision::default(); sa_formats::decision::NUM_DECISIONS];
         let mut ev2 = [0u8; 96];
         ev2[15] = 6;
         table[6] = d;
