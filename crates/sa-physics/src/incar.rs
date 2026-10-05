@@ -415,6 +415,10 @@ impl World {
                 b.phys.status = if is_player { Status::Player } else { Status::Physics };
             }
         }
+        // CCrime 6 (steal car) the first time the player drives it (`+0x42A & 2`).
+        if is_player && self.stolen.insert(veh) {
+            self.report_crime(6, Some(veh), Some(ped));
+        }
         self.process_peds_in_vehicles(0.0);
         true
     }

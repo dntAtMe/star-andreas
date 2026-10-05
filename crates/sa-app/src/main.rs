@@ -233,6 +233,7 @@ fn update_hud(
             sa.logic::<sa_physics::ped::PedLogic>(ped.sa)
                 .map(|l| format!("  health {:.0}/{:.0}  armour {:.0}", l.tasks.health.health, l.tasks.health.max_health, l.tasks.health.armour))
                 .unwrap_or_default()
+                + &format!("  wanted {} (chaos {})", sa.world.wanted.level, sa.world.wanted.chaos)
         },
         driving
             .0

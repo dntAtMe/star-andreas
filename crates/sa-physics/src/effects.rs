@@ -239,6 +239,8 @@ pub enum WorldRequest {
     BreakObject(crate::breakable::BreakRequest),
     /// An event for the global event group (`GetEventGlobalGroup()->Add`).
     PedEvent(crate::pedevents::EventKind),
+    /// `CCrime::ReportCrime(type, victim, criminal)`.
+    ReportCrime { ty: u8, victim: Option<EntityId>, criminal: Option<EntityId> },
 }
 
 /// `eExplosionType`.

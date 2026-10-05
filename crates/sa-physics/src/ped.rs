@@ -115,6 +115,8 @@ pub struct PedLogic {
     pub npc: Option<crate::npc::NpcState>,
     /// ped+0x58C with ped+0x46C & 0x100: seated in a vehicle (CTaskSimpleCarDrive).
     pub vehicle: Option<crate::incar::InVehicle>,
+    /// Knocked down by the player's car this frame (the run-over crime).
+    pub run_over_by_player: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -155,6 +157,7 @@ impl PedLogic {
             pending_damage: Vec::new(),
             npc: None,
             vehicle: None,
+            run_over_by_player: false,
         }
     }
 

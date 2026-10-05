@@ -291,6 +291,7 @@ impl World {
         dmg_pct: f32,
     ) {
         let ts = self.last_ts;
+        let mut crimes: Vec<(u8, EntityId)> = Vec::new();
         for kind in [EntityType::Vehicle, EntityType::Ped, EntityType::Object] {
             for id in self.body_ids() {
                 let Some(b) = self.body_mut(id) else { continue };
@@ -395,6 +396,10 @@ impl World {
                             }
                             // Explosion damage: f × 250, type 51, piece 3.
                             if dmg_pct > 0.0 {
+                                // CCrime 5 (cop) / 4 for the creator.
+                                if creator.is_some() {
+                                    crimes.push((if l.npc.as_ref().is_some_and(|n| n.ped_type == 6) { 5 } else { 4 }, id));
+                                }
                                 let to = pos - ped_pos;
                                 let dir = crate::peddamage::local_direction(l.cur_rot, glam::Vec2::new(to.x, to.y));
                                 l.pending_damage.push(crate::peddamage::DamageIn {
@@ -436,6 +441,9 @@ impl World {
                     }
                 }
             }
+        }
+        for (ty, victim) in crimes {
+            self.report_crime(ty, Some(victim), creator);
         }
     }
 }

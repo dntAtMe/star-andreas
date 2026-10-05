@@ -485,6 +485,8 @@ impl World {
         cp: &ColPoint,
         inc: i32,
     ) {
+        // CCrime 1 (fire weapon) for every shot (0x73B5DF).
+        self.report_crime(1, victim, Some(h.owner));
         let Some(victim) = victim else {
             self.add_weapon_trace(start, end);
             return;
@@ -508,6 +510,8 @@ impl World {
                 }
                 let n = if inc != 0 { 4 } else if cp.piece_b == 9 { 16 } else { 8 };
                 self.weapon_fx(|f| f.add_blood(point, normal, n, 1.0));
+                // CCrime 4 (ped hurt by a weapon, 0x73BA79).
+                self.report_crime(4, Some(victim), Some(h.owner));
             }
             EntityType::Object => {
                 if visible {

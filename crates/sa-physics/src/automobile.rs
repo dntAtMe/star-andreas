@@ -1204,6 +1204,8 @@ impl BodyLogic for Automobile {
     /// and CVehicle::ProcessEngineSmokeFx (0x6D2A80, from PreRender).
     fn process_effects(&mut self, id: EntityId, p: &mut Physical, col: &ColModel, f: &mut FrameFx) {
         if let Some(culprit) = self.damage.blown_up.take() {
+            // CCrime 20 (destroy vehicle).
+            f.requests.push(WorldRequest::ReportCrime { ty: 20, victim: Some(id), criminal: culprit });
             f.fx.cam_shakes.push((0.4, p.matrix.pos));
             // gFireManager.StartFire(car, culprit, ...) is refused here: the engine
             // status is 250 after FuckCarCompletely (>= 225).

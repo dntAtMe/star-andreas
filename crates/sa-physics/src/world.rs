@@ -220,6 +220,10 @@ pub struct World {
     pub decisions: Option<Arc<crate::pedevents::DecisionData>>,
     /// The global event group: events raised this frame, handed to the peds next frame.
     pub ped_events: Vec<crate::pedevents::EventKind>,
+    /// The player's `CWanted`.
+    pub wanted: crate::wanted::Wanted,
+    /// Vehicles the player has already been reported for stealing (`+0x42A & 2`).
+    pub stolen: std::collections::HashSet<EntityId>,
 }
 
 impl Default for World {
@@ -274,6 +278,8 @@ impl World {
             breaks: Default::default(),
             decisions: None,
             ped_events: Vec::new(),
+            wanted: Default::default(),
+            stolen: Default::default(),
         }
     }
 
@@ -438,6 +444,7 @@ impl World {
         ctx.frame = self.frame;
         self.update_population();
         self.process_ped_events();
+        self.update_wanted();
         self.update_traffic();
         self.traffic_ai();
         self.probe_ped_ground();
@@ -609,6 +616,7 @@ impl World {
                 WorldRequest::MeleeStrike(s) => self.melee_strike(s),
                 WorldRequest::BreakObject(b) => self.add_break(&b),
                 WorldRequest::PedEvent(k) => self.ped_events.push(k),
+                WorldRequest::ReportCrime { ty, victim, criminal } => self.report_crime(ty, victim, criminal),
             }
         }
         self.bullet_traces.update(self.now_ms);
@@ -1720,6 +1728,7 @@ impl World {
 /// 0x5F0360 CPed::KillPedWithCar (velocity assignment + braking impulse on the car).
 fn kill_ped_with_car(car: &mut Physical, ped: &mut Physical, state: &mut PedLogic, impulse: f32) {
     let big = impulse > 12.0 && !state.is_player;
+    let by_player = car.status == Status::Player;
     if !big {
         let threshold = if state.is_player { 10.0 } else { 6.0 };
         if impulse <= threshold && !(ped.last_collision_impact_velocity.z < -0.8 && impulse > 3.0) {
@@ -1737,6 +1746,10 @@ fn kill_ped_with_car(car: &mut Physical, ped: &mut Physical, state: &mut PedLogi
     ped.move_speed.z = 0.0;
     state.standing = false;
     state.knocked_down = 1.0;
+    // CCrime 10 / 11 (run over ped / cop) for the player's car (0x5F0BE2).
+    if by_player {
+        state.run_over_by_player = true;
+    }
     // Damage: the big hit 1000 (NPCs), the small hit 30, type 49 rammed by car, piece 3.
     let to_car = car.matrix.pos - ped.matrix.pos;
     let dir = crate::peddamage::local_direction(state.cur_rot, glam::Vec2::new(to_car.x, to_car.y));

@@ -985,9 +985,22 @@ impl crate::world::World {
             local.push((t, EventKind::GunAimedAt { aimer }));
         }
         local.extend(self.run_over_events(&views));
+        let player = self.player_id();
         for v in views.iter().filter(|v| v.npc) {
             if let Some(src) = npc_mut(self, v.id).and_then(|n| n.damaged_by.take()) {
+                // GenerateDamageEvent: CCrime 2 for the player's damage.
+                if src.is_some() && src == player {
+                    self.report_crime(2, Some(v.id), src);
+                }
                 local.push((v.id, EventKind::Damage { src }));
+            }
+            let run_over = self
+                .body_mut(v.id)
+                .and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>())
+                .map(|l| std::mem::take(&mut l.run_over_by_player))
+                .unwrap_or(false);
+            if run_over {
+                self.report_crime(if v.ped_type == 6 { 11 } else { 10 }, Some(v.id), player);
             }
         }
         for v in views.iter().filter(|v| v.npc && v.alive) {
