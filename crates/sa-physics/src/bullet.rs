@@ -226,6 +226,8 @@ pub struct InstantHit {
     pub origin: Vec3,
     pub effect: Vec3,
     pub is_player: bool,
+    /// The gun task's target entity and aim point (NPCs).
+    pub target: Option<(EntityId, Vec3)>,
     /// `ped+0x71A` (100 for the player).
     pub accuracy: u8,
     pub ducking: bool,
@@ -354,6 +356,29 @@ impl World {
                     let d2 = (cp.point.truncate() - cam_src.truncate()).length();
                     info.weapon_range * range_multiplier(self, Some(*id)) >= d2
                 });
+            (end, dir, hit)
+        } else if let Some((tid, aim)) = h.target {
+            // §3.2.2 with a target entity: the target's spine (GetBonePosition(3)), full range,
+            // the AI spread (wider against a moving player).
+            let end = self.ped_bone_world(tid, 3, Vec3::ZERO).unwrap_or(aim);
+            let d = end - start;
+            let len = d.length().max(0.01);
+            let dir = d / len;
+            let r = info.weapon_range * range_multiplier(self, Some(tid));
+            let mut end = start + dir * r;
+            if !h.is_player && spread > 0.0 {
+                let mut s = spread;
+                if let Some(tb) = self.body(tid).filter(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>().is_some_and(|l| l.is_player)) {
+                    s *= tb.phys.move_speed.length().min(0.33) * 0.909_090_9 + 0.8;
+                }
+                let a = self.rng.rand01();
+                let b = self.rng.rand01();
+                let c = self.rng.rand01();
+                end.x += (c * 0.4 - 0.2) * s;
+                end.y += (b * 0.4 - 0.2) * s;
+                end.z += (a * 0.2 - 0.1) * s;
+            }
+            let hit = self.process_line_of_sight(start, end, &opts);
             (end, dir, hit)
         } else {
             let end = h.effect + owner_mat.fwd * info.weapon_range;
@@ -507,6 +532,42 @@ impl World {
             EntityType::Ped => {
                 if victim == h.owner {
                     return;
+                }
+                // §3.7.1: NPCs don't hurt their own ped type (civilians excepted).
+                let ped_of = |w: &World, id: EntityId| {
+                    let b = w.body(id)?;
+                    let l = b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()?;
+                    Some((l.npc.as_ref().map_or(0, |n| n.ped_type), l.is_player, l.cur_rot, b.phys.matrix.pos))
+                };
+                let owner = ped_of(self, h.owner);
+                let Some((v_type, _, v_rot, v_pos)) = ped_of(self, victim) else { return };
+                if let Some((o_type, o_player, ..)) = owner {
+                    if o_type == v_type && !matches!(o_type, 4 | 5) && !o_player {
+                        return;
+                    }
+                }
+                if inc <= 0 {
+                    // GenerateDamageEvent: info.damage (× the pellets that hit), 150 point blank.
+                    let to_src = start - v_pos;
+                    let dir = crate::peddamage::local_direction(v_rot, glam::Vec2::new(to_src.x, to_src.y));
+                    let mut dmg = info.damage as f32;
+                    if inc < 0 {
+                        dmg *= -inc as f32;
+                    }
+                    if owner.is_some_and(|o| o.1) && (v_pos - start).length() < 1.0 && !matches!(h.ty, 25 | 27) {
+                        dmg = 150.0;
+                    }
+                    if let Some(l) = self.body_mut(victim).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>()) {
+                        l.pending_damage.push(crate::peddamage::DamageIn {
+                            src: Some(h.owner),
+                            src_pos: Some(start),
+                            ty: h.ty,
+                            damage: dmg,
+                            piece: cp.piece_b,
+                            dir,
+                            fight: None,
+                        });
+                    }
                 }
                 let n = if inc != 0 { 4 } else if cp.piece_b == 9 { 16 } else { 8 };
                 self.weapon_fx(|f| f.add_blood(point, normal, n, 1.0));

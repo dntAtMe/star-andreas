@@ -131,7 +131,8 @@ fn setup(mut commands: Commands) {
         Transform::from_translation(start).with_rotation(Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0)),
         DistanceFog { color: SKY, falloff: FogFalloff::Linear { start: 900.0, end: 3200.0 }, ..default() },
         FlyCam { yaw, pitch, speed: 60.0 },
-        OrbitCam { yaw: 0.0, pitch: -0.15, dist: 3.5 },
+        // SA_ORBIT=<yaw>: the starting orbit yaw (debug).
+        OrbitCam { yaw: std::env::var("SA_ORBIT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), pitch: -0.15, dist: 3.5 },
         StreamCamera,
     ));
 

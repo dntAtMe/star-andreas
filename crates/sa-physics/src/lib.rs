@@ -4,6 +4,7 @@
 //! speeds per 1/50 s frame, and a timestep `ts` measured in such frames.
 
 pub mod anim;
+pub mod armed;
 pub mod automobile;
 pub mod bike;
 pub mod breakable;

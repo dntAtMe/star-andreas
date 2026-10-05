@@ -3,8 +3,11 @@
 //! fire), the aiming IK (`CPedIK::PointGunInDirection`, `RotateTorsoForArm`, an analytic
 //! stand-in for the arm IK chain) and `FireGun` (hand bone → `CWeapon::Fire`).
 //!
-//! Not ported: pistol whipping, burst fire, crouching, blocked-arm sensors (Ped2 col model),
-//! lock-on targets, first-person / projectile / area-effect weapons.
+//! NPCs (CTaskSimpleGunControl, see `armed.rs`) aim at a target entity: the arm IK points at
+//! its spine, the shot goes to it with the AI spread.
+//!
+//! Not ported: pistol whipping, crouching, blocked-arm sensors (Ped2 col model),
+//! the player's lock-on targets, first-person / projectile / area-effect weapons.
 
 use glam::{Quat, Vec2, Vec3};
 
@@ -49,7 +52,7 @@ pub struct UseGun {
     pub finished: bool,
     in_control: bool,
     move_control: bool,
-    has_fired: bool,
+    pub(crate) has_fired: bool,
     /// Fire-this-frame bits: 1 right gun, 2 left gun.
     pub fire_bits: u8,
     pub next_cmd: Option<GunCmd>,
@@ -60,8 +63,12 @@ pub struct UseGun {
     /// m_pWeaponInfo (type, skill) and a copy of the row.
     pub info: Option<WeaponInfo>,
     info_key: Option<(u32, u8)>,
-    burst_shots: i16,
-    count_down: u8,
+    /// +0x34 burst length / +0x36 shots left in the burst (also the reload counter).
+    pub(crate) burst_length: i16,
+    pub(crate) burst_shots: i16,
+    pub(crate) count_down: u8,
+    /// m_pTarget and its aim point (the spine, from the world) for NPCs.
+    pub target: Option<(EntityId, Vec3)>,
     arm_ik: bool,
     look_ik: bool,
 }
@@ -198,6 +205,9 @@ impl UseGun {
                 } else if crouch.is_some_and(|d| d.busy_fire(c.clump)) {
                     return;
                 }
+                if self.next() == GunCmd::FireBurst {
+                    self.burst_shots = self.burst_length;
+                }
                 let id = if t.ducking && info.has(wf::CROUCHFIRE) { anim_id::WEAPON_CROUCHFIRE } else { anim_id::WEAPON_FIRE };
                 let i = c.clump.blend_animation(m, info.anim_group, id, 8.0);
                 if let Some(i) = i {
@@ -331,7 +341,11 @@ impl UseGun {
         // Aim / IK.
         let mut skip_aim = false;
         if info.has(wf::AIMWITHARM) && !t.ducking {
-            if let Some(tgt) = arm_target(t, c, ctx) {
+            let tgt = match self.target.filter(|_| !t.is_player) {
+                Some((_, p)) => Some(p),
+                None => arm_target(t, c, ctx),
+            };
+            if let Some(tgt) = tgt {
                 let d = tgt - c.p.matrix.pos;
                 let rel = crate::ped::limit_radian_angle((-d.x).atan2(d.y) - *c.cur_rot);
                 if !(-2.268_928..=2.007_128_7).contains(&rel) {
@@ -405,13 +419,14 @@ impl UseGun {
             }
         } else if firing && s < tt && tt < e && playing {
             let next = self.next();
-            if !self.has_fired || matches!(next, GunCmd::Fire | GunCmd::FireBurst) {
+            if !self.has_fired || (self.last_cmd == GunCmd::FireBurst && self.burst_shots > 0) || matches!(next, GunCmd::Fire | GunCmd::FireBurst) {
                 self.fire_bits |= 1;
                 self.has_fired = true;
                 if next > self.last_cmd {
                     self.last_cmd = next;
                 }
                 self.next_cmd = Some(GunCmd::Null);
+                self.burst_shots = if self.last_cmd == GunCmd::FireBurst && self.burst_shots > 0 { self.burst_shots - 1 } else { 0 };
             } else {
                 a.flags &= !af::PLAYING;
                 a.blend_delta = -4.0;
@@ -437,6 +452,9 @@ impl UseGun {
                 if matches!(next, GunCmd::Fire | GunCmd::FireBurst) {
                     self.last_cmd = next;
                     self.next_cmd = Some(GunCmd::Null);
+                    if next == GunCmd::FireBurst {
+                        self.burst_shots = self.burst_length;
+                    }
                 } else if self.last_cmd == GunCmd::Aim && next != GunCmd::Aim {
                     self.last_cmd = GunCmd::Null;
                 }
@@ -449,11 +467,17 @@ impl UseGun {
         let next = self.next();
         let tt = a.time;
         if tt > e && tt - dt <= e {
-            if matches!(next, GunCmd::Fire | GunCmd::FireBurst) {
+            let bursting = self.last_cmd == GunCmd::FireBurst && self.burst_shots > 0 && next != GunCmd::Reload;
+            if matches!(next, GunCmd::Fire | GunCmd::FireBurst) || bursting {
                 a.set_current_time(s);
                 a.set_playing(!reloading);
-                if next > self.last_cmd {
-                    self.last_cmd = next;
+                if matches!(next, GunCmd::Fire | GunCmd::FireBurst) {
+                    if next > self.last_cmd {
+                        self.last_cmd = next;
+                    }
+                    if next == GunCmd::FireBurst && self.burst_shots == 0 {
+                        self.burst_shots = self.burst_length;
+                    }
                 }
                 self.next_cmd = Some(GunCmd::Null);
             } else if next == GunCmd::Aim {
@@ -579,12 +603,42 @@ impl UseGun {
                 self.abort_ik(t, ctx.now_ms);
             }
             t.torso_ik_mode = Some(true);
-            point_gun_in_direction(t, c, *c.cur_rot, t.pd.look_pitch, blend);
+            match self.target.filter(|_| !t.is_player) {
+                // PointGunAtPosition: the yaw / pitch to the target.
+                Some((_, tgt)) => {
+                    let d = tgt - c.p.matrix.pos;
+                    let yaw = (-d.x).atan2(d.y);
+                    let pitch = d.z.atan2(d.truncate().length());
+                    point_gun_in_direction(t, c, yaw, pitch, blend);
+                }
+                None => point_gun_in_direction(t, c, *c.cur_rot, t.pd.look_pitch, blend),
+            }
             return;
         }
         t.torso_ik_mode = Some(false);
         let twin = info.has(wf::TWIN_PISTOL);
-        if t.pd.free_aim && matches!(ctx.cam.mode, 53 | 65) {
+        if let Some((_, tgt)) = self.target.filter(|_| !t.is_player) {
+            // m_pTarget: look at / point the arm(s) at the target's spine, twist the torso.
+            if !self.look_ik && blend > 0.98 {
+                t.ikm.look_at(tgt, 9_999_999, 0.25, 250, now);
+                self.look_ik = true;
+            } else if self.look_ik {
+                t.ikm.set_target(0, tgt);
+            }
+            if !self.arm_ik {
+                t.ikm.point_arm(0, tgt, 0.5, 250, now);
+                if twin {
+                    t.ikm.point_arm(1, tgt, 0.5, 250, now);
+                }
+                self.arm_ik = true;
+            } else {
+                t.ikm.set_target(1, tgt);
+                if twin {
+                    t.ikm.set_target(2, tgt);
+                }
+            }
+            rotate_torso_for_arm(c, tgt);
+        } else if t.pd.free_aim && matches!(ctx.cam.mode, 53 | 65) {
             let src = c.p.matrix.pos + Vec3::new(0.0, 0.0, 0.7);
             let tgt = ctx.cam.target_vector(20.0, src).1;
             if blend > 0.98 {
@@ -800,6 +854,7 @@ pub fn fire_guns(t: &mut PedTasks, clump: &Clump, p: &crate::physical::Physical,
     let Some(g) = &mut t.gun else { return out };
     let bits = std::mem::take(&mut g.fire_bits);
     let Some(info) = g.info.clone() else { return out };
+    let target = g.target;
     for (left, bit) in [(false, 1u8), (true, 2u8)] {
         if bits & bit == 0 {
             continue;
@@ -829,7 +884,8 @@ pub fn fire_guns(t: &mut PedTasks, clump: &Clump, p: &crate::physical::Physical,
                     skill: t.weapon_skill(ty),
                     origin,
                     effect,
-                    is_player: true,
+                    is_player: t.is_player,
+                    target,
                     accuracy: t.accuracy,
                     ducking: t.ducking,
                     attack_counter: t.pd.attack_counter,
@@ -844,7 +900,8 @@ pub fn fire_guns(t: &mut PedTasks, clump: &Clump, p: &crate::physical::Physical,
                     skill: t.weapon_skill(ty),
                     origin,
                     effect,
-                    is_player: true,
+                    is_player: t.is_player,
+                    target,
                     accuracy: t.accuracy,
                     ducking: t.ducking,
                     attack_counter: t.pd.attack_counter,
@@ -871,7 +928,7 @@ pub fn fire_guns(t: &mut PedTasks, clump: &Clump, p: &crate::physical::Physical,
             _ => continue,
         };
         let reload = infos.reload_time(&info);
-        t.weapons[slot].after_shot(now, &info, reload, true, set_time);
+        t.weapons[slot].after_shot(now, &info, reload, t.is_player, set_time);
         if t.weapons[slot].state == ws::FIRING {
             // CPed::DoGunFlash(250, left): full alpha and a random roll of the flash frame.
             let i = left as usize;

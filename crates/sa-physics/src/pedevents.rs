@@ -285,11 +285,13 @@ pub struct KillPedOnFoot {
     /// FightingControl +0x1C / +0x20.
     next_attack: u32,
     block_left: u32,
+    /// 1002 when the ped holds a gun.
+    pub armed: Option<crate::armed::Armed>,
 }
 
 impl KillPedOnFoot {
     pub fn new(target: EntityId) -> Self {
-        Self { target, fighting: false, next_attack: 0, block_left: 0 }
+        Self { target, fighting: false, next_attack: 0, block_left: 0, armed: None }
     }
 }
 
@@ -318,6 +320,10 @@ pub struct RespIn {
     /// The threat sits in a vehicle / is in CTaskSimpleFall (FallAndGetUp's fall).
     pub threat_in_vehicle: bool,
     pub threat_falling: bool,
+    /// IsTargetVisible (the world's cached line of sight), the target's spine and speed.
+    pub threat_visible: bool,
+    pub threat_aim: Option<Vec3>,
+    pub threat_move_speed: Vec3,
     /// The ped's pedstats shooting rate (+0x30, read as a signed byte for GUN_PANIC).
     pub shooting_rate: u16,
 }
@@ -660,6 +666,22 @@ impl NpcState {
             }
             return true;
         };
+        // 1000 Control: 1001 melee / 1002 armed by IsMelee(weapon).
+        let melee = tasks.active_info().is_none_or(|w| w.fire_type == crate::weapon::fire::MELEE);
+        if !melee {
+            if let Some(mut f) = tasks.fight.take() {
+                f.make_abortable(tasks, clump, m, false);
+            }
+            k.fighting = false;
+            let mut a = k.armed.take().unwrap_or_default();
+            let done = self.kill_ped_on_foot_armed(&mut a, k.target, me, clump, m, tasks, ri, i);
+            k.armed = Some(a);
+            return done;
+        }
+        if let Some(mut a) = k.armed.take() {
+            a.abort(tasks);
+            self.last_move_state = 0;
+        }
         let d = tp - me.pos;
         let dist2 = d.length_squared();
         // UpdateTargetAndRange: the combo range (1.6 in every melee.dat entry).
@@ -833,7 +855,7 @@ impl NpcState {
 #[derive(Debug, Clone)]
 pub struct Pursuit {
     pub target: EntityId,
-    kill: KillPedOnFoot,
+    pub kill: KillPedOnFoot,
     /// CTaskSimpleArrestPed (0x44C): the ARRESTgun anim.
     arresting: Option<Option<u32>>,
 }
@@ -1271,6 +1293,7 @@ impl crate::world::World {
         }
         // The responses' threats: position, alive, lying down, the player's wanted level.
         let wanted = self.wanted.level;
+        let now = self.now_ms;
         for v in views.iter().filter(|v| v.npc) {
             let threat = npc_ref(self, v.id)
                 .and_then(|n| n.response.as_ref().and_then(|r| r.threat()).or_else(|| n.pursuit.as_ref().map(|p| p.target)));
@@ -1292,7 +1315,33 @@ impl crate::world::World {
                     tl.filter(|l| l.is_player).map(|l| (wanted, l.tasks.health.health)),
                 )
             };
+            // IsTargetVisible for the kill tasks (cached 10 s), the target's spine and speed.
+            let killing = npc_ref(self, v.id).is_some_and(|n| matches!(n.response, Some(Resp::KillPedOnFoot(_))) || n.pursuit.is_some());
+            let (visible, aim, speed) = match (threat, tp) {
+                (Some(t), Some(tpos)) if killing && is_ped => {
+                    let cache = npc_ref(self, v.id).map(|n| n.los).unwrap_or_default();
+                    let visible = match cache.cached(now, v.pos, tpos) {
+                        Some(b) => b,
+                        None => {
+                            let from = self.ped_bone_world(v.id, 5, Vec3::new(0.1, 0.0, 0.0)).unwrap_or(v.pos + Vec3::Z * 0.6);
+                            let to = self.ped_bone_world(t, 5, Vec3::new(0.1, 0.0, 0.0)).unwrap_or(tpos + Vec3::Z * 0.6);
+                            let veh = self.body(t).and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()).and_then(|l| l.vehicle.as_ref().map(|v| v.veh));
+                            let o = crate::world::LosOpts { peds: false, see_through: true, ignore: Some(v.id), ignore2: veh, ..Default::default() };
+                            let clear = self.process_line_of_sight(from, to, &o).is_none();
+                            if let Some(n) = npc_mut(self, v.id) {
+                                n.los.store(now, clear, v.pos, tpos);
+                            }
+                            clear
+                        }
+                    };
+                    (visible, self.ped_bone_world(t, 3, Vec3::ZERO), self.body(t).map_or(Vec3::ZERO, |b| b.phys.move_speed))
+                }
+                _ => (false, None, Vec3::ZERO),
+            };
             if let Some(n) = npc_mut(self, v.id) {
+                n.resp_in.threat_visible = visible;
+                n.resp_in.threat_aim = aim;
+                n.resp_in.threat_move_speed = speed;
                 n.resp_in.threat_pos = tp;
                 n.resp_in.threat_alive = alive;
                 n.resp_in.threat_is_ped = is_ped;

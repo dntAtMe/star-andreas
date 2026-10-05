@@ -264,9 +264,20 @@ fn debug_wanted(time: Res<Time>, mut sa: ResMut<SaPhys>, mut done: Local<bool>, 
             .filter_map(|id| {
                 let p = sa.logic::<PedLogic>(id)?;
                 let n = p.npc.as_ref().filter(|n| n.ped_type == 6)?;
-                Some(format!("{id:?}{}", if n.pursuit.as_ref().is_some_and(|p| p.arresting()) { " arresting" } else if n.pursuit.is_some() { " pursuing" } else { "" }))
+                let state = if n.pursuit.as_ref().is_some_and(|p| p.arresting()) { " arresting" } else if n.pursuit.is_some() { " pursuing" } else { "" };
+                let w = p.tasks.active_weapon();
+                let armed = n.pursuit.as_ref().and_then(|p| p.kill.armed.as_ref()).map_or(String::new(), |a| a.describe());
+                let d = n.resp_in.threat_pos.zip(sa.world.body(id).map(|b| b.phys.matrix.pos)).map_or(-1.0, |(a, b)| (a - b).length());
+                Some(format!(
+                    "{id:?}{state} w{} ammo {}{} [{armed}] d {d:.1} vis {}",
+                    w.ty,
+                    w.ammo_in_clip,
+                    if p.tasks.gun.is_some() { " gun" } else { "" },
+                    n.resp_in.threat_visible
+                ))
             })
             .collect();
-        info!("wanted {} cops in pursuit {} | {}", sa.world.wanted.level, sa.world.wanted.cops_in_pursuit, cops.join(", "));
+        let hp = sa.world.player_id().and_then(|id| sa.logic::<PedLogic>(id)).map_or(0.0, |p| p.tasks.health.health);
+        info!("wanted {} cops in pursuit {} hp {hp:.0} | {}", sa.world.wanted.level, sa.world.wanted.cops_in_pursuit, cops.join(", "));
     }
 }

@@ -389,6 +389,10 @@ impl PedTasks {
 
     /// `CPed::GetWeaponSkill(type)` for the player.
     pub fn weapon_skill(&self, ty: u32) -> u8 {
+        // NPCs: ped+0x71B (STD).
+        if !self.is_player {
+            return 1;
+        }
         let Some(infos) = self.infos.as_deref() else { return 1 };
         if !(22..=32).contains(&ty) {
             return 1;
@@ -639,6 +643,17 @@ impl PedTasks {
     /// The CPlayerPed::ProcessControl tail: CWeapon::Update, ProcessWeaponSwitch,
     /// ProcessAnimGroups.
     pub fn post_process(&mut self, clump: &mut Clump, ctx: &Ctx) {
+        self.update_weapon(clump, ctx);
+        if matches!(self.air, AirTask::None) {
+            self.process_weapon_switch(clump);
+        }
+        self.process_anim_groups(clump);
+        // Spread counter decay (pd+0x2C).
+        self.pd.attack_counter *= 0.96f32.powf(ctx.ts);
+    }
+
+    /// `CWeapon::Update` of the current weapon (reload timers).
+    pub fn update_weapon(&mut self, clump: &Clump, ctx: &Ctx) {
         let w = self.weapons[self.active_slot];
         if let Some(info) = self.info_of(w.ty).cloned() {
             let reload = clump
@@ -647,12 +662,6 @@ impl PedTasks {
             let gun = self.gun.is_some();
             self.weapons[self.active_slot].update(ctx.now_ms, &info, info.ammo_clip, reload, gun);
         }
-        if matches!(self.air, AirTask::None) {
-            self.process_weapon_switch(clump);
-        }
-        self.process_anim_groups(clump);
-        // Spread counter decay (pd+0x2C).
-        self.pd.attack_counter *= 0.96f32.powf(ctx.ts);
     }
 
     /// `CTaskSimplePlayerOnFoot::ProcessPed` (0x688810).

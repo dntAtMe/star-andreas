@@ -375,6 +375,17 @@ impl IkManager {
         }
     }
 
+    /// Follow a moving target (the original tracks the target entity): slot 0 look-at,
+    /// 1 right arm, 2 left arm.
+    pub fn set_target(&mut self, slot: usize, target: Vec3) {
+        if let Some(t) = &mut self.slots[slot] {
+            t.target = target;
+            if let Some(c) = &mut t.chain {
+                c.target = target;
+            }
+        }
+    }
+
     pub fn abort_point_arm(&mut self, arm: usize, ms: i64, now: i64) {
         if let Some(t) = &mut self.slots[arm + 1] {
             t.blend_out(ms, now);

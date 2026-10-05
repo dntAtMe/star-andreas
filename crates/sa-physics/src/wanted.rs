@@ -556,6 +556,12 @@ impl World {
             .and_then(|p| p.vehicle.as_ref().map(|v| v.veh))
             .and_then(|v| self.body(v))
             .is_some_and(|b| b.phys.move_speed.length_squared() * (b.phys.matrix.pos - pp).length_squared() >= 16.0);
+        // The player holds an instant-hit or projectile weapon (SetWeapon's 1-star test).
+        let player_gun = self
+            .body(player)
+            .and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>())
+            .and_then(|p| p.tasks.infos.as_deref().map(|i| i.get(p.tasks.active_weapon().ty, 1).fire_type))
+            .is_some_and(|ft| matches!(ft, crate::weapon::fire::INSTANT_HIT | crate::weapon::fire::PROJECTILE));
         for &(id, alive) in &cops {
             let (has, responding, rejoin) = {
                 let Some(n) = self.body(id).and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()).and_then(|p| p.npc.as_ref())
@@ -572,17 +578,18 @@ impl World {
                         n.rejoin_after = now + 3000;
                         n.last_move_state = 0;
                     }
+                } else if let Some(p) = self.body_mut(id).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>()) {
+                    // ArrestPed ControlSubTask: SetWeapon every frame (not while arresting).
+                    if !p.npc.as_ref().and_then(|n| n.pursuit.as_ref()).is_some_and(|pu| pu.arresting()) {
+                        set_weapon(&mut p.tasks, level, player_gun);
+                    }
                 }
             } else if alive && level > 0 && !responding && now >= rejoin && !player_in_veh_fast {
                 // ShouldPursuePlayer → SetPursuit (the player on foot or slow).
                 if self.wanted.set_pursuit_cop(id, &d2) {
                     let w = level;
                     if let Some(p) = self.body_mut(id).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>()) {
-                        // SetWeapon (0x68BAD0): the nightstick (guns need the armed kill task).
-                        let _ = w;
-                        if let Some(slot) = (0..p.tasks.weapons.len()).find(|&s| p.tasks.weapons[s].ty == 3) {
-                            p.tasks.set_current_weapon(slot);
-                        }
+                        set_weapon(&mut p.tasks, w, player_gun);
                         if let Some(n) = p.npc.as_mut() {
                             n.pursuit = Some(crate::pedevents::Pursuit::new(player));
                             n.resp_in.threat_pos = Some(pp);
@@ -614,6 +621,30 @@ impl World {
                     }
                 }
             }
+        }
+    }
+}
+
+/// `PolicePursuit::SetWeapon(cop)` (0x68BAD0): at 2+ stars an unarmed cop draws its gun; at
+/// 1 star the nightstick unless the player holds a gun.
+fn set_weapon(t: &mut crate::pedtask::PedTasks, level: i32, player_gun: bool) {
+    if !(level >= 2 && t.active_weapon().ty == 0) {
+        if level != 1 {
+            return;
+        }
+        if !player_gun {
+            if let Some(slot) = (0..t.weapons.len()).find(|&s| t.weapons[s].ty == 3) {
+                if t.active_slot != slot {
+                    t.set_current_weapon(slot);
+                }
+                return;
+            }
+        }
+    }
+    let gun = [25, 22].into_iter().find_map(|ty| (0..t.weapons.len()).find(|&s| t.weapons[s].ty == ty));
+    if let Some(slot) = gun {
+        if t.active_slot != slot {
+            t.set_current_weapon(slot);
         }
     }
 }

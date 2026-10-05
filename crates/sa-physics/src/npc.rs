@@ -114,6 +114,8 @@ pub struct NpcState {
     pub pursuit: Option<crate::pedevents::Pursuit>,
     pub rejoin_after: u32,
     pub arrest_request: Option<crate::world::EntityId>,
+    /// 1002 IsTargetVisible's line-of-sight cache (kept by the world).
+    pub los: crate::armed::LosCache,
     pub(crate) rng: crate::damage::Rand,
 }
 
@@ -144,6 +146,7 @@ impl NpcState {
             pursuit: None,
             rejoin_after: 0,
             arrest_request: None,
+            los: Default::default(),
             rng: crate::damage::Rand::new(seed as u32 * 7919 + 1),
         }
     }
