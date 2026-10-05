@@ -362,7 +362,7 @@ impl BodyLogic for PedLogic {
         if let (Some(e), Some(clump), Some(m)) = (self.enter.as_mut(), self.clump.as_deref_mut(), self.tasks.anims.clone()) {
             if e.stage == crate::entercar::Stage::GoTo && !busy {
                 let d = (e.target - p.matrix.pos).truncate();
-                if self.tasks.pad.enter_exit_just_down && ctx.now_ms > e.started_ms() + 100 || ctx.now_ms > e.started_ms() + 30000 {
+                if self.tasks.pad.enter_exit_just_down && ctx.now_ms > e.started_ms() + 100 || ctx.now_ms > e.started_ms() + e.timeout_ms {
                     e.cancel = true;
                 } else if d.length_squared() < 0.5 * 0.5 {
                     e.reached = true;
@@ -410,7 +410,7 @@ impl BodyLogic for PedLogic {
             if std::mem::take(&mut self.tasks.health.anim_reset) {
                 npc.last_move_state = 0;
             }
-            if alive && !busy && self.knocked_down <= 0.0 && self.vehicle.is_none() {
+            if alive && !busy && self.knocked_down <= 0.0 && self.vehicle.is_none() && self.enter.is_none() {
                 if let Some(paths) = npc.paths.clone() {
                     let i = crate::npc::NpcIn { paths: &paths, anims: &m, now_ms: ctx.now_ms, frame: ctx.frame, ts };
                     // HandleEvents: respond to the highest-priority event.

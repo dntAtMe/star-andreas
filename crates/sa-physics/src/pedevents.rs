@@ -26,6 +26,7 @@ use crate::{
 
 /// eEventType values used here.
 pub mod ev {
+    pub const DRAGGED_OUT_CAR: u8 = 7;
     pub const DAMAGE: u8 = 9;
     pub const DEAD_PED: u8 = 11;
     pub const POTENTIAL_GET_RUN_OVER: u8 = 12;
@@ -122,6 +123,8 @@ pub enum EventKind {
     SeenPanickedPed { fleer: EntityId, threat: Option<EntityId> },
     DeadPed { dead: EntityId },
     Damage { src: Option<EntityId> },
+    /// CEventDraggedOutCar (bValid: never expires).
+    DraggedOutCar { jacker: EntityId, veh: EntityId, was_driver: bool },
 }
 
 impl EventKind {
@@ -134,6 +137,7 @@ impl EventKind {
             Self::SeenPanickedPed { .. } => ev::SEEN_PANICKED_PED,
             Self::DeadPed { .. } => ev::DEAD_PED,
             Self::Damage { .. } => ev::DAMAGE,
+            Self::DraggedOutCar { .. } => ev::DRAGGED_OUT_CAR,
         }
     }
 
@@ -147,6 +151,7 @@ impl EventKind {
             Self::SeenPanickedPed { .. } => 13,
             Self::DeadPed { .. } => 15,
             Self::Damage { .. } => 65,
+            Self::DraggedOutCar { .. } => 40,
         }
     }
 
@@ -159,6 +164,7 @@ impl EventKind {
             Self::SeenPanickedPed { fleer, .. } => Some(fleer),
             Self::DeadPed { dead } => Some(dead),
             Self::Damage { src } => src,
+            Self::DraggedOutCar { jacker, .. } => Some(jacker),
         }
     }
 
@@ -273,6 +279,11 @@ pub enum Resp {
     EvasiveDive { heading: f32, stage: u8, anim: Option<u32> },
     /// CTaskComplexKillPedOnFoot (1000) → KillPedOnFootMelee (1001).
     KillPedOnFoot(KillPedOnFoot),
+    /// ComputeDraggedOutCarResponse's sequences: GESTURE (pause 500..1500 ms, or turn to the
+    /// dragger and give the finger), then `then`.
+    Gesture { dragger: EntityId, pause_until: Option<u32>, anim: Option<u32>, then: Box<Resp> },
+    /// 702 CTaskComplexEnterCarAsDriverTimed (requested from the world).
+    EnterCar { veh: EntityId },
 }
 
 /// CTaskComplexKillPedOnFoot (1000) with the melee child: 907 CTaskComplexSeekEntity (run to
@@ -301,6 +312,7 @@ impl Resp {
         match self {
             Resp::SmartFlee(f) => Some(f.threat),
             Resp::KillPedOnFoot(k) => Some(k.target),
+            Resp::Gesture { dragger, .. } => Some(*dragger),
             Resp::AimedAt { aimer, stage: AimedAt::WalkAway { .. } | AimedAt::HandsUp { .. } | AimedAt::Cower { .. } | AimedAt::Heading } => Some(*aimer),
             _ => None,
         }
@@ -418,6 +430,21 @@ impl NpcState {
                 911 => flee(*dead, true, 60.0),
                 _ => None,
             },
+            // ComputeDraggedOutCarResponse (0x4BCC30).
+            (EventKind::DraggedOutCar { jacker, veh, was_driver }, t) => {
+                let gesture = |rng: &mut Rand, then: Resp| {
+                    let pause = (rng.next() & 0x3FF) < 0x201;
+                    let pause_until = pause.then(|| now + rand_range(rng, 500, 1500) as u32);
+                    Resp::Gesture { dragger: *jacker, pause_until, anim: None, then: Box::new(then) }
+                };
+                match t {
+                    911 => flee(*jacker, false, 60.0),
+                    1000 if !can_fight => flee(*jacker, false, 60.0),
+                    1000 => Some(gesture(&mut self.rng, Resp::KillPedOnFoot(KillPedOnFoot::new(*jacker)))),
+                    702 if *was_driver => Some(gesture(&mut self.rng, Resp::EnterCar { veh: *veh })),
+                    _ => None,
+                }
+            }
             // ComputeAttackResponse (0x4BF9B0).
             (EventKind::Damage { src }, t) => match (t, src) {
                 (911, Some(s)) => flee(*s, false, 60.0),
@@ -508,6 +535,38 @@ impl NpcState {
             }
             Resp::KillPedOnFoot(k) => {
                 done = self.kill_ped_on_foot(k, me, clump, m, tasks, ri, i);
+            }
+            Resp::Gesture { dragger: _, pause_until, anim, then } => {
+                self.move_state = 1;
+                match pause_until {
+                    // CTaskSimplePause.
+                    Some(t) => {
+                        if now >= *t {
+                            let next = std::mem::replace(&mut **then, Resp::Cower { anim: None });
+                            self.response = Some(next);
+                            return true;
+                        }
+                    }
+                    // AchieveHeading(0.5, 0.2) to the dragger, then FlipOff (FUCKU).
+                    None => {
+                        let face = ri.threat_pos.map(|tp| limit_radian_angle(radian_angle_between_points(tp.x, tp.y, me.pos.x, me.pos.y)));
+                        if anim.is_none() {
+                            if face.is_none_or(|h| achieve_heading(h, me.aim_rot, me.cur_rot)) {
+                                *anim = blend(clump, m, ra::SHAKE_FIST, 4.0, true);
+                                self.last_move_state = 1;
+                            }
+                        } else if anim_done(clump, *anim) {
+                            let next = std::mem::replace(&mut **then, Resp::Cower { anim: None });
+                            self.last_move_state = 0;
+                            self.response = Some(next);
+                            return true;
+                        }
+                    }
+                }
+            }
+            Resp::EnterCar { veh } => {
+                self.enter_request = Some(*veh);
+                done = true;
             }
             Resp::Duck { until, anim } => {
                 self.move_state = 1;
@@ -1089,7 +1148,7 @@ impl crate::world::World {
                 fleer != p.id && threat.is_some() && pos_of(fleer).is_some_and(|f| (f - p.pos).length_squared() < 100.0)
             }
             EventKind::GunAimedAt { .. } => !p.in_601,
-            EventKind::GetRunOver { .. } | EventKind::Damage { .. } => true,
+            EventKind::GetRunOver { .. } | EventKind::Damage { .. } | EventKind::DraggedOutCar { .. } => true,
         }
     }
 
@@ -1271,6 +1330,13 @@ impl crate::world::World {
                     self.report_crime(2, Some(v.id), src);
                 }
                 local.push((v.id, EventKind::Damage { src }));
+            }
+            // CEventDraggedOutCar (added at the drag; answered after the get-up).
+            if let Some((jacker, veh, was_driver)) = npc_mut(self, v.id).and_then(|n| n.dragged_out.take()) {
+                local.push((v.id, EventKind::DraggedOutCar { jacker, veh, was_driver }));
+            }
+            if let Some(veh) = npc_mut(self, v.id).and_then(|n| n.enter_request.take()) {
+                self.start_enter_car_timed(v.id, veh);
             }
             let run_over = self
                 .body_mut(v.id)

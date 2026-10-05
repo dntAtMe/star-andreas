@@ -210,6 +210,8 @@ fn log_responses(sa: Res<SaPhys>, mut last: Local<HashMap<u32, String>>) {
                 Resp::EvasiveStep { .. } => "evasive step",
                 Resp::EvasiveDive { .. } => "evasive dive",
                 Resp::KillPedOnFoot(k) => if k.fighting { "kill ped on foot (fighting)" } else { "kill ped on foot (seek)" },
+                Resp::Gesture { .. } => "gesture",
+                Resp::EnterCar { .. } => "enter car timed",
             };
             format!("{name} (event {:?})", n.cur_event.as_ref().map(|e| (e.kind.ty(), e.task)))
         });

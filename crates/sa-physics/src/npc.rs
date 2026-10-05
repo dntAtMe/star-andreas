@@ -116,6 +116,10 @@ pub struct NpcState {
     pub arrest_request: Option<crate::world::EntityId>,
     /// 1002 IsTargetVisible's line-of-sight cache (kept by the world).
     pub los: crate::armed::LosCache,
+    /// Dragged out of a car (jacker, vehicle, was the driver): the world raises the event.
+    pub dragged_out: Option<(crate::world::EntityId, crate::world::EntityId, bool)>,
+    /// A response wants CTaskComplexEnterCarAsDriverTimed (the world starts it).
+    pub enter_request: Option<crate::world::EntityId>,
     pub(crate) rng: crate::damage::Rand,
 }
 
@@ -147,6 +151,8 @@ impl NpcState {
             rejoin_after: 0,
             arrest_request: None,
             los: Default::default(),
+            dragged_out: None,
+            enter_request: None,
             rng: crate::damage::Rand::new(seed as u32 * 7919 + 1),
         }
     }

@@ -425,6 +425,77 @@ impl World {
         Some(SpawnCar { model, pos, fwd, speed: cruise as f32 / 60.0 * ap.speed_mult, ap })
     }
 
+    /// `CCarCtrl::JoinCarWithRoadSystem` (0x42F5A0) + `FindLinksToGoWithTheseNodes`: the
+    /// closest car node, its neighbour with the shortest link ordered along the car's heading,
+    /// lanes 0; then PHYSICS with the given mission / style / cruise (a new CAutoPilot for a
+    /// car that had none).
+    pub fn join_car_with_road_system(&mut self, veh: EntityId, mission: u8, style: u8, cruise: u8) {
+        let Some(paths) = self.traffic.as_ref().map(|t| t.paths.clone()) else { return };
+        let Some((pos, fwd)) = self.body(veh).map(|b| (b.phys.matrix.pos, b.phys.matrix.fwd)) else { return };
+        let Some(n) = paths.find_node_closest_car(pos, 1.0e6) else { return };
+        let links = paths.car_links(n);
+        let Some(&(nb, _)) = links.iter().min_by(|a, b| {
+            let d = |x: NodeAddr| (paths.coors(x) - paths.coors(n)).length();
+            d(a.0).total_cmp(&d(b.0))
+        }) else {
+            return;
+        };
+        let ahead = (paths.coors(nb) - paths.coors(n)).truncate().dot(fwd.truncate()) >= 0.0;
+        let (cur, next) = if ahead { (n, nb) } else { (nb, n) };
+        let Some(next_link) = paths.link_between(cur, next) else { return };
+        let other = paths.car_links(cur).into_iter().find(|&(x, _)| x != next);
+        let seed = self.rng.next() as u16;
+        let now = self.now_ms;
+        let speed_type = paths.node(next).map_or(1, |x| ((x.flags >> 12) & 3) as i8);
+        let Some(b) = self.body_mut(veh) else { return };
+        if b.phys.status != Status::Wrecked {
+            b.phys.status = Status::Physics;
+        }
+        let Some(car) = b.logic.as_any_mut().downcast_mut::<Automobile>() else { return };
+        let mut ap = car.autopilot.take().unwrap_or_else(|| AutoPilot {
+            cur_node: None,
+            next_node: None,
+            prev_node: None,
+            cur_link: None,
+            next_link: None,
+            prev_link: None,
+            cur_dir: 1,
+            next_dir: 1,
+            prev_dir: 1,
+            cur_lane: 0,
+            next_lane: 0,
+            style: 0,
+            mission: 1,
+            temp_action: 0,
+            temp_action_time: 0,
+            cruise: 0,
+            speed_type,
+            speed_mult: speed_mult_from_nodes(speed_type),
+            timer_a: now,
+            timer_b: now,
+            last_stuck: 0,
+            stuck_count: 0,
+            lane_countdown: 2,
+            seed,
+            paths: paths.clone(),
+        });
+        ap.prev_node = None;
+        ap.cur_node = Some(cur);
+        ap.next_node = Some(next);
+        ap.next_link = Some(next_link);
+        ap.next_dir = dir_sign(cur, next);
+        ap.cur_link = other.map(|o| o.1);
+        ap.cur_dir = other.map_or(1, |o| if (o.0.area, o.0.node) < (cur.area, cur.node) { -1 } else { 1 });
+        ap.cur_lane = 0;
+        ap.next_lane = 0;
+        ap.mission = mission;
+        ap.style = style;
+        ap.cruise = cruise;
+        ap.temp_action = 0;
+        car.autopilot = Some(ap);
+        car.engine_on = true;
+    }
+
     /// `PickNextNodeRandomly` (0x42DE80).
     pub(crate) fn pick_next_node_randomly(&mut self, ap: &mut AutoPilot) {
         let paths = ap.paths.clone();

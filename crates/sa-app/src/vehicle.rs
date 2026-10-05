@@ -738,9 +738,11 @@ fn spawn_key(
     let pos = ped.translation + fwd * 5.0 + Vec3::Y * 1.0;
     let yaw = ped.rotation.to_euler(EulerRot::YXZ).0 + FRAC_PI_2;
     let seed = db.next_spawn;
-    if let Err(e) = spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, name, pos, yaw, seed)
-    {
-        warn!("spawn {name}: {e:#}");
+    match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, name, pos, yaw, seed) {
+        // SA_SPAWNDRIVER=1: the spawned car gets random occupants (debug).
+        Ok((_, id)) if std::env::var("SA_SPAWNDRIVER").is_ok() => sa.world.set_up_driver_and_passengers(id),
+        Ok(_) => {}
+        Err(e) => warn!("spawn {name}: {e:#}"),
     }
 }
 

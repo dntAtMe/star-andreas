@@ -192,9 +192,11 @@ pub struct LineUp {
 pub enum Stage {
     /// 800 GoToCarDoorAndStandStill (run).
     GoTo,
-    /// 801 Align, 802 OpenDoorFromOutside, 807 GetIn, 805 CloseDoorFromInside, 808 Shuffle.
+    /// 801 Align, 802 OpenDoorFromOutside, 820 SlowDragPedOut, 807 GetIn,
+    /// 805 CloseDoorFromInside, 808 Shuffle.
     Align,
     Open,
+    Jack,
     GetIn,
     CloseIn,
     Shuffle,
@@ -216,6 +218,8 @@ pub struct EnterCar {
     /// The go-to stage reached the door point / the player quit.
     pub reached: bool,
     pub cancel: bool,
+    /// The go-to give-up time (30 s; 10 s for CTaskComplexEnterCarAsDriverTimed).
+    pub timeout_ms: u32,
 }
 
 impl EnterCar {
@@ -253,11 +257,34 @@ impl World {
 
     /// The ped sitting in `veh` as driver.
     pub fn driver_of(&self, veh: EntityId) -> Option<EntityId> {
+        if let Some(c) = self.body(veh).and_then(|b| b.logic.as_any().downcast_ref::<Automobile>()) {
+            return c.driver;
+        }
         self.body_ids().into_iter().find(|&id| {
             self.body(id)
                 .and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>())
                 .is_some_and(|p| p.vehicle.as_ref().is_some_and(|v| v.veh == veh))
         })
+    }
+
+    /// `ComputeSlowJackedPed` (0x64F070): the occupant of the door's seat (front right: the
+    /// passenger, else the driver dragged across) who is still sitting.
+    fn jack_target(&self, veh: EntityId, door: u8, jacker: EntityId) -> Option<EntityId> {
+        let c = self.body(veh)?.logic.as_any().downcast_ref::<Automobile>()?;
+        let seated = |p: &Option<EntityId>| {
+            p.filter(|&id| {
+                id != jacker
+                    && self
+                        .body(id)
+                        .and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>())
+                        .is_some_and(|pl| pl.vehicle.as_ref().is_some_and(|v| v.veh == veh) && pl.leave.is_none())
+            })
+        };
+        match door {
+            DOOR_FL => seated(&c.driver),
+            DOOR_FR => seated(&c.passengers[0]).or_else(|| seated(&c.driver)),
+            _ => None,
+        }
     }
 
     /// `IsRoomForPedToLeaveCar` (0x6504C0), main line-of-sight part: from the seat to 0.35 m
@@ -351,6 +378,15 @@ impl World {
         car
     }
 
+    /// 702 CTaskComplexEnterCarAsDriverTimed: the enter task with a 10 s limit.
+    pub fn start_enter_car_timed(&mut self, ped: EntityId, veh: EntityId) {
+        if self.start_enter_car(ped, veh) {
+            if let Some(e) = self.body_mut(ped).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()).and_then(|p| p.enter.as_mut()) {
+                e.timeout_ms = 10000;
+            }
+        }
+    }
+
     /// Start CTaskComplexEnterCarAsDriver for the player. Returns false when no door can be
     /// used (or the vehicle is not a car: the caller seats the ped directly then).
     pub fn start_enter_car(&mut self, ped: EntityId, veh: EntityId) -> bool {
@@ -358,9 +394,6 @@ impl World {
             return false;
         };
         let Some(info) = self.car_door_info(veh) else { return false };
-        if info.has_driver {
-            return false; // carjacking is not ported
-        }
         let Some(pp) = self.body(ped).map(|b| b.phys.matrix.pos) else { return false };
         let Some((door, target)) = self.nearest_car_door(pp, veh, &info, &m) else { return false };
         let now = self.now_ms;
@@ -377,6 +410,7 @@ impl World {
                 line_up: None,
                 reached: false,
                 cancel: false,
+                timeout_ms: 30000,
             });
             return true;
         }
@@ -492,12 +526,20 @@ impl World {
         // CreateNextSubTask (0x63E990).
         if done {
             let next = match e.stage {
-                // AfterAlign (0x63F970): open a door that is not fully open, else get in.
+                // AfterAlign (0x63F970): open a door that is not fully open, jack an occupant,
+                // else get in.
                 Stage::Align => {
                     let has_door_to_open = self.car_door_state_full(e.veh, e.door).is_some_and(|(missing, full)| !missing && !full);
-                    Some(if has_door_to_open { Stage::Open } else { Stage::GetIn })
+                    Some(if has_door_to_open {
+                        Stage::Open
+                    } else if self.jack_target(e.veh, e.door, ped).is_some() {
+                        Stage::Jack
+                    } else {
+                        Stage::GetIn
+                    })
                 }
-                Stage::Open => Some(Stage::GetIn),
+                Stage::Open if self.jack_target(e.veh, e.door, ped).is_some() => Some(Stage::Jack),
+                Stage::Open | Stage::Jack => Some(Stage::GetIn),
                 Stage::GetIn => Some(Stage::CloseIn),
                 Stage::CloseIn if e.door == DOOR_FR => Some(Stage::Shuffle),
                 Stage::CloseIn | Stage::Shuffle => None,
@@ -509,6 +551,12 @@ impl World {
                     // 812 CTaskSimpleCarSetPedInAsDriver.
                     self.release_door(e.veh, e.door);
                     self.set_ped_in_car_direct(ped, e.veh, info.front);
+                    // 702: 827 (join the road, cruise 10) then 726 FleeScene (CRUISE,
+                    // AVOID_CARS, cruise 40).
+                    let npc = self.body(ped).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()).is_some_and(|p| !p.is_player);
+                    if npc {
+                        self.join_car_with_road_system(e.veh, 1, 2, 40);
+                    }
                     return;
                 }
             }
@@ -560,6 +608,8 @@ impl World {
                 (if left { base } else { base + 1 }, 4.0)
             }
             Stage::Open => (if e.door == 10 { 355 } else if e.door == 8 { 356 } else if e.door == 11 { 357 } else { 358 }, 4.0),
+            // 820 CTaskSimpleCarSlowDragPedOut: CAR_pullout_LHS / RHS.
+            Stage::Jack => (if left { 364 } else { 365 }, 4.0),
             Stage::GetIn => (if e.door == 10 { 359 } else if e.door == 8 { 360 } else if e.door == 11 { 361 } else { 362 }, 4.0),
             Stage::CloseIn => (if e.door == 10 { 367 } else if e.door == 8 { 368 } else if e.door == 11 { 369 } else { 370 }, 1000.0),
             Stage::Shuffle => (372, 1000.0),
@@ -580,6 +630,12 @@ impl World {
         }
         if stage == Stage::Open {
             e.init_ratio = self.car_door_state(e.veh, e.door).map_or(0.0, |(r, _, _)| r);
+        }
+        if stage == Stage::Jack {
+            // The victim gets 824 CTaskComplexCarSlowBeDraggedOut (823: CAR_jacked).
+            if let Some(v) = self.jack_target(e.veh, e.door, ped) {
+                self.start_be_dragged_out(v, e.veh, e.door, ped);
+            }
         }
         let grp = anim_group_of(&info.g, id);
         let uid = self.body_mut(ped).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()).and_then(|p| {
@@ -680,6 +736,7 @@ impl World {
             None => (0.0, 0.0),
             Some(351..=354) => (1.0, 0.0),
             Some(355..=358) => (1.0, if t.abs() > 10.0 { 1.0 } else { 0.0 }),
+            Some(364 | 365) => (1.0, 0.0),
             Some(359..=363) => (1.0 - p, if t.abs() > 10.0 { 1.0 } else { z_ramp(t, p) }),
             Some(367..=372) => (0.0, 1.0),
             Some(_) => (0.0, 0.0),
@@ -758,6 +815,8 @@ pub struct LeaveCar {
     anim_id: i16,
     /// 813 +9: the door was there to open.
     door_to_open: bool,
+    /// 823 CAR_jacked (dragged out by `jacker`).
+    pub jacked_by: Option<EntityId>,
 }
 
 impl LeaveCar {
@@ -796,9 +855,31 @@ impl World {
                 return true;
             }
             // ComputeTargetDoorToExit: the driver leaves by door 10.
-            p.leave = Some(LeaveCar { veh, door: DOOR_FL, stage: LeaveStage::Wait, anim: None, anim_id: 0, door_to_open: false });
+            p.leave = Some(LeaveCar { veh, door: DOOR_FL, stage: LeaveStage::Wait, anim: None, anim_id: 0, door_to_open: false, jacked_by: None });
         }
         true
+    }
+
+    /// 824 CTaskComplexCarSlowBeDraggedOut → 823: the CAR_jackedLHS / RHS anim from the seat,
+    /// lined up with the door like a get-out.
+    fn start_be_dragged_out(&mut self, victim: EntityId, veh: EntityId, door: u8, jacker: EntityId) {
+        let Some(info) = self.car_door_info(veh) else { return };
+        let id = if matches!(door, 10 | 11) { 378 } else { 379 };
+        let grp = anim_group_of(&info.g, id);
+        let Some(p) = self.body_mut(victim).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()) else { return };
+        let Some(m) = p.tasks.anims.clone() else { return };
+        p.enter = None;
+        let uid = p.clump.as_deref_mut().and_then(|c| {
+            for a in &mut c.assocs {
+                a.flags |= af::DELETE_BLENDED_OUT;
+                a.blend_delta = -1000.0;
+            }
+            c.blend_animation(&m, grp, id, 1000.0).map(|i| {
+                c.assocs[i].finish_cb = true;
+                c.assocs[i].uid
+            })
+        });
+        p.leave = Some(LeaveCar { veh, door, stage: LeaveStage::GetOut, anim: uid, anim_id: id, door_to_open: false, jacked_by: Some(jacker) });
     }
 
     /// The leaving ped's tasks after the vehicles moved.
@@ -873,6 +954,23 @@ impl World {
                         self.process_open_door(lv.veh, lv.door, lv.anim_id, t);
                     }
                     self.line_up_exit(ped, &lv, &info, &m, p, false);
+                    if done && lv.jacked_by.is_some() {
+                        // 823 done → 206 CTaskComplexGetUpAndStandStill, then the
+                        // DRAGGED_OUT_CAR event (stored until the drag task ends).
+                        let jacker = lv.jacked_by;
+                        let was_driver = self.body(lv.veh).and_then(|b| b.logic.as_any().downcast_ref::<Automobile>()).is_some_and(|c| c.driver == Some(ped));
+                        let veh = lv.veh;
+                        self.set_ped_out(ped, &lv);
+                        let now = self.now_ms;
+                        if let Some(p) = self.body_mut(ped).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()) {
+                            p.tasks.health.fall = Some(crate::peddamage::FallAndGetUp::Fall { anim: None, down_ms: 0, landed_at: Some(now) });
+                            if let Some(n) = p.npc.as_mut() {
+                                n.dragged_out = Some((jacker.unwrap(), veh, was_driver));
+                                n.last_move_state = 0;
+                            }
+                        }
+                        return;
+                    }
                     if done {
                         // 806 CloseDoorFromOutside unless the stick is pushed (the door stays open).
                         let stick = self.body(ped).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()).is_some_and(|p| {
@@ -959,9 +1057,13 @@ impl World {
     /// 816 CTaskSimpleCarSetPedOut (0x647D10): out of the vehicle, collision on, the car
     /// abandoned, back on foot.
     fn set_ped_out(&mut self, ped: EntityId, lv: &LeaveCar) {
-        self.release_door(lv.veh, lv.door);
+        if lv.jacked_by.is_none() {
+            self.release_door(lv.veh, lv.door);
+        }
+        let was_driver = self.body(lv.veh).and_then(|b| b.logic.as_any().downcast_ref::<Automobile>()).is_some_and(|c| c.driver == Some(ped));
+        self.remove_from_seat(ped, lv.veh);
         if let Some(b) = self.body_mut(lv.veh) {
-            if b.phys.status != Status::Wrecked {
+            if b.phys.status != Status::Wrecked && was_driver {
                 b.phys.status = Status::Abandoned;
             }
         }
