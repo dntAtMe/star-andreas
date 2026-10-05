@@ -37,8 +37,8 @@ impl Plugin for NpcPlugin {
 #[derive(Component)]
 pub struct NpcPed {
     pub sa: EntityId,
-    bones: Vec<Entity>,
-    node_frames: Vec<usize>,
+    pub(crate) bones: Vec<Entity>,
+    pub(crate) node_frames: Vec<usize>,
 }
 
 /// Parsed ped models (dff + textures) by model id.

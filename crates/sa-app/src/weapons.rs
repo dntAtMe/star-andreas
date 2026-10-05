@@ -36,7 +36,7 @@ impl Plugin for WeaponsPlugin {
             .add_systems(Startup, (load_weapon_defs, setup_hud, setup_traces))
             .add_systems(
                 PostUpdate,
-                (update_weapon_model, draw_traces, update_hud, sync_projectiles, rocket_view)
+                (update_weapon_model, update_npc_weapons, draw_traces, update_hud, sync_projectiles, rocket_view)
                     .after(SaSync)
                     .before(TransformSystems::Propagate),
             );
@@ -234,8 +234,11 @@ fn update_weapon_model(
     let t = &logic.tasks;
     let model = t.weapon_model;
     let twin = t.info_of(t.active_weapon().ty).is_some_and(|i| i.has(wf::TWIN_PISTOL));
-    let current: Vec<(Entity, i32, bool)> =
-        held.iter().filter(|(_, _, p)| !loose.contains(p.parent())).map(|(e, h, _)| (e, h.model, h.left)).collect();
+    let current: Vec<(Entity, i32, bool)> = held
+        .iter()
+        .filter(|(_, _, p)| !loose.contains(p.parent()) && ped.bones.contains(&p.parent()))
+        .map(|(e, h, _)| (e, h.model, h.left))
+        .collect();
     let want_left = model >= 0 && twin;
     let ok = current.iter().all(|&(_, m, _)| m == model)
         && current.iter().any(|&(_, _, l)| !l) == (model >= 0)
@@ -277,6 +280,45 @@ fn update_weapon_model(
         for c in children.iter() {
             if let Ok(mut v) = vis.get_mut(c) {
                 *v = if a > 0 { Visibility::Inherited } else { Visibility::Hidden };
+            }
+        }
+    }
+}
+
+/// NPCs' weapons in the right hand (ped+0x740 weapon model, e.g. a cop's nightstick).
+#[allow(clippy::too_many_arguments)]
+fn update_npc_weapons(
+    mut commands: Commands,
+    world: Res<WorldRes>,
+    defs: Option<Res<WeaponDefs>>,
+    sa: Res<SaPhys>,
+    mut cache: Local<Cache>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    npcs: Query<&crate::peds::NpcPed>,
+    held: Query<(Entity, &HeldWeapon, &ChildOf)>,
+) {
+    let Some(defs) = defs else { return };
+    for npc in &npcs {
+        let Some(logic) = sa.logic::<PedLogic>(npc.sa) else { continue };
+        let Some(clump) = logic.clump.as_deref() else { continue };
+        let model = if logic.tasks.health.alive() { logic.tasks.weapon_model } else { -1 };
+        let Some(rh) = clump.frame_of_tag(24).and_then(|k| npc.node_frames.get(k)).and_then(|&f| npc.bones.get(f)).copied() else { continue };
+        let existing: Vec<(Entity, i32)> = held.iter().filter(|(_, _, p)| p.parent() == rh).map(|(e, h, _)| (e, h.model)).collect();
+        if existing.len() == 1 && existing[0].1 == model || existing.is_empty() && model < 0 {
+            continue;
+        }
+        for (e, _) in existing {
+            commands.entity(e).despawn();
+        }
+        if model >= 0 {
+            let entry = cache.0.entry(model).or_insert_with(|| {
+                let (name, txd_name) = defs.0.get(&model)?;
+                load_model(&world, &mut images, name, txd_name)
+            });
+            if let Some(wm) = entry.as_ref() {
+                spawn_weapon(&mut commands, &mut meshes, &mut materials, wm, rh, Transform::IDENTITY, model, false);
             }
         }
     }

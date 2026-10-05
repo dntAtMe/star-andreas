@@ -414,6 +414,17 @@ fn player_control(
             ped.frozen = false;
             let first = !ped.started;
             ped.started = true;
+            // A restart point (hospital / police) is a ped position: stand on the ground there.
+            if !first {
+                let pos = sa.world.body(id).map(|b| b.phys.matrix.pos);
+                if let Some(pos) = pos {
+                    if let Some(gz) = sa.world.find_ground_z(pos + Vec3::new(0.0, 0.0, 2.0)) {
+                        if let Some(b) = sa.world.body_mut(id) {
+                            b.phys.matrix.pos.z = gz + 1.0;
+                        }
+                    }
+                }
+            }
             if let Some(b) = sa.world.body_mut(id) {
                 b.phys.eflags &= !ef::IS_STATIC;
             }
