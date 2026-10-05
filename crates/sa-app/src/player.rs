@@ -491,12 +491,18 @@ fn animate_ped(sa: Res<SaPhys>, peds: Query<&Ped>, mut bones: Query<&mut Transfo
     for ped in &peds {
         let Some(logic) = sa.logic::<PedLogic>(ped.sa) else { continue };
         let Some(clump) = logic.clump.as_deref() else { continue };
+        // CTaskSimpleSwim::ApplyRollAndPitch: the rendered ped frame is tilted (GTA local).
+        let swim = logic.tasks.swim.as_ref().map(|s| s.render_rotation());
         for (k, &(q, t)) in clump.pose.iter().enumerate() {
             let (pq, pt) = logic.prev_pose.get(k).copied().unwrap_or((q, t));
             let Some(&e) = ped.node_frames.get(k).and_then(|&f| ped.bones.get(f)) else { continue };
             if let Ok(mut tf) = bones.get_mut(e) {
                 tf.rotation = pq.slerp(q, alpha);
                 tf.translation = pt.lerp(t, alpha);
+                if let (0, Some(r)) = (k, swim) {
+                    tf.rotation = r * tf.rotation;
+                    tf.translation = r * tf.translation;
+                }
             }
         }
     }

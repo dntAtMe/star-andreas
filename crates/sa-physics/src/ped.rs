@@ -235,7 +235,7 @@ impl PedLogic {
 }
 
 /// GetFatAndMuscleModifier(8): the player's lung capacity [I: stat-driven, default stats].
-pub const BREATH_MAX: f32 = 600.0;
+pub const BREATH_MAX: f32 = crate::swim::MAX_BREATH;
 
 /// Rotate the matrix to heading `h` about Z, keeping position (`CMatrix::SetRotateZOnly`-style).
 pub fn set_heading(m: &mut Matrix, h: f32) {
@@ -315,6 +315,10 @@ impl BodyLogic for PedLogic {
                 self.tasks.process(&mut core, ctx);
                 self.tasks.post_process(core.clump, ctx);
             }
+            // HandlePlayerBreath from the swim task (rate scales the drain and the refill).
+            if let Some((under, rate)) = self.tasks.breath_request.take() {
+                self.handle_breath(under, ts * rate);
+            }
             self.tasks.pad.clear_just_down();
         }
 
@@ -342,8 +346,10 @@ impl BodyLogic for PedLogic {
         let anim_vel = self.anim_world_velocity(&p.matrix);
 
         // Step 16: UpdatePosition (0x5E1B10), static-ground path.
-        if self.standing {
+        if self.standing || self.tasks.swim.is_some() {
             set_heading(&mut p.matrix, self.cur_rot);
+        }
+        if self.standing {
             // On static ground the horizontal velocity is exactly the anim velocity.
             p.move_speed.x = anim_vel.x;
             p.move_speed.y = anim_vel.y;

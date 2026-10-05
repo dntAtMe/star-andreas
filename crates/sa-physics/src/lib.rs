@@ -32,6 +32,7 @@ pub mod timecycle;
 pub mod vehicle_lights;
 pub mod water;
 pub mod melee;
+pub mod swim;
 pub mod weapon;
 pub mod weather;
 pub mod world;

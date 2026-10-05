@@ -62,6 +62,9 @@ impl Pad {
     }
 }
 
+/// Sprint stamina maximum (`GetFatAndMuscleModifier(7)` [I: default stats]).
+pub const TIME_CAN_RUN_MAX: f32 = 50.0;
+
 /// `CPlayerData` fields the tasks use.
 #[derive(Debug, Clone, Copy)]
 pub struct PlayerData {
@@ -90,7 +93,7 @@ impl Default for PlayerData {
         Self {
             mbr: 0.0,
             // [I] CPlayerData's initial stamina is stat driven; a full bar here.
-            time_can_run: 50.0,
+            time_can_run: TIME_CAN_RUN_MAX,
             sprint_counter: 0.0,
             chosen_slot: 0,
             attack_counter: 0.0,
@@ -286,6 +289,13 @@ pub struct PedTasks {
     /// Stats FAT and MUSCLE (GetFatAndMuscleModifier).
     pub stat_fat: f32,
     pub stat_muscle: f32,
+    /// `CTaskComplexInWater` / `CTaskSimpleSwim` (replaces PlayerOnFoot while it runs).
+    pub swim: Option<crate::swim::SwimTask>,
+    /// HandlePlayerBreath(under, rate) requested by the swim task this step.
+    pub breath_request: Option<(bool, f32)>,
+    /// The world's water (set by the world each step) and Wavyness.
+    pub water: Option<Arc<crate::water::WaterLevel>>,
+    pub wavyness: f32,
 }
 
 impl Default for PedTasks {
@@ -328,6 +338,10 @@ impl Default for PedTasks {
             fighter_counter: 0,
             stat_fat: 200.0,
             stat_muscle: 50.0,
+            swim: None,
+            breath_request: None,
+            water: None,
+            wavyness: 0.3,
         }
     }
 }
@@ -557,7 +571,18 @@ impl PedTasks {
         self.cam_request = 0;
         self.now_ms = ctx.now_ms;
         self.cam = ctx.cam;
-        if !matches!(self.air, AirTask::None) {
+        if let Some(mut s) = self.swim.take() {
+            let done = match self.water.clone() {
+                Some(w) => {
+                    let q = crate::swim::WaterQuery { water: &w, wavyness: self.wavyness, now_ms: ctx.now_ms };
+                    s.process_ped(self, c, ctx, &m, &q)
+                }
+                None => true,
+            };
+            if !done {
+                self.swim = Some(s);
+            }
+        } else if !matches!(self.air, AirTask::None) {
             self.process_air(c, ctx, &m);
         } else {
             // CEventInAir: walking off a ledge.

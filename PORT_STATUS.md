@@ -21,7 +21,8 @@ Last updated: 2026-10-05.
 | Streaming (distance, HD/LOD) | 🟡 | own scheme, not CStreaming / CRenderer lists |
 | Interiors / entry-exits | ❌ | |
 | Water (water.dat, CWaterLevel) | 🟡 | water.dat grid, GetWaterLevel(NoWaves) with SA's wave function, RenderWater (2 layers, waves within 48 units, flow scroll, timecyc colour/alpha, sea beyond the map, sea bed); no water fog, boat wakes, water1.dat, underwater draw order |
-| Buoyancy (cBuoyancy) | 🟡 | peds (float, breath, drowning), cars (sinking, engine off), object.dat objects; no boats, no swim task (peds float head-under), no splashes |
+| Swimming (CTaskComplexInWater / CTaskSimpleSwim, player) | 🟡 | tread / breaststroke / crawl / dive / underwater / jump-out states, surface hold, resurfacing pitch, breath drain and refill, render pitch and roll, exit in shallow water; no climbing out, NPC swimmers, torso twist, swim fx, camera tilt |
+| Buoyancy (cBuoyancy) | 🟡 | peds (float, breath, drowning), cars (sinking, engine off), object.dat objects; no boats, no splashes |
 | Cull zones (tunnels, no-rain zones) | ❌ | |
 | Time-cycle boxes (IPL `tcyc`) | ❌ | |
 
@@ -135,7 +136,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. The swim task (docs ready), boats, underwater fog and splashes.
+1. Boats, bikes, ped population (RE in progress), underwater fog and splashes.
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.

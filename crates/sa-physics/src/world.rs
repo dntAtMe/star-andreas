@@ -1203,8 +1203,15 @@ impl World {
             move_z: b.phys.move_speed.z,
             ts,
         };
+        if let Some(ped) = b.logic.as_any_mut().downcast_mut::<PedLogic>() {
+            ped.tasks.water = Some(water.clone());
+            ped.tasks.wavyness = wavy;
+        }
         let Some((turn, force, level)) = process_buoyancy(&water, &input, wavy, now) else {
             b.phys.flags &= !(pf::TOUCHING_WATER | pf::IN_WATER);
+            if let Some(s) = b.logic.as_any_mut().downcast_mut::<PedLogic>().and_then(|p| p.tasks.swim.as_mut()) {
+                s.stop_time = 1000.0;
+            }
             if let Some(car) = b.logic.as_any_mut().downcast_mut::<crate::automobile::Automobile>() {
                 car.sinking = false;
                 car.buoyancy = car.h.buoyancy_constant;
@@ -1221,22 +1228,34 @@ impl World {
                 let Body { phys, logic, .. } = b;
                 let ped = logic.as_any_mut().downcast_mut::<PedLogic>().unwrap();
                 if !deep {
-                    // Wading: the player's head under water loses breath.
-                    if ped.is_player {
+                    // Standing in shallow water counts down the swim task's exit.
+                    if let Some(s) = &mut ped.tasks.swim {
+                        if ped.standing {
+                            s.stop_time += ts;
+                        }
+                    } else if ped.is_player {
+                        // Wading: the player's head under water loses breath.
                         ped.handle_breath(phys.matrix.pos.z + 0.8 < level, ts);
                     }
                     return;
                 }
-                // Swimming (the swim task is not ported: the ped floats and drifts).
                 ped.standing = false;
+                if ped.is_player {
+                    if let Some(s) = &mut ped.tasks.swim {
+                        s.stop_time = 0.0;
+                        return; // no damping once the swim task runs
+                    }
+                    // CEventInWater -> CTaskComplexInWater -> CTaskSimpleSwim.
+                    let m = ped.tasks.anims.clone();
+                    if let (Some(clump), Some(m)) = (ped.clump.as_deref_mut(), m) {
+                        ped.tasks.start_swimming(clump, &m);
+                    }
+                }
                 let f = 0.9f32.powf(ts);
                 phys.move_speed.x *= f;
                 phys.move_speed.y *= f;
                 if phys.move_speed.z < 0.0 {
                     phys.move_speed.z *= f;
-                }
-                if ped.is_player {
-                    ped.handle_breath(phys.matrix.pos.z + 0.8 < level, ts);
                 }
             }
             EntityType::Vehicle => {
