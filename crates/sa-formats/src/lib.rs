@@ -4,6 +4,7 @@
 //! native Z-up coordinate space. Conversion to the renderer's space happens in
 //! the app crate.
 
+pub mod audio;
 pub mod bin;
 pub mod col;
 pub mod dat;
