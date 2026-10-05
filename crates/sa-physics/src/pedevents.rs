@@ -1338,6 +1338,15 @@ impl crate::world::World {
             if let Some(veh) = npc_mut(self, v.id).and_then(|n| n.enter_request.take()) {
                 self.start_enter_car_timed(v.id, veh);
             }
+            let due = npc_ref(self, v.id).and_then(|n| n.leave_and_flee).filter(|&(_, t)| self.now_ms >= t);
+            if let Some((jacker, _)) = due {
+                if self.start_leave_car(v.id) {
+                    if let Some(n) = npc_mut(self, v.id) {
+                        n.leave_and_flee = None;
+                        n.flee_after_leave = Some(jacker);
+                    }
+                }
+            }
             let run_over = self
                 .body_mut(v.id)
                 .and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>())

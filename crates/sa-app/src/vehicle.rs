@@ -740,7 +740,16 @@ fn spawn_key(
     let seed = db.next_spawn;
     match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, name, pos, yaw, seed) {
         // SA_SPAWNDRIVER=1: the spawned car gets random occupants (debug).
-        Ok((_, id)) if std::env::var("SA_SPAWNDRIVER").is_ok() => sa.world.set_up_driver_and_passengers(id),
+        Ok((_, id)) if std::env::var("SA_SPAWNDRIVER").is_ok() => {
+            sa.world.set_up_driver_and_passengers(id);
+            // SA_SPAWNDRIVER=full: also a front passenger.
+            if std::env::var("SA_SPAWNDRIVER").is_ok_and(|v| v == "full") {
+                let pos = sa.world.body(id).map(|b| b.phys.matrix.pos).unwrap_or_default();
+                if let Some(pop) = sa.world.population.as_mut() {
+                    pop.requests.push(sa_physics::population::SpawnPed { model: 7, ped_type: 4, pos, dir: 0, seat: Some((id, 0)) });
+                }
+            }
+        }
         Ok(_) => {}
         Err(e) => warn!("spawn {name}: {e:#}"),
     }

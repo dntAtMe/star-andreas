@@ -120,6 +120,10 @@ pub struct NpcState {
     pub dragged_out: Option<(crate::world::EntityId, crate::world::EntityId, bool)>,
     /// A response wants CTaskComplexEnterCarAsDriverTimed (the world starts it).
     pub enter_request: Option<crate::world::EntityId>,
+    /// PED_ENTERED_MY_VEHICLE's 706 / 708: leave the car (after the delay, or once it can be
+    /// stepped out of) and flee from the jacker.
+    pub leave_and_flee: Option<(crate::world::EntityId, u32)>,
+    pub flee_after_leave: Option<crate::world::EntityId>,
     pub(crate) rng: crate::damage::Rand,
 }
 
@@ -153,6 +157,8 @@ impl NpcState {
             los: Default::default(),
             dragged_out: None,
             enter_request: None,
+            leave_and_flee: None,
+            flee_after_leave: None,
             rng: crate::damage::Rand::new(seed as u32 * 7919 + 1),
         }
     }

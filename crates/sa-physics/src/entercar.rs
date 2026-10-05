@@ -633,8 +633,25 @@ impl World {
         }
         if stage == Stage::Jack {
             // The victim gets 824 CTaskComplexCarSlowBeDraggedOut (823: CAR_jacked).
-            if let Some(v) = self.jack_target(e.veh, e.door, ped) {
+            let victim = self.jack_target(e.veh, e.door, ped);
+            if let Some(v) = victim {
                 self.start_be_dragged_out(v, e.veh, e.door, ped);
+            }
+            // MakeUndraggedPassengerPedsLeaveCar (0x64F540): PED_ENTERED_MY_VEHICLE (17) to the
+            // other occupants; R_Norm/R_Weak 706 LeaveCarAndFlee (delay 300..600 ms) or 708
+            // ScreamInCarThenLeave (sits until the car can be stepped out of, 5 s at least).
+            let now = self.now_ms;
+            for o in self.vehicle_occupants(e.veh) {
+                if Some(o) == victim || o == ped {
+                    continue;
+                }
+                let mut rng = std::mem::replace(&mut self.rng, crate::damage::Rand::new(1));
+                let scream = rng.next() & 1 == 1;
+                let delay = crate::pedevents::rand_range(&mut rng, 300, 600) as u32;
+                self.rng = rng;
+                if let Some(n) = self.body_mut(o).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()).and_then(|p| p.npc.as_mut()) {
+                    n.leave_and_flee = Some((ped, now + if scream { 5000 } else { delay }));
+                }
             }
         }
         let grp = anim_group_of(&info.g, id);
@@ -854,8 +871,14 @@ impl World {
             if p.leave.is_some() {
                 return true;
             }
-            // ComputeTargetDoorToExit: the driver leaves by door 10.
-            p.leave = Some(LeaveCar { veh, door: DOOR_FL, stage: LeaveStage::Wait, anim: None, anim_id: 0, door_to_open: false, jacked_by: None });
+            // ComputeTargetDoorToExit: the driver leaves by door 10, passengers by their seat's.
+            let door = match p.vehicle.as_ref().map_or(-1, |v| v.seat_index) {
+                0 => DOOR_FR,
+                1 => 11,
+                2 => 9,
+                _ => DOOR_FL,
+            };
+            p.leave = Some(LeaveCar { veh, door, stage: LeaveStage::Wait, anim: None, anim_id: 0, door_to_open: false, jacked_by: None });
         }
         true
     }
@@ -1057,6 +1080,7 @@ impl World {
     /// 816 CTaskSimpleCarSetPedOut (0x647D10): out of the vehicle, collision on, the car
     /// abandoned, back on foot.
     fn set_ped_out(&mut self, ped: EntityId, lv: &LeaveCar) {
+        let now = self.now_ms;
         if lv.jacked_by.is_none() {
             self.release_door(lv.veh, lv.door);
         }
@@ -1070,9 +1094,19 @@ impl World {
         let Some(b) = self.body_mut(ped) else { return };
         b.phys.eflags = (b.phys.eflags & !ef::IS_STATIC) | ef::USES_COLLISION;
         b.phys.move_speed = Vec3::ZERO;
+        let pos = b.phys.matrix.pos;
         let Some(p) = b.logic.as_any_mut().downcast_mut::<PedLogic>() else { return };
         p.vehicle = None;
         p.leave = None;
+        // 706 → 910 SmartFleePoint (60 m), then wander.
+        if let Some(n) = p.npc.as_mut() {
+            if let Some(t) = n.flee_after_leave.take() {
+                n.response = Some(crate::pedevents::Resp::SmartFlee(crate::pedevents::SmartFlee::new(t, pos, false, 60.0, now)));
+                n.resp_in.threat_pos = Some(pos);
+                n.resp_in.threat_alive = true;
+                n.last_move_state = 0;
+            }
+        }
         p.standing = false;
         crate::ped::set_heading(&mut b.phys.matrix, p.cur_rot);
         if let (Some(c), Some(m)) = (p.clump.as_deref_mut(), p.tasks.anims.clone()) {
