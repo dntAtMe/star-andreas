@@ -374,6 +374,15 @@ pub struct Automobile {
     pub wheel_lighting: [u8; 4],
     /// `CAutoPilot` of a random traffic car (None for the player's / parked cars).
     pub autopilot: Option<crate::traffic::AutoPilot>,
+    /// veh+0x460 driver, +0x464.. passengers, +0x488 max passengers, model class (+0x4D).
+    pub driver: Option<crate::world::EntityId>,
+    pub passengers: [Option<crate::world::EntityId>; 3],
+    pub max_passengers: u8,
+    pub class: u8,
+    /// A random car whose occupants are still being created (the AI drives meanwhile).
+    pub awaiting_occupants: bool,
+    /// CTaskComplexDieInCar's handbrake timer (PreparePedVehicleForPedDeath).
+    pub driver_died_at: Option<u32>,
     pub wheel_timer: [f32; 4],
     pub wheel_state: [WheelState; 4],
     pub wheel_speed: [f32; 4],
@@ -486,6 +495,12 @@ impl Automobile {
             wheel_cp: [ColPoint::default(); 4],
             wheel_lighting: [0x48; 4],
             autopilot: None,
+            driver: None,
+            passengers: [None; 3],
+            max_passengers: 1,
+            class: 0,
+            awaiting_occupants: false,
+            driver_died_at: None,
             wheel_timer: [0.0; 4],
             wheel_state: [WheelState::Normal; 4],
             wheel_speed: [0.0; 4],

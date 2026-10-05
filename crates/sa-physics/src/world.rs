@@ -351,6 +351,9 @@ impl World {
                 }
             }
             EntityId::Body(i) => {
+                if let Some(v) = self.body(id).and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()).and_then(|p| p.vehicle.as_ref()).map(|v| v.veh) {
+                    self.remove_from_seat(id, v);
+                }
                 if let Some(mut b) = self.bodies.get_mut(i as usize).and_then(Option::take) {
                     b.logic.on_remove(&mut self.effects);
                     self.freed_bodies.push((i, self.frame));

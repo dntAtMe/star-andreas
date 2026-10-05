@@ -410,7 +410,7 @@ impl BodyLogic for PedLogic {
             if std::mem::take(&mut self.tasks.health.anim_reset) {
                 npc.last_move_state = 0;
             }
-            if alive && !busy && self.knocked_down <= 0.0 {
+            if alive && !busy && self.knocked_down <= 0.0 && self.vehicle.is_none() {
                 if let Some(paths) = npc.paths.clone() {
                     let i = crate::npc::NpcIn { paths: &paths, anims: &m, now_ms: ctx.now_ms, frame: ctx.frame, ts };
                     // HandleEvents: respond to the highest-priority event.

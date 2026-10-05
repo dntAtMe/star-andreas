@@ -547,6 +547,9 @@ fn spawn_vehicle(
     }
     auto.seat_front = front_seat;
     auto.seat_rear = rear_seat;
+    // +0x488 GetMaximumNumberOfPassengersFromNumberOfDoors: 4-door cars 3, else 1.
+    auto.max_passengers = if auto.door_hinges[4].is_some() { 3 } else { 1 };
+    auto.class = def.class;
     // Vehicle structure dummies (PreprocessHierarchy 0x4C8E60): the frame position taken
     // through every ancestor except the root; (0,0,0) when missing.
     let structure_dummy = |n: &str| {
@@ -695,6 +698,8 @@ fn traffic_cars(
                         c.engine_on = true;
                     }
                 }
+                // SetUpDriverAndPassengersForVehicle.
+                sa.world.set_up_driver_and_passengers(id);
             }
             Err(e) => warn!("traffic {}: {e:#}", req.model),
         }

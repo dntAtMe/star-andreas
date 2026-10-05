@@ -234,6 +234,10 @@ impl World {
             }
         }
         for id in remove {
+            for p in self.vehicle_occupants(id) {
+                self.remove(p);
+                self.npc_removed.push(p);
+            }
             self.remove(id);
             tr.removed.push(id);
             num_random -= 1;
@@ -530,7 +534,7 @@ impl World {
             .filter(|&id| {
                 self.body(id).is_some_and(|b| {
                     b.phys.status == Status::Physics
-                        && b.logic.as_any().downcast_ref::<Automobile>().is_some_and(|c| c.autopilot.is_some())
+                        && b.logic.as_any().downcast_ref::<Automobile>().is_some_and(|c| c.autopilot.is_some() && (c.driver.is_some() || c.awaiting_occupants))
                 })
             })
             .collect();
@@ -570,8 +574,32 @@ impl World {
 
             // SteerAICarWithPhysics.
             let (mut steer, mut gas, mut brake, mut handbrake) = (0.0f32, 0.0f32, 0.0f32, false);
+            // CTaskComplexDieInCar: PreparePedVehicleForPedDeath (2 s handbrake straight), then
+            // mission NONE (brake 0.5 + handbrake).
+            let driver = self.body(id).and_then(|b| b.logic.as_any().downcast_ref::<Automobile>()).and_then(|c| c.driver);
+            let driver_dead = driver
+                .and_then(|d| self.body(d))
+                .and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>())
+                .is_some_and(|p| !p.tasks.health.alive());
+            if driver_dead {
+                let since = self.body_mut(id).and_then(|b| b.logic.as_any_mut().downcast_mut::<Automobile>()).map_or(now, |c| *c.driver_died_at.get_or_insert(now));
+                ap.cruise = 0;
+                ap.mission = 0;
+                if now < since + 2000 {
+                    ap.temp_action = 6;
+                    ap.temp_action_time = since + 2000;
+                }
+            }
             let expired = now > ap.temp_action_time;
             match ap.temp_action {
+                6 if !expired => {
+                    // HANDBRAKE STRAIGHT.
+                    handbrake = true;
+                }
+                _ if ap.mission == 0 => {
+                    brake = 0.5;
+                    handbrake = true;
+                }
                 1 | 24 => {
                     brake = if ap.temp_action == 1 { 0.2 } else { 1.0 };
                     if expired {

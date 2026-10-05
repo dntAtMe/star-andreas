@@ -31,6 +31,8 @@ pub const AG_TRUCK: u32 = 8;
 pub mod ids {
     pub const CAR_SIT: i16 = 60;
     pub const CAR_LSIT: i16 = 61;
+    pub const CAR_SITP: i16 = 64;
+    pub const CAR_SITP_LO: i16 = 65;
     pub const DRIVE_BOAT: i16 = 81;
     /// Ride group: BIKE_Ride, Still, Left, Right, Back, Fwd, pushes.
     pub const BIKE_RIDE: i16 = 194;
@@ -63,6 +65,8 @@ pub struct InVehicle {
     pub rider_fb: f32,
     /// CStats 160 driving skill (0 at a new game: the "weak" set).
     pub driving_skill: f32,
+    /// -1 the driver, 0.. the passenger seat (0 front right, 1 rear left, 2 rear right).
+    pub seat_index: i8,
 }
 
 /// What the seat and the anims read from the vehicle this frame.
@@ -390,7 +394,7 @@ impl World {
             // The dummy is on the +x side: the driver sits mirrored.
             seat.x = -seat.x;
         }
-        let iv = InVehicle { veh, kind, seat, ride_group, rider_lr: 0.0, rider_fb: 0.0, driving_skill: 0.0 };
+        let iv = InVehicle { veh, kind, seat, ride_group, rider_lr: 0.0, rider_fb: 0.0, driving_skill: 0.0, seat_index: -1 };
         let is_player = {
             let Some(b) = self.body_mut(ped) else { return false };
             // Collision off; the seat step moves the ped.
@@ -414,6 +418,10 @@ impl World {
             if b.phys.status != Status::Wrecked {
                 b.phys.status = if is_player { Status::Player } else { Status::Physics };
             }
+            if let Some(car) = b.logic.as_any_mut().downcast_mut::<crate::automobile::Automobile>() {
+                car.driver = Some(ped);
+                car.driver_died_at = None;
+            }
         }
         // CCrime 6 (steal car) the first time the player drives it (`+0x42A & 2`).
         if is_player && self.stolen.insert(veh) {
@@ -423,9 +431,78 @@ impl World {
         true
     }
 
+    /// `CCarEnterExit::SetPedInCarDirect` for a passenger (`CTaskSimpleCarSetPedInAsPassenger`):
+    /// seat 0 the front-seat dummy, 1 / 2 the rear dummy mirrored / as is; CAR_sitp(LO).
+    pub fn set_ped_in_car_as_passenger(&mut self, ped: EntityId, veh: EntityId, seat_index: i8) -> bool {
+        let Some((kind, v, ride_group)) = self.veh_state(veh) else { return false };
+        let Some(car) = self.body(veh).and_then(|b| b.logic.as_any().downcast_ref::<crate::automobile::Automobile>()) else { return false };
+        let i = seat_index.clamp(0, 2) as usize;
+        if car.passengers[i].is_some() {
+            return false;
+        }
+        let mut seat = if i == 0 { car.seat_front } else { car.seat_rear };
+        if i == 1 {
+            seat.x = -seat.x;
+        }
+        let iv = InVehicle { veh, kind, seat, ride_group, rider_lr: 0.0, rider_fb: 0.0, driving_skill: 0.0, seat_index: i as i8 };
+        {
+            let Some(b) = self.body_mut(ped) else { return false };
+            b.phys.eflags = (b.phys.eflags | ef::IS_STATIC) & !ef::USES_COLLISION;
+            b.phys.move_speed = Vec3::ZERO;
+            b.phys.turn_speed = Vec3::ZERO;
+            let Some(p) = b.logic.as_any_mut().downcast_mut::<PedLogic>() else { return false };
+            p.standing = false;
+            p.anim_velocity = glam::Vec2::ZERO;
+            p.ground_entity = None;
+            if let (Some(clump), Some(man)) = (p.clump.as_deref_mut(), p.tasks.anims.clone()) {
+                kill_partial_anims(clump);
+                let id = if v.model_flags & MF_IS_LOW != 0 { ids::CAR_SITP_LO } else { ids::CAR_SITP };
+                clump.blend_animation(&man, 0, id, 1000.0);
+                stop_non_partial_anims(clump);
+            }
+            p.vehicle = Some(iv);
+        }
+        if let Some(car) = self.body_mut(veh).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::automobile::Automobile>()) {
+            car.passengers[i] = Some(ped);
+        }
+        self.process_peds_in_vehicles(0.0);
+        true
+    }
+
+    /// `CVehicle::RemoveDriver` (0x6D1950) / `RemovePassenger` (0x6D1610): clear the ped's seat;
+    /// a car losing its driver becomes ABANDONED.
+    pub fn remove_from_seat(&mut self, ped: EntityId, veh: EntityId) {
+        let Some(b) = self.body_mut(veh) else { return };
+        let Some(car) = b.logic.as_any_mut().downcast_mut::<crate::automobile::Automobile>() else { return };
+        if car.driver == Some(ped) {
+            car.driver = None;
+            car.driver_died_at = None;
+            car.awaiting_occupants = false;
+            if !matches!(b.phys.status, Status::Wrecked) {
+                b.phys.status = Status::Abandoned;
+            }
+        }
+        for p in &mut car.passengers {
+            if *p == Some(ped) {
+                *p = None;
+            }
+        }
+    }
+
+    /// The vehicle's driver and passengers.
+    pub fn vehicle_occupants(&self, veh: EntityId) -> Vec<EntityId> {
+        self.body(veh)
+            .and_then(|b| b.logic.as_any().downcast_ref::<crate::automobile::Automobile>())
+            .map(|c| c.driver.into_iter().chain(c.passengers.iter().flatten().copied()).collect())
+            .unwrap_or_default()
+    }
+
     /// Stage A exit (`CTaskSimpleCarSetPedOut` without the get-out sequence): collision back on,
     /// the in-car anims replaced by the idle, at `pos` facing `heading`.
     pub fn set_ped_out_of_car(&mut self, ped: EntityId, pos: Vec3, heading: f32) {
+        if let Some(v) = self.body(ped).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()).and_then(|p| p.vehicle.as_ref()).map(|v| v.veh) {
+            self.remove_from_seat(ped, v);
+        }
         let Some(b) = self.body_mut(ped) else { return };
         b.phys.eflags = (b.phys.eflags & !ef::IS_STATIC) | ef::USES_COLLISION;
         b.phys.move_speed = Vec3::ZERO;
@@ -466,12 +543,23 @@ impl World {
                 // The vehicle is gone: drop out where the ped is.
                 b.phys.eflags = (b.phys.eflags & !ef::IS_STATIC) | ef::USES_COLLISION;
                 if let Some(p) = b.logic.as_any_mut().downcast_mut::<PedLogic>() {
+                    if let (Some(clump), Some(man)) = (p.clump.as_deref_mut(), p.tasks.anims.clone()) {
+                        clump.blend_animation(&man, p.tasks.anim_group, crate::anim::anim_id::IDLE, 1000.0);
+                    }
+                }
+                if let Some(p) = b.logic.as_any_mut().downcast_mut::<PedLogic>() {
                     p.vehicle = None;
                 }
                 continue;
             };
             let phys = &mut b.phys;
             let Some(p) = b.logic.as_any_mut().downcast_mut::<PedLogic>() else { continue };
+            // Seated peds are static (no ProcessControl): the NPC fade runs here.
+            if ts > 0.0 {
+                if let Some(n) = p.npc.as_mut() {
+                    n.alpha = if n.fading_out { n.alpha.saturating_sub(8) } else { n.alpha.saturating_add(16) };
+                }
+            }
             let Some(iv) = p.vehicle.as_mut() else { continue };
             if ts > 0.0 {
                 if let Some(clump) = p.clump.as_deref_mut() {

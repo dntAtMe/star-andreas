@@ -146,6 +146,8 @@ pub struct SpawnPed {
     pub pos: Vec3,
     /// Wander direction 0..7.
     pub dir: u8,
+    /// AddPedInCar: the vehicle and seat (-1 the driver).
+    pub seat: Option<(crate::world::EntityId, i8)>,
 }
 
 /// The `CPopulation` statics.
@@ -419,7 +421,7 @@ impl Population {
             return false;
         }
         let dir = ((i.frand)() * 8.0) as u8 % 8;
-        self.requests.push(SpawnPed { model, ped_type, pos, dir });
+        self.requests.push(SpawnPed { model, ped_type, pos, dir, seat: None });
         true
     }
 
@@ -500,6 +502,10 @@ impl crate::world::World {
                 Life::Wasted { since_ms } => Some(now.wrapping_sub(since_ms)),
                 _ => None,
             };
+            // Car occupants go with their car (CCarCtrl::RemoveDistantCars).
+            if ped.vehicle.is_some() {
+                continue;
+            }
             let Some(npc) = ped.npc.as_mut() else { continue };
             let d = (pos.truncate() - player.truncate()).length();
             match manage_ped(d, visible(pos, 1.0), npc.ped_type == 6, dead_for, npc.fading_out, npc.alpha, now, &mut npc.remove_at_ms) {
@@ -626,6 +632,126 @@ impl crate::world::World {
             logic.tasks.shooting_rate = 30;
         }
         logic.npc = Some(npc);
-        Some(self.add_body(phys, ped_col_model(), Box::new(logic)))
+        let id = self.add_body(phys, ped_col_model(), Box::new(logic));
+        // AddPedInCar → SetPedInCarDirect.
+        if let Some((veh, seat)) = req.seat {
+            let car = self.body(veh).and_then(|b| b.logic.as_any().downcast_ref::<crate::automobile::Automobile>()).map(|c| (c.seat_front, c.driver.is_none()));
+            let ok = match car {
+                Some((f, free)) if seat < 0 => free && self.set_ped_in_car_direct(id, veh, f),
+                Some(_) => self.set_ped_in_car_as_passenger(id, veh, seat),
+                None => false,
+            };
+            if seat < 0 {
+                if let Some(c) = self.body_mut(veh).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::automobile::Automobile>()) {
+                    c.awaiting_occupants = false;
+                }
+            }
+            if !ok {
+                self.remove(id);
+                return None;
+            }
+        }
+        Some(id)
+    }
+
+    /// `CCarCtrl::SetUpDriverAndPassengersForVehicle(veh, type, 0, 0, 0, 99)` (0x4217C0) for a
+    /// random civilian car: the driver, then each seat with p = 0.125 (vans at most one,
+    /// taxis / the stretch no front passenger). Spawns go out as seated SpawnPed requests.
+    pub fn set_up_driver_and_passengers(&mut self, veh: crate::world::EntityId) {
+        let Some((model, class, max_pass, pos)) = self
+            .body(veh)
+            .and_then(|b| b.logic.as_any().downcast_ref::<crate::automobile::Automobile>().map(|c| (c.model, c.class, c.max_passengers, b.phys.matrix.pos)))
+        else {
+            return;
+        };
+        let Some(pop) = self.population.as_ref() else { return };
+        let player = self.player_id().and_then(|p| self.body(p)).map_or(pos, |b| b.phys.matrix.pos);
+        let info = pop.data.zone_info(player);
+        let data = pop.data.clone();
+        let loaded = pop.loaded.clone();
+        // Live usage of the loaded models (CModelInfo numRefs).
+        let mut usage: HashMap<u32, u16> = HashMap::new();
+        for id in self.body_ids() {
+            if let Some(n) = self.body(id).and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>()).and_then(|p| p.npc.as_ref()) {
+                *usage.entry(n.model).or_insert(0) += 1;
+            }
+        }
+        let mut rng = self.rng.clone();
+        // ChooseCivilianOccupationForVehicle (0x613260): the least used loaded model allowed in
+        // the zone whose peds.ide car mask has the class; pass 0 skips models already in the car.
+        let choose = |taken: &[u32], usage: &HashMap<u32, u16>| -> u32 {
+            for pass in 0..2 {
+                for u in 0..5u16 {
+                    for &m in &loaded {
+                        let Some(p) = data.peds.get(&m) else { continue };
+                        if u != 4 && usage.get(&m).copied().unwrap_or(0) != u {
+                            continue;
+                        }
+                        let race_ok = p.race == 0 || info.race_mask & (1 << (p.race - 1)) != 0;
+                        if !(race_ok && class != 0xFF && (p.cars_mask >> class) & 1 != 0) {
+                            continue;
+                        }
+                        if pass == 1 || !taken.contains(&m) {
+                            return m;
+                        }
+                    }
+                }
+            }
+            7
+        };
+        // FindSpecificDriverModelForCar (0x611900); the freeway roll runs for every occupant.
+        let special = |rng: &mut crate::damage::Rand| -> Option<u32> {
+            match model {
+                409 => Some(255),
+                420 | 438 => Some(262),
+                423 => Some(264),
+                428 => Some(71),
+                448 => Some(155),
+                463 => match crate::pedevents::rand_range(rng, 0, 3) {
+                    0 => Some(247),
+                    1 => Some(248),
+                    _ => None,
+                },
+                481 => Some(23),
+                _ => None,
+            }
+        };
+        let mut taken = Vec::new();
+        let driver = special(&mut rng).filter(|m| data.peds.contains_key(m)).unwrap_or_else(|| choose(&taken, &usage));
+        taken.push(driver);
+        *usage.entry(driver).or_insert(0) += 1;
+        let mut seats = vec![(driver, -1i8)];
+        let mut n = 0u8;
+        for _ in 0..max_pass {
+            if rng.rand01() < 0.125 {
+                n += 1;
+            }
+        }
+        // Vans (anim file "van") take at most one passenger.
+        let van = matches!(model, 413 | 416 | 427 | 428 | 440 | 459 | 482 | 483 | 498 | 525 | 528 | 552 | 582 | 588 | 601 | 609);
+        let n = if van { n.min(1) } else { n.min(max_pass) };
+        for seat in 0..n as i8 {
+            if seat == 0 && matches!(model, 420 | 438 | 409) {
+                continue;
+            }
+            let _ = special(&mut rng);
+            let m = choose(&taken, &usage);
+            // SetupPassenger: no two civilians of the same model in one car.
+            if taken.contains(&m) {
+                continue;
+            }
+            taken.push(m);
+            *usage.entry(m).or_insert(0) += 1;
+            seats.push((m, seat));
+        }
+        self.rng = rng;
+        if let Some(car) = self.body_mut(veh).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::automobile::Automobile>()) {
+            car.awaiting_occupants = true;
+        }
+        let Some(pop) = self.population.as_mut() else { return };
+        for (m, seat) in seats {
+            let ped_type = data.peds.get(&m).map_or(4, |p| p.ped_type);
+            pop.requests.push(SpawnPed { model: m, ped_type, pos, dir: 0, seat: Some((veh, seat)) });
+        }
     }
 }

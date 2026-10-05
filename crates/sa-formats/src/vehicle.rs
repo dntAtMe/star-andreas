@@ -15,6 +15,10 @@ pub struct VehicleDef {
     pub game_name: String,
     /// The anims column (bike ride group name: "bikes", "bmx", ...; "null" for most cars).
     pub anims: String,
+    /// `CVehicleModelInfo+0x4D` vehicle class: normal 0, poorfamily 1, richfamily 2, executive 3,
+    /// worker 4, big 5, taxi 6, moped 7, motorbike 8, leisureboat 9, workerboat 10, bicycle 11,
+    /// ignore 0xFF.
+    pub class: u8,
     pub wheel_model: i32,
     pub wheel_scale_front: f32,
     pub wheel_scale_rear: f32,
@@ -42,12 +46,32 @@ pub fn parse_vehicles_ide(text: &str) -> Vec<VehicleDef> {
             handling: f[4].to_ascii_uppercase(),
             game_name: f[5].to_string(),
             anims: f.get(6).map(|s| s.to_ascii_lowercase()).unwrap_or_default(),
+            class: f.get(7).map_or(0, |s| vehicle_class(s)),
             wheel_model: f.get(11).and_then(|s| s.parse().ok()).unwrap_or(-1),
             wheel_scale_front: num(12).unwrap_or(0.7),
             wheel_scale_rear: num(13).or(num(12)).unwrap_or(0.7),
         });
     }
     out
+}
+
+/// `CFileLoader::LoadVehicleObject` (0x5B6F30) class names (unknown names keep 0).
+pub fn vehicle_class(s: &str) -> u8 {
+    match s.to_ascii_lowercase().as_str() {
+        "poorfamily" => 1,
+        "richfamily" => 2,
+        "executive" => 3,
+        "worker" => 4,
+        "big" => 5,
+        "taxi" => 6,
+        "moped" => 7,
+        "motorbike" => 8,
+        "leisureboat" => 9,
+        "workerboat" => 10,
+        "bicycle" => 11,
+        "ignore" => 0xFF,
+        _ => 0,
+    }
 }
 
 /// One standard (land vehicle) line of handling.cfg. Units are as in the file.
