@@ -229,6 +229,7 @@ impl WeaponInfos {
             e.model2 = m.model2;
             e.slot = m.slot;
             e.num_combos = m.num_combos as u8;
+            e.base_combo = crate::melee::combo_type_of(&m.base_combo);
             e.flags = m.flags;
             if !m.stealth_anim_group.starts_with("null") {
                 if let Some(g) = group_of(&m.stealth_anim_group) {

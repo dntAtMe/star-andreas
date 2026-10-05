@@ -233,6 +233,8 @@ pub enum WorldRequest {
     FireAreaEffect { owner: EntityId, ty: u32, src: Vec3, mouse_cam: bool, look_pitch: Option<f32> },
     /// `CWorld::UseDetonator`.
     Detonate,
+    /// `CTaskSimpleFight::FightStrike` (the owner is filled in by the ped).
+    MeleeStrike(crate::melee::Strike),
 }
 
 /// `eExplosionType`.

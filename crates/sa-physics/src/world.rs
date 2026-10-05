@@ -529,6 +529,7 @@ impl World {
                     self.fire_area_effect(owner, ty, src, mouse_cam, look_pitch);
                 }
                 WorldRequest::Detonate => self.use_detonator(),
+                WorldRequest::MeleeStrike(s) => self.melee_strike(s),
             }
         }
         self.bullet_traces.update(self.now_ms);
@@ -1506,6 +1507,7 @@ impl World {
                     let down_facing = cps[..n].iter().any(|c| c.normal.z < -0.867);
                     if !ped.standing && matches!(other_kind, EntityType::Vehicle | EntityType::Object) {
                         ped.ground_entity = Some(other);
+                        ped.ground_is_car = other_kind == EntityType::Vehicle;
                     }
                     if nl == 2 && lv[1] < 1.0 && lp[1].point.z < ped.ceiling_z && ceiling_ok {
                         ped.ceiling_z = lp[1].point.z;

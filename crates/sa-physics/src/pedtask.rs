@@ -33,6 +33,10 @@ pub struct Pad {
     pub sprint: bool,
     pub sprint_just_down: bool,
     pub jump_just_down: bool,
+    /// Jump held (`pad+0x1C` Square: the melee block).
+    pub jump: bool,
+    /// `GetDuck` (held).
+    pub duck: bool,
     /// `GetTarget` (aim, RMB on PC).
     pub aim: bool,
     /// `GetWeapon` (fire, LMB on PC).
@@ -77,6 +81,8 @@ pub struct PlayerData {
     pub breath: f32,
     /// +0x34 & 8: free aiming.
     pub free_aim: bool,
+    /// +0x0C / +0x10: the fight shuffle stick (x right, y back).
+    pub fight: Vec2,
 }
 
 impl Default for PlayerData {
@@ -91,6 +97,7 @@ impl Default for PlayerData {
             look_pitch: 0.0,
             breath: crate::ped::BREATH_MAX,
             free_aim: false,
+            fight: Vec2::ZERO,
         }
     }
 }
@@ -266,6 +273,19 @@ pub struct PedTasks {
     saved_turn_rate: Option<f32>,
     pub infos: Option<Arc<WeaponInfos>>,
     pub anims: Option<Arc<AnimManager>>,
+    pub is_player: bool,
+    /// melee.dat.
+    pub melee: Option<Arc<crate::melee::MeleeData>>,
+    /// `CTaskSimpleFight` (secondary slot 0, like the gun and throw tasks).
+    pub fight: Option<crate::melee::FightTask>,
+    /// ped+0x72D fighting style (combo type) and +0x72E learned-move mask.
+    pub fight_style: i8,
+    pub fight_moves: u8,
+    /// `CTaskSimplePlayerOnFoot+0x10`: ms in the fight stance without attacking.
+    pub fighter_counter: u32,
+    /// Stats FAT and MUSCLE (GetFatAndMuscleModifier).
+    pub stat_fat: f32,
+    pub stat_muscle: f32,
 }
 
 impl Default for PedTasks {
@@ -300,6 +320,14 @@ impl Default for PedTasks {
             saved_turn_rate: None,
             infos: None,
             anims: None,
+            is_player: false,
+            melee: None,
+            fight: None,
+            fight_style: 4,
+            fight_moves: 0,
+            fighter_counter: 0,
+            stat_fat: 200.0,
+            stat_muscle: 50.0,
         }
     }
 }
@@ -314,6 +342,8 @@ pub struct PedCore<'a> {
     pub standing: bool,
     pub ground_below: Option<f32>,
     pub ground_entity: bool,
+    /// Standing on a car (CanStrikeTargetOnGround).
+    pub ground_car: bool,
 }
 
 /// `CGeneral::GetRadianAngleBetweenPoints` (0x53CBE0).
@@ -559,6 +589,12 @@ impl PedTasks {
                 self.gun = Some(g);
             }
         }
+        if let Some(mut f) = self.fight.take() {
+            let done = f.process_ped(self, c, ctx, &m);
+            if !done {
+                self.fight = Some(f);
+            }
+        }
         if let Some(mut d) = self.duck.take() {
             let done = d.process_ped(self, c.clump, &m);
             if !done {
@@ -590,10 +626,18 @@ impl PedTasks {
 
     /// `CTaskSimplePlayerOnFoot::ProcessPed` (0x688810).
     fn player_on_foot(&mut self, c: &mut PedCore, ctx: &Ctx, m: &AnimManager) {
+        // Last frame's move state: once walking, the normal control stays in charge and the
+        // fight task plays the moving attack on top.
+        let mut moving_attack = self.move_state >= 4;
+        if self.active_weapon().ty == 9 && self.fight.as_ref().is_some_and(|f| f.current_move == 4) {
+            moving_attack = true;
+        }
         self.move_state = 1;
         let zelda_weapon = self.gun.as_ref().and_then(|g| g.info.clone()).is_some_and(|i| !i.has(wf::AIMWITHARM));
         if self.ducking {
             self.player_control_ducked(c, ctx, m);
+        } else if self.fight.is_some() && !moving_attack {
+            self.player_control_fighter(c, ctx, m);
         } else if zelda_weapon {
             self.player_control_zelda_weapon(c, ctx.ts);
             if self.pad.duck_just_down && self.can_ped_duck() {

@@ -715,6 +715,9 @@ pub fn process_player_weapon(t: &mut PedTasks, c: &mut PedCore, ctx: &Ctx) {
         }
         return;
     }
+    if info.fire_type == fire::MELEE {
+        t.player_melee();
+    }
     // Fire held.
     if t.pad.fire && t.move_state != 7 && t.pd.chosen_slot == t.active_slot {
         let rocket = matches!(w.ty, wt::RLAUNCHER | wt::RLAUNCHER_HS) && t.cam_request != 0;

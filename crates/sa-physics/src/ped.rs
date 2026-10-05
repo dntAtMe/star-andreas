@@ -92,6 +92,8 @@ pub struct PedLogic {
     pub lighting: f32,
     /// Ground entity (vehicle/object) the ped stands on, if any.
     pub ground_entity: Option<EntityId>,
+    /// The ground entity is a vehicle.
+    pub ground_is_car: bool,
     pub ceiling_z: f32,
     /// Player ceiling probe enable (ped+0x478 & 0x100).
     pub ceiling_probe: bool,
@@ -133,6 +135,7 @@ impl PedLogic {
             ground_surface: 0,
             lighting: 1.0,
             ground_entity: None,
+            ground_is_car: false,
             ceiling_z: NO_CEILING,
             ceiling_probe: false,
             jump_request: None,
@@ -140,7 +143,11 @@ impl PedLogic {
             ground_below: None,
             clump: None,
             prev_pose: Vec::new(),
-            tasks: PedTasks::default(),
+            tasks: {
+                let mut t = PedTasks::default();
+                t.is_player = is_player;
+                t
+            },
             pending_damage: Vec::new(),
         }
     }
@@ -303,6 +310,7 @@ impl BodyLogic for PedLogic {
                     standing: self.standing,
                     ground_below: self.ground_below,
                     ground_entity: self.ground_entity.is_some(),
+                    ground_car: self.ground_entity.is_some() && self.ground_is_car,
                 };
                 self.tasks.process(&mut core, ctx);
                 self.tasks.post_process(core.clump, ctx);
@@ -375,6 +383,9 @@ impl BodyLogic for PedLogic {
         for mut r in self.tasks.requests.drain(..) {
             if let WorldRequest::FireProjectile { owner, .. } = &mut r {
                 *owner = id;
+            }
+            if let WorldRequest::MeleeStrike(s) = &mut r {
+                s.owner = id;
             }
             fx.requests.push(r);
         }

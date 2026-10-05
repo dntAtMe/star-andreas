@@ -296,6 +296,11 @@ fn spawn_player(
     logic.clump = Some(Box::new(anim_clump));
     logic.tasks.anims = Some(anims);
     logic.tasks.infos = Some(weapons);
+    // CTaskSimpleFight::LoadMeleeData; the player's style is KICK_STD with moves 0x0F.
+    let melee_dat = sa_formats::meleedat::parse(&String::from_utf8_lossy(&std::fs::read(root.0.join("data/melee.dat")).context("melee.dat")?));
+    logic.tasks.melee = Some(Arc::new(sa_physics::melee::MeleeData::load(&melee_dat, AnimManager::group_by_name)));
+    logic.tasks.fight_style = 15;
+    logic.tasks.fight_moves = 0x0F;
     let id = sa.world.add_body(phys, ped_col_model(), Box::new(logic));
     commands
         .spawn((
@@ -450,6 +455,8 @@ fn player_control(
     pad.sprint = pressed(KeyCode::ShiftLeft);
     pad.sprint_just_down |= just(KeyCode::ShiftLeft);
     pad.jump_just_down |= just(KeyCode::Space);
+    pad.jump = pressed(KeyCode::Space);
+    pad.duck = pressed(KeyCode::KeyC);
     // SA_AUTOFIRE=1 / SA_AUTOAIM=1: hold fire / aim (debug).
     let auto_fire = std::env::var("SA_AUTOFIRE").is_ok();
     pad.aim = (mouse && buttons.pressed(MouseButton::Right)) || std::env::var("SA_AUTOAIM").is_ok();

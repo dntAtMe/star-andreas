@@ -155,6 +155,17 @@ impl FrameFx<'_> {
         self.u4w();
     }
 
+    /// `Fx_c::AddPunchImpact` (0x49F670).
+    pub fn add_punch_impact(&mut self, pos: Vec3, vel: Vec3) {
+        if (self.cam - pos).length_squared() > 625.0 {
+            return;
+        }
+        let mult = PrtMult::new(1.0, 1.0, 1.0, 0.4, 0.1, 0.0, 0.1);
+        for i in 0..2 {
+            self.fx.add_particle("prt_smokeII_3_expand", pos, vel, i as f32 * 0.05, mult, -1.0, 1.2, 0.6, false);
+        }
+    }
+
     /// `Fx_c::AddTyreBurst` (0x49F300).
     pub fn add_tyre_burst(&mut self, pos: Vec3, vel: Vec3) {
         if (self.cam - pos).length_squared() > 625.0 {
@@ -281,7 +292,7 @@ fn set_up_pellet_col(
 
 impl World {
     /// Build a `FrameFx` for weapon effects.
-    fn weapon_fx<R>(&mut self, f: impl FnOnce(&mut FrameFx) -> R) -> R {
+    pub(crate) fn weapon_fx<R>(&mut self, f: impl FnOnce(&mut FrameFx) -> R) -> R {
         let mut requests = Vec::new();
         let mut fx = FrameFx {
             fx: &mut self.effects,

@@ -58,7 +58,8 @@ Last updated: 2026-10-05.
 | Thrown weapons (CTaskSimpleThrowProjectile, grenade, tear gas, molotov, satchel + detonator) | ✅ | satchels stop where they hit instead of attaching to moving entities; tear gas choking needs ped damage |
 | Rocket launcher (1st-person rocket camera, CProjectileInfo rockets) | 🟡 | heat-seeker lock-on and homing not ported (fires plain rockets, as SA does without a lock) |
 | Area effect (FireAreaEffect, CShotInfo: flamethrower, extinguisher, spraycan) | 🟡 | spray tags and ped hits need ped damage / tags |
-| Sniper, camera, melee | ❌ | |
+| Melee (melee.dat, CTaskSimpleFight, PlayerControlFighter, FightStrike) | 🟡 | combos and chaining, block, ground kick, moving attack, fight styles (player KICK_STD), shuffles, car damage and object pushes, ped damage + blood; no lock-on/mouse target, stealth kill, pistol whip, NPC fighting, audio, victims' hit anims |
+| Sniper, camera | ❌ | |
 | Traffic and pedestrians (population, paths, AI) | ❌ | |
 | Wanted level, police | ❌ | |
 | Pickups, collectables | ❌ | |
@@ -134,7 +135,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Melee (CTaskSimpleFight), the swim task, boats, underwater fog and splashes.
+1. The swim task (docs ready), boats, underwater fog and splashes.
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.

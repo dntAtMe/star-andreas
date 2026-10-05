@@ -202,6 +202,7 @@ impl PedTasks {
 
     /// Start `CTaskComplexFallAndGetUp`.
     fn knock_down(&mut self, anim_id: i16, down_ms: u32, clump: &mut Clump, m: &AnimManager) {
+        self.abort_fight(clump, m);
         self.gun = None;
         self.throw = None;
         self.air = AirTask::None;
@@ -243,6 +244,7 @@ impl PedTasks {
             54 => (da::KO_SHOT_STOM, 0.0),
             _ => (da::KO_SHOT_FRONT, 0.0),
         };
+        self.abort_fight(clump, m);
         self.gun = None;
         self.throw = None;
         self.duck = None;
