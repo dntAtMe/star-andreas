@@ -152,7 +152,7 @@ fn update(
     mut sky: ResMut<Sky>,
     dbg: Res<DebugUi>,
     globals: Option<Res<WorldGlobals>>,
-    mut buffers: ResMut<Assets<ShaderBuffer>>,
+    mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut clear: ResMut<ClearColor>,
     mut ambient: ResMut<GlobalAmbientLight>,
@@ -194,8 +194,13 @@ fn update(
         p.far = far;
     }
     let fog_col = rgb(sky_bottom);
+    // Enhanced: the haze toward the sun takes the sun's corona colour (strongest when low).
+    let haze_col = (Vec3::from(c.sun_corona) / 255.0 * 0.6 + Vec3::from(sky_bottom) / 255.0 * 0.6).min(Vec3::ONE);
+    let haze_k = if gfx.enhanced { (1.0 - dn) * (1.0 - to_sun.z.max(0.0)).powf(2.0) * 0.9 } else { 0.0 };
     if let Some(mut f) = fog {
         f.color = fog_col;
+        f.directional_light_color = Color::srgb(haze_col.x, haze_col.y, haze_col.z).with_alpha(haze_k);
+        f.directional_light_exponent = 6.0;
         f.falloff = FogFalloff::Linear { start: c.fog_start, end: far };
         if !dbg.fog {
             f.falloff = FogFalloff::Linear { start: 1e6, end: 1e6 + 1.0 };
@@ -211,9 +216,10 @@ fn update(
             sun: g2b(to_sun.to_array()).normalize_or(Vec3::Y),
             shadow: if lightning { 0.0 } else { sun_strength },
             point_lights: gfx.enhanced,
+            haze: haze_col.extend(haze_k),
         };
-        if let Some(mut b) = buffers.get_mut(&g.0) {
-            b.set_data(data.pack());
+        if let Some(mut img) = images.get_mut(&g.0) {
+            img.data = Some(data.texels());
         }
     }
 

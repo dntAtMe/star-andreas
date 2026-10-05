@@ -30,7 +30,8 @@ impl Plugin for GfxPlugin {
         let enhanced = std::env::var("SA_GFX").map_or(true, |v| v != "classic");
         app.insert_resource(Gfx { enhanced })
             .add_systems(Startup, init_sky_cubemap)
-            .add_systems(Update, (toggle, apply_camera, update_sky_cubemap, apply_hdr_boost).chain());
+            .add_systems(Update, (toggle, apply_camera, update_sky_cubemap, apply_hdr_boost).chain())
+            .add_systems(Update, count_draws);
     }
 }
 
@@ -254,4 +255,21 @@ fn apply_hdr_boost(
             mat.base_color = Color::LinearRgba(LinearRgba::new(k, k, k, 1.0));
         }
     }
+}
+
+/// SA_FPSLOG: also log how many meshes are drawn and with how many distinct materials.
+fn count_draws(
+    time: Res<Time>,
+    mut next: Local<f32>,
+    world: Query<(&MeshMaterial3d<crate::world_material::WorldMaterial>, &ViewVisibility)>,
+    std: Query<(&MeshMaterial3d<StandardMaterial>, &ViewVisibility)>,
+) {
+    if std::env::var("SA_FPSLOG").is_err() || time.elapsed_secs() < *next {
+        return;
+    }
+    *next = time.elapsed_secs() + 2.0;
+    let vis_w: Vec<_> = world.iter().filter(|(_, v)| v.get()).map(|(m, _)| m.0.id()).collect();
+    let mats_w: std::collections::HashSet<_> = vis_w.iter().collect();
+    let vis_s = std.iter().filter(|(_, v)| v.get()).count();
+    info!("draws: map {} visible of {} ({} materials), standard {} visible of {}", vis_w.len(), world.iter().count(), mats_w.len(), vis_s, std.iter().count());
 }

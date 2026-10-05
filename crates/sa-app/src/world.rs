@@ -127,8 +127,8 @@ impl World {
         }
 
         // CRenderer's LOD distance scale (the PC menu's draw-distance slider, 0.925..1.8):
-        // SA_DRAWDIST, 1.3 by default (1.8 = max; each step costs frame rate).
-        let dd_scale: f32 = std::env::var("SA_DRAWDIST").ok().and_then(|v| v.parse().ok()).unwrap_or(1.3);
+        // SA_DRAWDIST, the maximum (1.8) by default.
+        let dd_scale: f32 = std::env::var("SA_DRAWDIST").ok().and_then(|v| v.parse().ok()).unwrap_or(1.8);
         // An instance referenced as a LOD becomes visible where its HD fades out.
         let mut lod_near = vec![0.0f32; raw.len()];
         for r in &raw {

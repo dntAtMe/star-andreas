@@ -1,14 +1,17 @@
 //! Material for map geometry: SA's day/night prelit blend, timecyc ambient and fog
-//! (see world_material.wgsl). One shared storage buffer carries the per-frame globals.
+//! (see world_material.wgsl). The material is **bindless** (one bind group for all the map's
+//! materials, so Bevy batches the draws); the per-frame globals live in one small shared
+//! texture (every material points at the same one).
 
 use bevy::{
     asset::embedded_asset,
     mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef},
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    render::{
-        render_resource::{AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError, VertexFormat},
-        storage::ShaderBuffer,
+    asset::RenderAssetUsages,
+    render::render_resource::{
+        AsBindGroup, AsBindGroupShaderType, Extent3d, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError, TextureDimension, TextureFormat,
+        VertexFormat,
     },
     shader::ShaderRef,
 };
@@ -27,7 +30,7 @@ impl Plugin for WorldMaterialPlugin {
     }
 }
 
-#[derive(Clone, Copy, ShaderType, Debug)]
+#[derive(Clone, Copy, Default, ShaderType, Debug)]
 pub struct WorldMatUniform {
     /// Material colour, gamma 0..1.
     pub color: Vec4,
@@ -36,15 +39,23 @@ pub struct WorldMatUniform {
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+#[data(0, WorldMatUniform, binding_array(10))]
+#[bindless(index_table(range(0..4)))]
 pub struct WorldMaterial {
-    #[uniform(0)]
     pub uniform: WorldMatUniform,
     #[texture(1)]
     #[sampler(2)]
     pub texture: Option<Handle<Image>>,
-    #[storage(3, read_only)]
-    pub globals: Handle<ShaderBuffer>,
+    /// The shared per-frame globals (GLOBALS_W × 1 RGBA16F).
+    #[texture(3)]
+    pub globals: Handle<Image>,
     pub alpha_mode: AlphaMode,
+}
+
+impl AsBindGroupShaderType<WorldMatUniform> for WorldMaterial {
+    fn as_bind_group_shader_type(&self, _images: &bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>) -> WorldMatUniform {
+        self.uniform
+    }
 }
 
 impl Material for WorldMaterial {
@@ -88,9 +99,12 @@ impl Material for WorldMaterial {
     }
 }
 
-/// The shared per-frame globals buffer.
+/// The shared per-frame globals texture.
 #[derive(Resource, Clone)]
-pub struct WorldGlobals(pub Handle<ShaderBuffer>);
+pub struct WorldGlobals(pub Handle<Image>);
+
+/// Texels in the globals texture.
+pub const GLOBALS_W: u32 = 8;
 
 /// Per-frame values (gamma space).
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +117,8 @@ pub struct GlobalsData {
     pub shadow: f32,
     /// Enhanced graphics: point lights light the map.
     pub point_lights: bool,
+    /// Enhanced graphics: the fog's sun in-scattering colour (gamma) and strength.
+    pub haze: Vec4,
 }
 
 impl GlobalsData {
@@ -113,11 +129,48 @@ impl GlobalsData {
             [self.ambient.x, self.ambient.y, self.ambient.z, if self.fog.is_some() { 1.0 } else { 0.0 }],
             [fc.x, fc.y, fc.z, if self.point_lights { 1.0 } else { 0.0 }],
             [self.sun.x, self.sun.y, self.sun.z, self.shadow],
+            self.haze.to_array(),
         ]
     }
 }
 
-fn init(mut commands: Commands, mut buffers: ResMut<Assets<ShaderBuffer>>) {
-    let data = GlobalsData { dn: 0.0, ambient: Vec3::ZERO, fog: None, sun: Vec3::Y, shadow: 0.0, point_lights: false };
-    commands.insert_resource(WorldGlobals(buffers.add(ShaderBuffer::from(data.pack()))));
+impl GlobalsData {
+    /// The texture bytes (RGBA16F texels, zero-padded to GLOBALS_W).
+    pub fn texels(&self) -> Vec<u8> {
+        let mut v = self.pack();
+        v.resize(GLOBALS_W as usize, [0.0; 4]);
+        v.iter().flatten().flat_map(|&x| f32_to_f16(x).to_le_bytes()).collect()
+    }
+}
+
+/// IEEE half from f32 (round to nearest, no NaN payloads needed here).
+fn f32_to_f16(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xFF) as i32 - 127 + 15;
+    let mant = b & 0x7F_FFFF;
+    if exp >= 31 {
+        return sign | 0x7C00;
+    }
+    if exp <= 0 {
+        if exp < -10 {
+            return sign;
+        }
+        let m = (mant | 0x80_0000) >> (1 - exp);
+        return sign | ((m + 0x1000) >> 13) as u16;
+    }
+    let h = sign as u32 | ((exp as u32) << 10) | (mant >> 13);
+    (h + ((mant >> 12) & 1)) as u16
+}
+
+fn init(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let data = GlobalsData { dn: 0.0, ambient: Vec3::ZERO, fog: None, sun: Vec3::Y, shadow: 0.0, point_lights: false, haze: Vec4::ZERO };
+    let img = Image::new(
+        Extent3d { width: GLOBALS_W, height: 1, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data.texels(),
+        TextureFormat::Rgba16Float,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    commands.insert_resource(WorldGlobals(images.add(img)));
 }

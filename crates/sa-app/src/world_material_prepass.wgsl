@@ -10,21 +10,53 @@ struct WorldMat {
     params: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> mat: WorldMat;
+#ifdef BINDLESS
+#import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d}
+#import bevy_pbr::mesh_bindings::mesh
+struct WorldMatBindings {
+    material: u32,
+    tex: u32,
+    tex_sampler: u32,
+    globals: u32,
+}
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<storage> material_indices: array<WorldMatBindings>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(10) var<storage> material_array: array<WorldMat>;
+#else
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> mat_u: WorldMat;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var tex_sampler: sampler;
+#endif
+
+// The alpha-mask test of world_material.wgsl.
+fn masked_out(in: VertexOutput) -> bool {
+#ifdef VERTEX_UVS_A
+#ifdef BINDLESS
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    let slot = mesh[in.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
+#else
+    let slot = 0u;
+#endif
+    let m = material_array[material_indices[slot].material];
+    if m.params.y >= 0.0 {
+        let a = textureSample(bindless_textures_2d[material_indices[slot].tex], bindless_samplers_filtering[material_indices[slot].tex_sampler], in.uv).a * m.color.a;
+        return a < m.params.y;
+    }
+#else
+    if mat_u.params.y >= 0.0 {
+        let a = textureSample(tex, tex_sampler, in.uv).a * mat_u.color.a;
+        return a < mat_u.params.y;
+    }
+#endif
+#endif
+    return false;
+}
 
 #ifdef PREPASS_FRAGMENT
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
-#ifdef VERTEX_UVS_A
-    if mat.params.y >= 0.0 {
-        let a = textureSample(tex, tex_sampler, in.uv).a * mat.color.a;
-        if a < mat.params.y {
-            discard;
-        }
+    if masked_out(in) {
+        discard;
     }
-#endif
     var out: FragmentOutput;
 #ifdef NORMAL_PREPASS
     var n = in.world_normal;
@@ -53,13 +85,8 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
 // Depth only (shadow maps of masked materials): just the discard.
 @fragment
 fn fragment(in: VertexOutput) {
-#ifdef VERTEX_UVS_A
-    if mat.params.y >= 0.0 {
-        let a = textureSample(tex, tex_sampler, in.uv).a * mat.color.a;
-        if a < mat.params.y {
-            discard;
-        }
+    if masked_out(in) {
+        discard;
     }
-#endif
 }
 #endif
