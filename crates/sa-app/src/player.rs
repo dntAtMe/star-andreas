@@ -514,19 +514,29 @@ fn player_control(
 // ---------------------------------------------------------------- animation
 
 /// Copy the SA anim clump's pose (interpolated between physics steps) onto the bones.
-fn animate_ped(sa: Res<SaPhys>, peds: Query<&Ped>, mut bones: Query<&mut Transform, (Without<Ped>, Without<crate::peds::NpcPed>)>) {
+fn animate_ped(
+    sa: Res<SaPhys>,
+    cam: Option<Res<crate::camera::SaCam>>,
+    mode: Res<Mode>,
+    peds: Query<&Ped>,
+    mut bones: Query<&mut Transform, (Without<Ped>, Without<crate::peds::NpcPed>)>,
+) {
     let alpha = sa.alpha();
+    // First person: the head is collapsed so the eye isn't inside it.
+    let fp = *mode == Mode::Walk && cam.is_some_and(|c| c.first_person());
     for ped in &peds {
         let Some(logic) = sa.logic::<PedLogic>(ped.sa) else { continue };
         let Some(clump) = logic.clump.as_deref() else { continue };
         // CTaskSimpleSwim::ApplyRollAndPitch: the rendered ped frame is tilted (GTA local).
         let swim = logic.tasks.swim.as_ref().map(|s| s.render_rotation());
+        let head = clump.frame_of_tag(5);
         for (k, &(q, t)) in clump.pose.iter().enumerate() {
             let (pq, pt) = logic.prev_pose.get(k).copied().unwrap_or((q, t));
             let Some(&e) = ped.node_frames.get(k).and_then(|&f| ped.bones.get(f)) else { continue };
             if let Ok(mut tf) = bones.get_mut(e) {
                 tf.rotation = pq.slerp(q, alpha);
                 tf.translation = pt.lerp(t, alpha);
+                tf.scale = if fp && Some(k) == head { Vec3::ZERO } else { Vec3::ONE };
                 if let (0, Some(r)) = (k, swim) {
                     tf.rotation = r * tf.rotation;
                     tf.translation = r * tf.translation;

@@ -4,6 +4,9 @@
 //! (-cos β, -sin β)`), `alpha` its pitch. All maths in GTA space.
 //!
 //! The car camera is still the simple orbit in `player.rs`.
+//!
+//! Not in SA: a first-person view on foot (the 4th step of the Home zoom cycle): the eye at the
+//! head bone, the ped turned to the view, its head hidden.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -84,7 +87,8 @@ pub struct SaCam {
     pub front: Vec3,
     pub up: Vec3,
     pub aspect: f32,
-    /// Ped zoom ("change camera" key, Home here: V spawns cars): 1, 2 (default), 3.
+    /// Ped zoom ("change camera" key, Home here: V spawns cars): 1, 2 (default), 3, and 4 =
+    /// first person (not in SA).
     pub zoom: u8,
     zoom_smooth: f32,
     duck_z: f32,
@@ -126,6 +130,11 @@ impl Default for SaCam {
 }
 
 impl SaCam {
+    /// The first-person view is active.
+    pub fn first_person(&self) -> bool {
+        self.zoom == 4 && self.mode != CamMode::Rocket
+    }
+
     /// `TheCamera+0x58`: a mode transition is running.
     pub fn in_transition(&self) -> bool {
         self.transition.is_some()
@@ -194,6 +203,10 @@ fn sa_camera(
         cam.beta = orbit.yaw - FRAC_PI_2;
         cam.alpha = orbit.pitch;
         cam.initialised = true;
+        // SA_FP=1: start in first person (debug).
+        if std::env::var("SA_FP").is_ok() {
+            cam.zoom = 4;
+        }
     }
 
     // SetNewPlayerWeaponMode from the player's weapon task (re-requested every frame).
@@ -250,8 +263,21 @@ fn sa_camera(
         CamMode::FollowPed => {
             // Zoom key cycles 1 → 2 → 3 (TheCamera+0xC8); extra distance followed at ts·0.12.
             if keys.just_pressed(KeyCode::Home) {
-                cam.zoom = cam.zoom % 3 + 1;
+                cam.zoom = cam.zoom % 4 + 1;
             }
+            if cam.zoom == 4 {
+                // First person: the view is free, the ped follows it.
+                if !transitioning {
+                    cam.fov += (75.0 - cam.fov).clamp(-ts, ts);
+                }
+                cam.beta += mx * -2.5 * k * HACC;
+                cam.alpha += my * 2.5 * k * HACC;
+                cam.alpha = cam.alpha.clamp(-1.4, 1.3);
+                cam.front = front_of(cam.alpha, cam.beta);
+                let eye = first_person_eye(&mut sa, ped.sa, ped_pos, cam.front, cam.beta);
+                cam.lag = None;
+                (eye, eye)
+            } else {
             let extra = [-0.55, 1.5, 3.6][cam.zoom as usize - 1];
             let step = ts * 0.12;
             cam.zoom_smooth += (extra - cam.zoom_smooth).clamp(-step, step);
@@ -285,6 +311,7 @@ fn sa_camera(
             let mut t = t;
             t.z += cam.duck_follow;
             (collide(cam, &mut sa, t, src, ped_e, ts, 0.2), t)
+            }
         }
         CamMode::Rocket => {
             // Process_Rocket (0x511B50): FOV 70, eye at the head bone + 0.1 z.
@@ -306,6 +333,30 @@ fn sa_camera(
                 logic.cur_rot = h;
                 logic.aim_rot = h;
                 logic.tasks.pd.look_pitch = -cam.alpha;
+            }
+            (eye, eye)
+        }
+        CamMode::AimWeapon if cam.zoom == 4 => {
+            // First-person aiming: the same eye; the ped and its gun follow the view.
+            let req = cam.request.unwrap();
+            let fov_target = match req.weapon {
+                30 | 31 => 50.0,
+                33 => 35.0,
+                _ => 70.0,
+            };
+            if !transitioning {
+                cam.fov += (fov_target - cam.fov).clamp(-ts, ts);
+            }
+            let tn = (cam.fov * 0.5).to_radians().tan();
+            cam.cross_x = (2.0 * (CHAIR_X - 0.5) * tn).atan();
+            cam.beta += mx * -2.5 * k * HACC;
+            cam.alpha += my * 4.0 * k * VACC;
+            cam.alpha = cam.alpha.clamp(-1.4, 1.3);
+            cam.front = front_of(cam.alpha, cam.beta);
+            let eye = first_person_eye(&mut sa, ped.sa, ped_pos, cam.front, cam.beta);
+            let cy = ((1.0 / cam.aspect) * 2.0 * (0.5 - 0.4) * tn).atan();
+            if let Some(logic) = sa.logic_mut::<PedLogic>(ped.sa) {
+                logic.tasks.pd.look_pitch = -(cy + cam.alpha);
             }
             (eye, eye)
         }
@@ -409,4 +460,24 @@ fn sa_camera(
     sa.world.camera_fov = fov;
     sa.world.camera_aspect = cam.aspect;
     sa.world.camera_mode = cam.mode as u8;
+}
+
+/// First person: the eye just in front of the head bone; the ped faces the view's heading.
+fn first_person_eye(sa: &mut SaPhys, ped: sa_physics::world::EntityId, ped_pos: Vec3, front: Vec3, beta: f32) -> Vec3 {
+    let head = sa.logic::<PedLogic>(ped).and_then(|l| {
+        let c = l.clump.as_deref()?;
+        let f = c.frame_of_tag(5)?;
+        let m = sa.world.body(ped)?.phys.matrix;
+        Some(m.transform(c.ltm(f).w_axis.truncate()))
+    });
+    let flat = Vec3::new(front.x, front.y, 0.0).normalize_or_zero();
+    let eye = head.unwrap_or(ped_pos + Vec3::new(0.0, 0.0, 0.65)) + Vec3::new(0.0, 0.0, 0.08) + flat * 0.12;
+    let h = beta + FRAC_PI_2;
+    if let Some(logic) = sa.logic_mut::<PedLogic>(ped) {
+        // On foot (not in a vehicle / swimming): the body turns with the view.
+        if logic.vehicle.is_none() {
+            logic.aim_rot = h;
+        }
+    }
+    eye
 }
