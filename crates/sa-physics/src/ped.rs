@@ -286,6 +286,9 @@ impl BodyLogic for PedLogic {
         // Damage events of the last frame (health changes at once, reactions are blended).
         if let (Some(clump), Some(m)) = (self.clump.as_deref_mut(), self.tasks.anims.clone()) {
             for d in std::mem::take(&mut self.pending_damage) {
+                if let Some(n) = self.npc.as_mut() {
+                    n.damaged_by = Some(d.src);
+                }
                 if let Some((src, force)) = self.tasks.take_damage(d, clump, &m, ctx.now_ms) {
                     let dd = (src - p.matrix.pos).truncate().normalize_or_zero();
                     self.standing = false;
@@ -334,7 +337,17 @@ impl BodyLogic for PedLogic {
             if alive && !busy && self.knocked_down <= 0.0 {
                 if let Some(paths) = npc.paths.clone() {
                     let i = crate::npc::NpcIn { paths: &paths, anims: &m, now_ms: ctx.now_ms, frame: ctx.frame, ts };
-                    npc.process(p.matrix.pos, p.move_speed, &mut self.aim_rot, self.cur_rot, &i);
+                    // HandleEvents: respond to the highest-priority event.
+                    if let Some(e) = npc.pick_event() {
+                        if let Some(r) = npc.compute_response(&e, ctx.now_ms) {
+                            npc.start_response(e, r, clump);
+                        }
+                    }
+                    let ri = npc.resp_in;
+                    let mut me = crate::pedevents::PedNow { pos: p.matrix.pos, move_speed: p.move_speed, aim_rot: &mut self.aim_rot, cur_rot: self.cur_rot };
+                    if !npc.process_response(&mut me, clump, &m, &ri, &i) {
+                        npc.process(p.matrix.pos, p.move_speed, &mut self.aim_rot, self.cur_rot, &i);
+                    }
                 }
                 npc.set_move_anim(clump, &m);
             }
@@ -405,6 +418,22 @@ impl BodyLogic for PedLogic {
         if let Some(clump) = self.clump.as_deref() {
             let reqs = crate::gun::fire_guns(&mut self.tasks, clump, phys, id, fx.now_ms);
             fx.requests.extend(reqs);
+        }
+        if let Some(n) = self.npc.as_mut() {
+            for k in n.raised.drain(..) {
+                let k = match k {
+                    crate::pedevents::EventKind::SeenPanickedPed { threat, .. } => {
+                        crate::pedevents::EventKind::SeenPanickedPed { fleer: id, threat }
+                    }
+                    k => k,
+                };
+                fx.requests.push(WorldRequest::PedEvent(k));
+            }
+            // CTaskSimpleDead: the DEAD_PED event, once.
+            if matches!(self.tasks.health.life, crate::peddamage::Life::Wasted { .. }) && !n.dead_reported {
+                n.dead_reported = true;
+                fx.requests.push(WorldRequest::PedEvent(crate::pedevents::EventKind::DeadPed { dead: id }));
+            }
         }
         for mut r in self.tasks.requests.drain(..) {
             if let WorldRequest::FireProjectile { owner, .. } = &mut r {

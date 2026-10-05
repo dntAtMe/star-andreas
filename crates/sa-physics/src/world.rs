@@ -216,6 +216,10 @@ pub struct World {
     pub veh_anim_flags: Vec<u32>,
     /// `g_breakMan`: pieces of broken breakable objects.
     pub breaks: crate::breakable::BreakManager,
+    /// `CDecisionMakerTypes` (set by the app with the population data).
+    pub decisions: Option<Arc<crate::pedevents::DecisionData>>,
+    /// The global event group: events raised this frame, handed to the peds next frame.
+    pub ped_events: Vec<crate::pedevents::EventKind>,
 }
 
 impl Default for World {
@@ -268,6 +272,8 @@ impl World {
             gun_fx_toggle: 0,
             veh_anim_flags: Vec::new(),
             breaks: Default::default(),
+            decisions: None,
+            ped_events: Vec::new(),
         }
     }
 
@@ -431,6 +437,7 @@ impl World {
         ctx.cam = self.cam_info();
         ctx.frame = self.frame;
         self.update_population();
+        self.process_ped_events();
         self.update_traffic();
         self.traffic_ai();
         self.probe_ped_ground();
@@ -601,6 +608,7 @@ impl World {
                 WorldRequest::Detonate => self.use_detonator(),
                 WorldRequest::MeleeStrike(s) => self.melee_strike(s),
                 WorldRequest::BreakObject(b) => self.add_break(&b),
+                WorldRequest::PedEvent(k) => self.ped_events.push(k),
             }
         }
         self.bullet_traces.update(self.now_ms);

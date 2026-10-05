@@ -237,6 +237,8 @@ pub enum WorldRequest {
     MeleeStrike(crate::melee::Strike),
     /// `BreakManager_c::Add` of a broken breakable object.
     BreakObject(crate::breakable::BreakRequest),
+    /// An event for the global event group (`GetEventGlobalGroup()->Add`).
+    PedEvent(crate::pedevents::EventKind),
 }
 
 /// `eExplosionType`.

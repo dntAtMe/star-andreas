@@ -531,7 +531,9 @@ impl crate::world::World {
         use crate::ped::{PedLogic, ped_col_model, ped_physical};
         let pop = self.population.as_ref()?;
         let info = pop.data.peds.get(&req.model)?.clone();
-        let rate = pop.data.stats.get(info.stat).map_or(15.0, |s| s.heading_change_rate);
+        let stat = pop.data.stats.get(info.stat);
+        let rate = stat.map_or(15.0, |s| s.heading_change_rate);
+        let (dm, shooting_rate) = stat.map_or((-1, 0), |s| (s.decision_maker as i32, s.shooting_rate));
         let paths = pop.data.paths.clone();
         let mut m = crate::physical::Matrix::IDENTITY;
         m.pos = req.pos;
@@ -543,7 +545,10 @@ impl crate::world::World {
         logic.clump = Some(Box::new(clump));
         logic.tasks.anims = Some(anims);
         logic.tasks.anim_group = info.anim_group;
-        logic.npc = Some(crate::npc::NpcState::new(req.model, req.ped_type, seed, info.anim_group, req.dir, paths, self.now_ms));
+        let mut npc = crate::npc::NpcState::new(req.model, req.ped_type, seed, info.anim_group, req.dir, paths, self.now_ms);
+        npc.dm = dm;
+        npc.resp_in.shooting_rate = shooting_rate;
+        logic.npc = Some(npc);
         Some(self.add_body(phys, ped_col_model(), Box::new(logic)))
     }
 }

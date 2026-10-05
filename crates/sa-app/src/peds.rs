@@ -29,7 +29,7 @@ impl Plugin for NpcPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NpcModels>()
             .add_systems(Startup, load_population)
-            .add_systems(Update, (despawn_npcs, spawn_npcs, animate_npcs).chain().after(SaStep));
+            .add_systems(Update, (despawn_npcs, spawn_npcs, animate_npcs, log_responses).chain().after(SaStep));
     }
 }
 
@@ -60,6 +60,21 @@ fn load_population(root: Res<GameRoot>, mut sa: ResMut<SaPhys>) -> Result<(), Be
     let paths = Arc::new(PathFind::new(areas));
     let data = PopData::load(&peds, stats, popcycle, &groups, zones, &scm, paths.clone(), AnimManager::group_by_name);
     // CCarCtrl: cargrp.dat and the car models (vehicles.ide 'car' entries).
+    // CDecisionMakerTypes: PedEvent.txt, the pedstats decision makers and RANDOM.ped.
+    {
+        use sa_formats::decision::{parse_decision_maker, parse_ped_event_txt};
+        let ev2dec = parse_ped_event_txt(&text("data/decision/PedEvent.txt")?);
+        let dm = |f: &str| text(&format!("data/decision/allowed/{f}")).map(|t| parse_decision_maker(&t, &ev2dec)).unwrap_or_default();
+        let dms = ["GangMbr.ped", "Cop.ped", "R_Norm.ped", "R_Tough.ped", "R_Weak.ped", "Fireman.ped", "m_empty.ped", "Indoors.ped"]
+            .iter()
+            .map(|f| dm(f))
+            .collect();
+        sa.world.decisions = Some(Arc::new(sa_physics::pedevents::DecisionData {
+            event_to_decision: ev2dec,
+            dms,
+            random_ped: dm("RANDOM.ped"),
+        }));
+    }
     let car_groups = pd::parse_cargrp(&text("data/cargrp.dat")?);
     let cars: std::collections::HashSet<String> = sa_formats::vehicle::parse_vehicles_ide(&text("data/vehicles.ide")?)
         .into_iter()
@@ -171,6 +186,37 @@ fn animate_npcs(
                 tf.rotation = pq.slerp(q, alpha);
                 tf.translation = pt.lerp(t, alpha);
             }
+        }
+    }
+}
+
+/// Debug `SA_EVLOG=1`: log NPC event responses as they start.
+fn log_responses(sa: Res<SaPhys>, mut last: Local<HashMap<u32, String>>) {
+    use sa_physics::pedevents::Resp;
+    if std::env::var("SA_EVLOG").is_err() {
+        return;
+    }
+    for id in sa.world.body_ids() {
+        let EntityId::Body(i) = id else { continue };
+        let Some(n) = sa.logic::<PedLogic>(id).and_then(|p| p.npc.as_ref()) else { continue };
+        let kind = n.response.as_ref().map_or(String::new(), |r| {
+            let name = match r {
+                Resp::SmartFlee(_) => "smart flee",
+                Resp::Duck { .. } => "duck",
+                Resp::AimedAt { .. } => "react to gun aimed at",
+                Resp::HandsUp { .. } => "hands up",
+                Resp::Cower { .. } => "cower",
+                Resp::ShakeFist { .. } => "shake fist",
+                Resp::EvasiveStep { .. } => "evasive step",
+                Resp::EvasiveDive { .. } => "evasive dive",
+            };
+            format!("{name} (event {:?})", n.cur_event.as_ref().map(|e| (e.kind.ty(), e.task)))
+        });
+        if last.get(&i).is_none_or(|k| *k != kind) {
+            if !kind.is_empty() {
+                info!("npc {i}: {kind}");
+            }
+            last.insert(i, kind);
         }
     }
 }

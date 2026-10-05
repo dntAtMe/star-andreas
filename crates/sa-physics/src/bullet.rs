@@ -361,6 +361,12 @@ impl World {
             (end, owner_mat.fwd, hit)
         };
 
+        // CEventGunShot + CEventGunShotWhizzedBy to the global group (silenced pistol 23,
+        // tear gas 17 have no sound; only 23 for the whizz).
+        let shot_end = hit.as_ref().map_or(end, |(_, _, cp)| cp.point);
+        self.ped_events.push(crate::pedevents::EventKind::ShotFired { by: h.owner, start, end: shot_end, no_sound: matches!(h.ty, 23 | 17) });
+        self.ped_events.push(crate::pedevents::EventKind::WhizzedBy { by: h.owner, start, end: shot_end, no_sound: h.ty == 23 });
+
         // Gun FX (point light, gunsmoke / gunflash, shell).
         let sizes = match h.ty {
             22..=24 | 34 => Some((0.2, 0.25)),

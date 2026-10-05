@@ -27,6 +27,7 @@ pub mod incar;
 pub mod pair;
 pub mod ped;
 pub mod peddamage;
+pub mod pedevents;
 pub mod pedtask;
 pub mod shadows;
 pub mod npc;

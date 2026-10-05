@@ -3,8 +3,9 @@
 //! turns (UpdateDir), dead-end u-turns, road crossings with the ped lights, scratch-head when
 //! stuck, and the NPC `CPed::SetMoveAnim` (move_anim.md §6).
 //!
+//! Event responses (flee, duck, hands up, evasive dives) are in pedevents.rs.
 //! Not ported: ped-ped avoidance (917), ScanForStuff (attractors, chats), the cop / medic /
-//! criminal / prostitute wander variants, event responses (flee, fight), ambient speech.
+//! criminal / prostitute wander variants, fighting back, ambient speech.
 
 use std::sync::Arc;
 
@@ -29,7 +30,7 @@ pub fn light_for_peds(now_ms: u32) -> u8 {
 }
 
 #[derive(Debug, Clone)]
-enum Sub {
+pub(crate) enum Sub {
     /// `CTaskSimpleGoToPoint` (900).
     GoTo { target: Vec3, prev: Vec2 },
     /// `CTaskSimpleScratchHead` (421) [I: ~2 s standing].
@@ -43,18 +44,20 @@ enum Sub {
 /// `CTaskComplexWanderStandard` (912).
 #[derive(Debug, Clone)]
 pub struct Wander {
-    move_state: u8,
-    dir: u8,
+    pub(crate) move_state: u8,
+    pub(crate) dir: u8,
     radius: f32,
-    last: Option<NodeAddr>,
-    next: Option<NodeAddr>,
+    pub(crate) last: Option<NodeAddr>,
+    pub(crate) next: Option<NodeAddr>,
     last_dir_frame: u32,
-    sub: Option<Sub>,
+    pub(crate) sub: Option<Sub>,
+    /// wanderSensibly: wait at crossings (the flee wander does not).
+    pub(crate) sensible: bool,
 }
 
 impl Wander {
     pub fn new(dir: u8) -> Self {
-        Self { move_state: 4, dir, radius: 0.5, last: None, next: None, last_dir_frame: u32::MAX, sub: None }
+        Self { move_state: 4, dir, radius: 0.5, last: None, next: None, last_dir_frame: u32::MAX, sub: None, sensible: true }
     }
 }
 
@@ -89,6 +92,24 @@ pub struct NpcState {
     pub paths: Option<Arc<PathFind>>,
     /// Stuck counter (intelligence+0x274) [I: frames without progress].
     stuck: u32,
+    /// Pedstats decision maker (intel+0xB4; −1 → the RANDOM.ped template).
+    pub dm: i32,
+    /// intel+0x68 event group (rolled events waiting for HandleEvents).
+    pub events: Vec<crate::pedevents::PedEvent>,
+    /// The event being responded to and its response task (slots 1/2).
+    pub cur_event: Option<crate::pedevents::PedEvent>,
+    pub response: Option<crate::pedevents::Resp>,
+    /// A non-temporary response parked under a temporary one (history.stored).
+    pub parked: Option<(crate::pedevents::Resp, crate::pedevents::PedEvent)>,
+    /// Global events this ped raised this frame (sent by the world).
+    pub raised: Vec<crate::pedevents::EventKind>,
+    /// The damage source of this frame's damage events (for the DAMAGE event).
+    pub damaged_by: Option<Option<crate::world::EntityId>>,
+    /// CTaskSimpleDead raised its DEAD_PED event.
+    pub dead_reported: bool,
+    /// What the world tells the response this frame (threat position, stats).
+    pub resp_in: crate::pedevents::RespIn,
+    pub(crate) rng: crate::damage::Rand,
 }
 
 impl NpcState {
@@ -106,6 +127,16 @@ impl NpcState {
             wander: Some(Wander::new(dir)),
             paths: Some(paths),
             stuck: 0,
+            dm: -1,
+            events: Vec::new(),
+            cur_event: None,
+            response: None,
+            parked: None,
+            raised: Vec::new(),
+            damaged_by: None,
+            dead_reported: false,
+            resp_in: Default::default(),
+            rng: crate::damage::Rand::new(seed as u32 * 7919 + 1),
         }
     }
 
@@ -154,7 +185,13 @@ impl NpcState {
     /// One step of the wander task tree; sets the move state and the aimed heading.
     pub fn process(&mut self, pos: Vec3, move_speed: Vec3, aim_rot: &mut f32, cur_rot: f32, i: &NpcIn) {
         let Some(mut w) = self.wander.take() else { return };
-        let paths = i.paths;
+        self.process_wander(&mut w, i.paths, pos, move_speed, aim_rot, cur_rot, i);
+        self.wander = Some(w);
+    }
+
+    /// One step of a wander task (the default one or a response's).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn process_wander(&mut self, mut w: &mut Wander, paths: &PathFind, pos: Vec3, move_speed: Vec3, aim_rot: &mut f32, cur_rot: f32, i: &NpcIn) {
         if w.sub.is_none() {
             // CreateFirstSubTask.
             Self::update_dir(&mut w, paths, pos, self.seed, i.frame);
@@ -241,7 +278,9 @@ impl NpcState {
                             .last
                             .map(|l| paths.links(l).into_iter().find(|(nb, _)| Some(*nb) == w.next).map_or(0, |x| x.1))
                             .unwrap_or(0);
-                        if inter & 2 != 0 {
+                        if !w.sensible {
+                            self.goto(&w, paths, pos)
+                        } else if inter & 2 != 0 {
                             Sub::Cross { heading: self.heading_to_next(&w, paths, pos), lights: true, wait_until: 0 }
                         } else if inter & 1 != 0 {
                             Sub::Cross { heading: self.heading_to_next(&w, paths, pos), lights: false, wait_until: 0 }
@@ -252,7 +291,6 @@ impl NpcState {
                 }
             });
         }
-        self.wander = Some(w);
     }
 
     /// NPC `CPed::SetMoveAnim` (0x5E4A00).

@@ -52,6 +52,7 @@ Last updated: 2026-10-05.
 
 | System | Status | Notes |
 |---|---|---|
+| NPC event responses (CEventGroup / decision makers) | 🟡 | PedEvent.txt + R_Norm/R_Tough/R_Weak/... decision makers with the add-time weighted roll; shot fired / whizzed by (45 m, silenced needs sight), gun aimed at (free-aim ray, seeing range), potential get run over (SlowCarDownForPeds + handler: evasive step / dive + get up / hands up / shake fist), seen panicked ped, dead ped, damage; responses: smart flee 911/910 (sprint wander away by octant, re-target, 60 m end, path hand-over), duck 415/427, react to gun aimed at 601 (heading, hands up 3–5 s, walk away 10 s; cower for GUN_PANIC), temporary-event parking; no acquaintances, groups, inform friends, look-at, fight back (1000), flee 909, investigate dead ped 600, speech |
 | Enter / exit vehicles | 🟡 | warp in/out (SetPedInCarDirect); seated driver: SetPedPositionInCar (bike lean matrix), AddInCarAnim, car/boat ProcessDrivingAnims (skill sets, steer L/R, look-back), bike ProcessRiderAnims; no enter/exit sequences or doors yet |
 | Player locomotion (PlayerControlZelda, SetRealMoveAnim, sprint, walk_start, run stops) | ✅ | turning on the spot, adrenaline, fat/muscle groups missing |
 | Crouch (CTaskSimpleDuck, PlayerControlDucked, crouch walk, crouch rolls, crouch fire) | ✅ | |
@@ -142,7 +143,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Vehicle enter/exit sequences and door anims (stage B/C, docs ready), traffic drivers and SIMPLE rails mode, glass, bicycles, NPC reactions (docs ready), wanted level and police (docs ready).
+1. Vehicle enter/exit sequences and door anims (stage B/C, docs ready), traffic drivers and SIMPLE rails mode, glass, bicycles, NPC fight back (docs in progress), wanted level and police (docs ready), pickups and flight (docs ready).
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.
