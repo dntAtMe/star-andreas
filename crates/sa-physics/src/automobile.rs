@@ -232,6 +232,8 @@ pub struct VehicleHandling {
     pub anti_dive: f32,
     pub model_flags: u32,
     pub flags: u32,
+    /// `CVehicleAnimGroup` index (handling +0xDE).
+    pub anim_group: u8,
     /// Converted collision damage multiplier (raw * 2000 / mass).
     pub collision_damage: f32,
     /// `fBuoyancyConstant` = mass·0.8 / nPercentSubmerged.
@@ -312,6 +314,7 @@ impl VehicleHandling {
             anti_dive: h.anti_dive,
             model_flags: h.model_flags,
             flags: h.handling_flags,
+            anim_group: h.anim_group,
             collision_damage: 1.0 / h.mass * h.collision_damage * 2000.0,
             buoyancy_constant: h.mass * 0.8 / h.percent_submerged.max(1.0),
             engine_type: h.engine_type,

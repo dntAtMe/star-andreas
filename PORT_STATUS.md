@@ -52,7 +52,7 @@ Last updated: 2026-10-05.
 
 | System | Status | Notes |
 |---|---|---|
-| Enter / exit vehicles | 🟡 | instant, no animations |
+| Enter / exit vehicles | 🟡 | warp in/out (SetPedInCarDirect); seated driver: SetPedPositionInCar (bike lean matrix), AddInCarAnim, car/boat ProcessDrivingAnims (skill sets, steer L/R, look-back), bike ProcessRiderAnims; no enter/exit sequences or doors yet |
 | Player locomotion (PlayerControlZelda, SetRealMoveAnim, sprint, walk_start, run stops) | ✅ | turning on the spot, adrenaline, fat/muscle groups missing |
 | Crouch (CTaskSimpleDuck, PlayerControlDucked, crouch walk, crouch rolls, crouch fire) | ✅ | |
 | Jump / in-air / land tasks | 🟡 | launch, glide, FALL_fall, land anims; climbing and the CTaskSimpleFall get-up missing |
@@ -142,7 +142,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Vehicle enter/exit and seated / riding peds (docs ready), traffic drivers and SIMPLE rails mode, breakable pieces and glass, bicycles, NPC reactions.
+1. Vehicle enter/exit sequences and door anims (stage B/C, docs ready), traffic drivers and SIMPLE rails mode, breakable pieces and glass, bicycles, NPC reactions.
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.

@@ -212,6 +212,8 @@ pub struct World {
     pub traffic: Option<Box<crate::traffic::Traffic>>,
     /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
     pub(crate) gun_fx_toggle: u8,
+    /// `CVehicleAnimGroup` special flags per handling anim group (handling.cfg `^` rows).
+    pub veh_anim_flags: Vec<u32>,
 }
 
 impl Default for World {
@@ -262,6 +264,7 @@ impl World {
             npc_removed: Vec::new(),
             traffic: None,
             gun_fx_toggle: 0,
+            veh_anim_flags: Vec::new(),
         }
     }
 
@@ -480,6 +483,8 @@ impl World {
             }
         }
 
+        // CPedIntelligence::ProcessAfterProcCol: seated peds follow their vehicle.
+        self.process_peds_in_vehicles(ts);
         self.process_effects(ts);
     }
 

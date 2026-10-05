@@ -13,6 +13,8 @@ pub struct VehicleDef {
     pub kind: String,
     pub handling: String,
     pub game_name: String,
+    /// The anims column (bike ride group name: "bikes", "bmx", ...; "null" for most cars).
+    pub anims: String,
     pub wheel_model: i32,
     pub wheel_scale_front: f32,
     pub wheel_scale_rear: f32,
@@ -39,6 +41,7 @@ pub fn parse_vehicles_ide(text: &str) -> Vec<VehicleDef> {
             kind: f[3].to_ascii_lowercase(),
             handling: f[4].to_ascii_uppercase(),
             game_name: f[5].to_string(),
+            anims: f.get(6).map(|s| s.to_ascii_lowercase()).unwrap_or_default(),
             wheel_model: f.get(11).and_then(|s| s.parse().ok()).unwrap_or(-1),
             wheel_scale_front: num(12).unwrap_or(0.7),
             wheel_scale_rear: num(13).or(num(12)).unwrap_or(0.7),
@@ -84,6 +87,8 @@ pub struct Handling {
     pub value: u32,
     pub model_flags: u32,
     pub handling_flags: u32,
+    /// Vehicle anim group (`CVehicleAnimGroup` index, handling +0xDE).
+    pub anim_group: u8,
 }
 
 pub fn parse_handling(text: &str) -> HashMap<String, Handling> {
@@ -133,8 +138,63 @@ pub fn parse_handling(text: &str) -> HashMap<String, Handling> {
             value: n(30) as u32,
             model_flags: h(31),
             handling_flags: h(32),
+            anim_group: f.get(35).and_then(|v| v.parse().ok()).unwrap_or(0),
         };
         out.insert(hd.id.clone(), hd);
+    }
+    out
+}
+
+/// One `^` row of handling.cfg: `CVehicleAnimGroup` (enter_exit.md §1.3).
+#[derive(Debug, Clone, Default)]
+pub struct VehicleAnimGroup {
+    pub id: u8,
+    /// Ped anim groups (column + 88).
+    pub first_group: u8,
+    pub second_group: u8,
+    /// Bit k: column D+k uses the second group.
+    pub second_mask: u32,
+    /// 1 / 2 don't close the door after getting out / in, 4 kart, 8 truck, 16 hover,
+    /// 32 special locked door, 64 don't open the door when getting in.
+    pub special_flags: u32,
+    /// GetIn, JumpOut, GetOut, JackedOut, Fall z-blend times.
+    pub z_times: [f32; 5],
+    /// Door windows (start, stop) in seconds: OpenOut, CloseIn, OpenIn, CloseOut.
+    pub door_start: [f32; 4],
+    pub door_stop: [f32; 4],
+}
+
+/// The `^` rows of handling.cfg.
+pub fn parse_vehicle_anim_groups(text: &str) -> Vec<VehicleAnimGroup> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        let Some(rest) = line.strip_prefix('^') else { continue };
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        if f.len() < 35 {
+            continue;
+        }
+        let n = |i: usize| f[i].parse::<f32>().unwrap_or(0.0);
+        let mut g = VehicleAnimGroup {
+            id: n(0) as u8,
+            first_group: n(1) as u8 + 88,
+            second_group: n(2) as u8 + 88,
+            special_flags: f[34].parse::<i64>().unwrap_or(0) as u32,
+            ..Default::default()
+        };
+        for k in 0..18 {
+            if f[3 + k].parse::<i64>().unwrap_or(0) != 0 {
+                g.second_mask |= 1 << k;
+            }
+        }
+        for k in 0..5 {
+            g.z_times[k] = n(21 + k);
+        }
+        for k in 0..4 {
+            g.door_start[k] = n(26 + 2 * k);
+            g.door_stop[k] = n(27 + 2 * k);
+        }
+        out.push(g);
     }
     out
 }

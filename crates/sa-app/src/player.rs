@@ -97,23 +97,6 @@ pub struct Ped {
     pub frozen: bool,
 }
 
-/// Put the player ped's SA body into (or take it out of) a vehicle: while
-/// inside it doesn't collide or move on its own.
-pub fn ped_set_in_vehicle(sa: &mut SaPhys, id: EntityId, inside: bool) {
-    if let Some(b) = sa.world.body_mut(id) {
-        if inside {
-            b.phys.eflags = (b.phys.eflags | ef::IS_STATIC) & !ef::USES_COLLISION;
-        } else {
-            b.phys.eflags = (b.phys.eflags & !ef::IS_STATIC) | ef::USES_COLLISION;
-        }
-        b.phys.move_speed = Vec3::ZERO;
-    }
-    if let Some(ped) = sa.logic_mut::<PedLogic>(id) {
-        ped.standing = false;
-        ped.anim_velocity = Vec2::ZERO;
-    }
-}
-
 /// Teleport the ped's SA body (Bevy-space position, Bevy yaw).
 pub fn ped_teleport(sa: &mut SaPhys, id: EntityId, pos: Vec3, yaw: Option<f32>) {
     if let Some(b) = sa.world.body_mut(id) {

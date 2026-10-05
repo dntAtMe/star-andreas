@@ -28,10 +28,10 @@ use sa_physics::{
 
 use crate::dynlight::DynLit;
 use crate::{
-    player::{CamFollow, GameRoot, Mode, Ped, frame_transform, ped_set_in_vehicle, ped_teleport},
+    player::{CamFollow, GameRoot, Mode, Ped, frame_transform},
     saphys::{SaBody, SaPhys, SaPhysExt, SaStep, gta_matrix, transform_from_gta},
     stream::{convert_texture, make_image},
-    world::{WorldRes, g2b},
+    world::{WorldRes, b2g, g2b},
 };
 /// Cars cycled by the spawn key.
 const SPAWN_LIST: &[&str] = &["greenwoo", "sabre", "infernus", "bobcat", "savanna", "elegy", "banshee", "sultan"];
@@ -51,7 +51,7 @@ impl Plugin for VehiclePlugin {
         app.init_resource::<Driving>()
             .init_resource::<SpawnQueue>()
             .add_systems(Startup, load_vehicle_db)
-            .add_systems(Update, (traffic_cars, spawn_key, auto_drive, enter_exit, debug_damage, feed_inputs).chain().before(SaStep))
+            .add_systems(Update, (traffic_cars, spawn_key, auto_drive, seat_pending, enter_exit, debug_damage, feed_inputs).chain().before(SaStep))
             .add_systems(Update, (update_wheels, update_boats, update_bikes, update_damage, expire_flying_parts).after(SaStep));
     }
 }
@@ -68,6 +68,8 @@ struct VehicleDb {
     boats: HashMap<String, RawBoatHandling>,
     /// `!` lines (tBikeHandlingData).
     bikes: HashMap<String, RawBikeHandling>,
+    /// `CVehicleAnimGroup` special flags by id (`^` rows).
+    anim_flags: Vec<u32>,
     colors: CarColors,
     /// models/generic/vehicle.txd: shared textures (lights, grunge, ...).
     generic: HashMap<String, (Handle<Image>, bool)>,
@@ -92,8 +94,8 @@ pub struct Vehicle {
     pub speed: f32,
     /// Car health (1000 new, < 250 burning).
     pub health: f32,
-    /// Seat offset (Bevy local space) for placing the hidden driver.
-    seat: Vec3,
+    /// The front-seat dummy (`ped_frontseat`), GTA model space.
+    pub front_seat: Vec3,
     comps: Vec<CompVisual>,
     /// Body materials (darkened when the car blows up).
     materials: Vec<Handle<StandardMaterial>>,
@@ -172,13 +174,19 @@ fn load_vehicle_db(mut commands: Commands, root: Res<GameRoot>, mut images: ResM
     let handling = vehicle::parse_handling(&handling_cfg);
     let boats = vehicle::parse_boat_handling(&handling_cfg);
     let bikes = vehicle::parse_bike_handling(&handling_cfg);
+    let mut anim_flags = vec![0u32; 30];
+    for g in vehicle::parse_vehicle_anim_groups(&handling_cfg) {
+        if let Some(f) = anim_flags.get_mut(g.id as usize) {
+            *f = g.special_flags;
+        }
+    }
     let colors = vehicle::parse_carcols(&read("data/carcols.dat")?);
     let generic = load_txd(&std::fs::read(root.0.join("models/generic/vehicle.txd"))?, &mut images)?;
     let mut models: Vec<String> =
         defs.values().filter(|d: &&VehicleDef| d.kind.eq_ignore_ascii_case("car")).map(|d| d.model.clone()).collect();
     models.sort();
     commands.insert_resource(VehicleModels(models));
-    commands.insert_resource(VehicleDb { defs, handling, boats, bikes, colors, generic, next_spawn: 0 });
+    commands.insert_resource(VehicleDb { defs, handling, boats, bikes, anim_flags, colors, generic, next_spawn: 0 });
     Ok(())
 }
 
@@ -449,12 +457,15 @@ fn spawn_vehicle(
 
     let raw_col = clump.collision.as_deref().map(col::parse_model).transpose()?;
 
-    let seat = clump
+    let front_seat = clump
         .frames
         .iter()
         .position(|f| f.name.eq_ignore_ascii_case("ped_frontseat"))
-        .map(|i| g2b(clump.frame_world(i).1))
+        .map(|i| Vec3::from(clump.frame_world(i).1))
         .unwrap_or(Vec3::ZERO);
+    if sa.world.veh_anim_flags.is_empty() {
+        sa.world.veh_anim_flags = db.anim_flags.clone();
+    }
 
     // SA physics body.
     let dummy_of = |n: &str| {
@@ -492,7 +503,7 @@ fn spawn_vehicle(
         };
         bh.map(|bh| {
             let mut col = sa_col.clone();
-            let b = Bike::new(
+            let mut b = Bike::new(
                 bvh,
                 bh,
                 def.id as u16,
@@ -502,6 +513,7 @@ fn spawn_vehicle(
                 &mut col,
                 sa.world.surfaces.clone(),
             );
+            b.ride_group = sa_physics::anim::AnimManager::group_by_name(&def.anims).unwrap_or(2);
             (b, col)
         })
     } else {
@@ -616,7 +628,7 @@ fn spawn_vehicle(
                 wheels,
                 speed: 0.0,
                 health: 1000.0,
-                seat,
+                front_seat,
                 comps,
                 materials: body_materials,
                 wheel_parts,
@@ -743,9 +755,8 @@ fn auto_drive(
         Ok((car, _)) => {
             info!("SA_DRIVE: spawned {name} as {car:?}");
             driving.0 = Some(car);
-            ped_set_in_vehicle(&mut sa, p.sa, true);
-            commands.entity(ped_e).insert(Visibility::Hidden).remove::<CamFollow>();
-            commands.entity(car).insert(CamFollow { height: 1.2, dist: 7.0 });
+            commands.entity(ped_e).remove::<CamFollow>();
+            commands.entity(car).insert((CamFollow { height: 1.2, dist: 7.0 }, PendingSeat(p.sa)));
         }
         Err(e) => warn!("SA_DRIVE {name}: {e:#}"),
     }
@@ -794,20 +805,21 @@ fn enter_exit(
 ) {
     let (ped_e, ped_tf, ped) = *ped;
     if let Some(car) = driving.0 {
-        let Ok((_, car_tf, v)) = cars.get(car) else {
+        let Ok((_, car_tf, _)) = cars.get(car) else {
             warn!("driven car {car:?} has no Vehicle; leaving it");
             driving.0 = None;
-            ped_set_in_vehicle(&mut sa, ped.sa, false);
+            let pos = Vec3::from(b2g(ped_tf.translation));
+            let yaw = ped_tf.rotation.to_euler(EulerRot::YXZ).0;
+            sa.world.set_ped_out_of_car(ped.sa, pos, yaw);
+            commands.entity(ped_e).insert(CamFollow { height: 0.6, dist: 3.5 });
             return;
         };
-        // Keep the hidden driver in the seat so the world streams around the car.
-        ped_teleport(&mut sa, ped.sa, car_tf.transform_point(v.seat), None);
         if keys.just_pressed(KeyCode::KeyF) && *mode == Mode::Walk {
             let left = car_tf.rotation * Vec3::NEG_X;
             let yaw = car_tf.rotation.to_euler(EulerRot::YXZ).0;
-            ped_set_in_vehicle(&mut sa, ped.sa, false);
-            ped_teleport(&mut sa, ped.sa, car_tf.translation + left * 2.0 + Vec3::Y * 0.6, Some(yaw));
-            commands.entity(ped_e).insert((Visibility::Inherited, CamFollow { height: 0.6, dist: 3.5 }));
+            let pos = Vec3::from(b2g(car_tf.translation + left * 2.0 + Vec3::Y * 0.6));
+            sa.world.set_ped_out_of_car(ped.sa, pos, yaw);
+            commands.entity(ped_e).insert(CamFollow { height: 0.6, dist: 3.5 });
             commands.entity(car).remove::<CamFollow>();
             driving.0 = None;
         }
@@ -822,10 +834,23 @@ fn enter_exit(
         .filter(|(_, d)| *d < 5.0)
         .min_by(|a, b| a.1.total_cmp(&b.1));
     if let Some((car, _)) = nearest {
-        driving.0 = Some(car);
-        ped_set_in_vehicle(&mut sa, ped.sa, true);
-        commands.entity(ped_e).insert(Visibility::Hidden).remove::<CamFollow>();
-        commands.entity(car).insert(CamFollow { height: 1.2, dist: 7.0 });
+        let Ok((_, _, v)) = cars.get(car) else { return };
+        if sa.world.set_ped_in_car_direct(ped.sa, v.sa, v.front_seat) {
+            driving.0 = Some(car);
+            commands.entity(ped_e).remove::<CamFollow>();
+            commands.entity(car).insert(CamFollow { height: 1.2, dist: 7.0 });
+        }
+    }
+}
+
+/// A car spawned for the player this frame: seat the ped once its body exists.
+#[derive(Component)]
+struct PendingSeat(EntityId);
+
+fn seat_pending(mut commands: Commands, mut sa: ResMut<SaPhys>, cars: Query<(Entity, &Vehicle, &PendingSeat)>) {
+    for (e, v, p) in &cars {
+        sa.world.set_ped_in_car_direct(p.0, v.sa, v.front_seat);
+        commands.entity(e).remove::<PendingSeat>();
     }
 }
 

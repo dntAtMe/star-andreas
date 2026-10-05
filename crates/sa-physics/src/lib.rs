@@ -22,6 +22,7 @@ pub mod fire;
 pub mod fxhelpers;
 pub mod gun;
 pub mod ik;
+pub mod incar;
 pub mod pair;
 pub mod ped;
 pub mod peddamage;

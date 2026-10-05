@@ -121,7 +121,7 @@ pub struct Bike {
     pub wheel_rot: [f32; 2],
     /// +0x58C steer stick, +0x650 lean stick (+1 = forward).
     steer_in: f32,
-    lean_in: f32,
+    pub lean_in: f32,
     /// +0x494 target steer (rad, + = left), +0x644 actual.
     pub steer: f32,
     pub steer_actual: f32,
@@ -150,7 +150,9 @@ pub struct Bike {
     pub engine_on: bool,
     rng: Rand,
     /// The steering frame axis (rake) and colModel min z (chassis drop).
-    col_min_z: f32,
+    pub col_min_z: f32,
+    /// +0x640 `GetRideAnimData()` ride anim group (vehicles.ide anims: bikes 2 .. quad 10).
+    pub ride_group: usize,
 }
 
 impl Bike {
@@ -244,6 +246,7 @@ impl Bike {
             engine_on: false,
             rng: Rand::new(model as u32 * 977 + 3),
             col_min_z,
+            ride_group: 2,
         }
     }
 

@@ -113,6 +113,8 @@ pub struct PedLogic {
     pub pending_damage: Vec<crate::peddamage::DamageIn>,
     /// Random NPC state (wander task, population bookkeeping); None for the player.
     pub npc: Option<crate::npc::NpcState>,
+    /// ped+0x58C with ped+0x46C & 0x100: seated in a vehicle (CTaskSimpleCarDrive).
+    pub vehicle: Option<crate::incar::InVehicle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,6 +154,7 @@ impl PedLogic {
             },
             pending_damage: Vec::new(),
             npc: None,
+            vehicle: None,
         }
     }
 
