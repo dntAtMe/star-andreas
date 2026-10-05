@@ -524,6 +524,14 @@ struct Popup {
     timer: i32,
 }
 
+/// draw_hud's persistent state: the last wanted level, the name popups, the pooled HUD meshes.
+#[derive(Default)]
+struct HudState {
+    last_level: i32,
+    popups: NamePopups,
+    pool: Vec<(Entity, Handle<Mesh>, Handle<ColorMaterial>)>,
+}
+
 /// CPlaceName + the HUD popups.
 #[derive(Default)]
 struct NamePopups {
@@ -836,10 +844,11 @@ fn draw_hud(
     cars: Query<&crate::vehicle::Vehicle>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut last_level: Local<i32>,
-    mut popups: Local<NamePopups>,
+    mut st: Local<HudState>,
     time: Res<Time>,
+    mut hud_meshes: Query<(&mut Transform, &mut Visibility), With<HudMesh>>,
 ) {
+    let HudState { last_level, popups, pool } = &mut *st;
     let Some(assets) = assets else { return };
     let sc = Scale { w: window.width(), h: window.height() };
     let (w, _h) = (sc.w, sc.h);
@@ -1014,7 +1023,7 @@ fn draw_hud(
         assets.get(&key)
     });
     let ms = (time.delta_secs() * 50.0 * 0.02 * 1000.0) as i32;
-    draw_name_popups(&mut popups, &assets, &sc, ms, &mut out);
+    draw_name_popups(popups, &assets, &sc, ms, &mut out);
 
     // CHud::DrawRadar.
     let veh = driving.0.and_then(|e| cars.get(e).ok()).map(|v| v.sa);
@@ -1094,20 +1103,45 @@ fn draw_hud(
             Tex::Font(i) => assets.font_tex[i as usize].clone(),
             Tex::Image(id) => out.images.get(&id).cloned().unwrap_or_else(|| assets.white.clone()),
         };
-        let mat = materials.add(ColorMaterial { color: Color::WHITE, texture: Some(image), alpha_mode: bevy::sprite_render::AlphaMode2d::Blend, ..default() });
         let zz = z + k as f32 * 0.01;
-        used.push((meshes.add(mesh), mat, zz));
+        // Reuse the pooled entity / mesh / material of this slot (no per-frame asset churn).
+        if let Some(slot) = pool.get(k) {
+            if let Some(mut m) = meshes.get_mut(&slot.1) {
+                *m = mesh;
+            }
+            if let Some(mut mm) = materials.get_mut(&slot.2) {
+                if mm.texture.as_ref() != Some(&image) {
+                    mm.texture = Some(image);
+                }
+            }
+            used.push((k, zz));
+        } else {
+            let mh = meshes.add(mesh);
+            let mat = materials.add(ColorMaterial { color: Color::WHITE, texture: Some(image), alpha_mode: bevy::sprite_render::AlphaMode2d::Blend, ..default() });
+            let e = commands.spawn((Mesh2d(mh.clone()), MeshMaterial2d(mat.clone()), Transform::from_xyz(0.0, 0.0, zz), HudMesh)).id();
+            pool.push((e, mh, mat));
+            used.push((k, zz));
+        }
     }
-    // The HUD meshes are rebuilt every frame.
-    commands.queue(move |world: &mut World| {
-        let old: Vec<Entity> = world.query_filtered::<Entity, With<HudMesh>>().iter(world).collect();
-        for e in old {
-            world.despawn(e);
+    // Pooled HUD meshes: the used slots visible at their z, the rest hidden.
+    for (k, slot) in pool.iter().enumerate() {
+        let z = used.iter().find(|u| u.0 == k).map(|u| u.1);
+        if let Ok((mut tf, mut vis)) = hud_meshes.get_mut(slot.0) {
+            match z {
+                Some(z) => {
+                    tf.translation.z = z;
+                    if *vis != Visibility::Inherited {
+                        *vis = Visibility::Inherited;
+                    }
+                }
+                None => {
+                    if *vis != Visibility::Hidden {
+                        *vis = Visibility::Hidden;
+                    }
+                }
+            }
         }
-        for (mesh, mat, z) in used {
-            world.spawn((Mesh2d(mesh), MeshMaterial2d(mat), Transform::from_xyz(0.0, 0.0, z), HudMesh));
-        }
-    });
+    }
 }
 
 /// `CRadar` state for one draw.

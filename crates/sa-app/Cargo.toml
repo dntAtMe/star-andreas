@@ -21,3 +21,5 @@ sc2 = ["dep:sc2-bevy"]
 # Bevy as a shared library: incremental rebuilds only relink our crate.
 # Disable for distributable builds: cargo build --release --no-default-features
 dev = ["bevy/dynamic_linking"]
+# Chrome trace of the frame (TRACE_CHROME=<file.json>) for profiling.
+trace = ["bevy/trace_chrome"]

@@ -231,7 +231,7 @@ fn update(
             let col = (col * 0.5 + Vec3::splat(0.5)).min(Vec3::ONE);
             l.color = Color::srgb(col.x, col.y, col.z);
             l.illuminance = sun_strength * 0.85 * std::f32::consts::PI * 980.0;
-            l.shadow_maps_enabled = sun_strength > 0.0;
+            l.shadow_maps_enabled = sun_strength > 0.0 && !std::env::var("SA_GFXSKIP").is_ok_and(|v| v.contains("shadow"));
             let d = -g2b(to_sun.to_array()).normalize_or(Vec3::Y);
             *tf = Transform::default().looking_to(d, if d.abs_diff_eq(Vec3::Y, 1e-3) || d.abs_diff_eq(-Vec3::Y, 1e-3) { Vec3::Z } else { Vec3::Y });
             continue;

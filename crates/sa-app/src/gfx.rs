@@ -92,7 +92,9 @@ fn apply_camera(
             if let Some(sky) = sky.as_ref() {
                 c.insert(bevy::light::GeneratedEnvironmentMapLight { environment_map: sky.0.clone(), intensity: std::env::var("SA_ENVI").ok().and_then(|v| v.parse().ok()).unwrap_or(50.0), ..default() });
             }
-            if skip.contains("ssao") {
+            // SSAO needs the depth + normal prepass (a whole extra render phase); SA's prelit map
+            // already has baked occlusion, so it is opt-in (SA_SSAO=1).
+            if skip.contains("ssao") || std::env::var("SA_SSAO").is_err() {
                 c.remove::<(ScreenSpaceAmbientOcclusion, NormalPrepass, DepthPrepass)>();
             }
             if skip.contains("smaa") {
@@ -151,7 +153,7 @@ struct GfxApplied(bool);
 
 /// The cascades for the sun: sharp near the player, out to the streaming distance.
 pub fn sun_cascades() -> bevy::light::CascadeShadowConfig {
-    CascadeShadowConfigBuilder { num_cascades: 3, minimum_distance: 0.3, maximum_distance: 120.0, first_cascade_far_bound: 16.0, overlap_proportion: 0.2 }
+    CascadeShadowConfigBuilder { num_cascades: 2, minimum_distance: 0.3, maximum_distance: 100.0, first_cascade_far_bound: 22.0, overlap_proportion: 0.2 }
         .build()
 }
 
