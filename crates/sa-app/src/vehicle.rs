@@ -504,7 +504,7 @@ fn spawn_vehicle(
     let frame_pos = |n: &str| {
         clump.frames.iter().position(|f| f.name.eq_ignore_ascii_case(n)).map(|i| Vec3::from(clump.frame_world(i).1))
     };
-    let bike = if def.kind == "bike" {
+    let bike = if def.kind == "bike" || def.kind == "bmx" {
         let mut bvh = vh.clone();
         // ConvertDataToGameUnits for bikes: reverse cap -0.05, not clamped.
         bvh.trans.max_reverse = -0.05;
@@ -1254,7 +1254,13 @@ pub(crate) fn spawn_script_car(
     let db = db?;
     let bpos = crate::world::g2b(pos.to_array());
     match spawn_vehicle(&mut commands, &world.0, &mut sa, &db, &mut meshes, &mut materials, &mut images, &name, bpos, heading, 0) {
-        Ok(r) => Some(r),
+        Ok(r) => {
+            // CCarCtrl::CreateCarForScript: z += GetDistanceFromCentreOfMassToBaseOfModel.
+            if let Some(b) = sa.world.body_mut(r.1) {
+                b.phys.matrix.pos.z = pos.z - b.col.bbox_min.z;
+            }
+            Some(r)
+        }
         Err(e) => {
             warn!("script car {name}: {e:#}");
             None

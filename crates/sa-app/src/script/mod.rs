@@ -543,6 +543,8 @@ impl Host for WorldHost<'_> {
                 let p = if p.z <= -100.0 { Vec3::new(p.x, p.y, self.sa().world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z)) } else { p };
                 match self.world.run_system_cached_with(crate::vehicle::spawn_script_car, (name.clone(), p, 0.0)).ok().flatten() {
                     Some(c) => {
+                        let at = self.world.resource::<SaPhys>().world.body(c.1).map(|b| b.phys.matrix.pos);
+                        debug!("script: CREATE_CAR {m} ({name}) at {at:?}");
                         self.st.cars.insert(h, c);
                     }
                     None => warn!("script: CREATE_CAR {m} ({name}) failed"),
