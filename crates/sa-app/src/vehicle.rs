@@ -829,6 +829,23 @@ fn enter_exit(
             commands.entity(ped_e).insert(CamFollow { height: 0.6, dist: 3.5 });
             return;
         };
+        // The leave task put the ped out: follow it.
+        let seated = sa.logic::<sa_physics::ped::PedLogic>(ped.sa).is_some_and(|p| p.vehicle.is_some());
+        if !seated {
+            commands.entity(ped_e).insert(CamFollow { height: 0.6, dist: 3.5 });
+            commands.entity(car).remove::<CamFollow>();
+            driving.0 = None;
+            return;
+        }
+        // SA_AUTOEXIT=<secs>: press enter once at that time (debug).
+        let auto_exit = !*auto_enter
+            && std::env::var("SA_AUTOEXIT").ok().and_then(|v| v.parse::<f32>().ok()).is_some_and(|t| time.elapsed_secs() > t);
+        if auto_exit {
+            *auto_enter = true;
+        }
+        if (keys.just_pressed(KeyCode::KeyF) || auto_exit) && *mode == Mode::Walk && sa.world.start_leave_car(ped.sa) {
+            return;
+        }
         if keys.just_pressed(KeyCode::KeyF) && *mode == Mode::Walk {
             let left = car_tf.rotation * Vec3::NEG_X;
             let yaw = car_tf.rotation.to_euler(EulerRot::YXZ).0;
@@ -897,14 +914,17 @@ fn feed_inputs(
     mut cars: Query<(Entity, &mut Vehicle)>,
 ) {
     let auto = std::env::var("SA_AUTOWALK").is_ok();
+    // CTaskComplexLeaveCar waiting for the car to slow down: brake + handbrake (0x6AD6CB).
+    let leaving = sa.world.player_id().and_then(|p| sa.logic::<sa_physics::ped::PedLogic>(p)).is_some_and(|p| p.leave.is_some());
     for (e, mut v) in &mut cars {
-        let controlled = driving.0 == Some(e) && *mode == Mode::Walk;
+        let controlled = driving.0 == Some(e) && *mode == Mode::Walk && !leaving;
         let key = |k: KeyCode| controlled && keys.pressed(k);
+        let braking = leaving && driving.0 == Some(e);
         let input = CarInput {
             steer: (key(KeyCode::KeyA) as i32 - key(KeyCode::KeyD) as i32) as f32,
             accelerate: if key(KeyCode::KeyW) || (controlled && auto) { 1.0 } else { 0.0 },
-            brake: if key(KeyCode::KeyS) { 1.0 } else { 0.0 },
-            handbrake: key(KeyCode::Space),
+            brake: if key(KeyCode::KeyS) || braking { 1.0 } else { 0.0 },
+            handbrake: key(KeyCode::Space) || braking,
         };
         let ai = sa.logic::<Automobile>(v.sa).is_some_and(|c| c.autopilot.is_some());
         if let Some(body) = sa.world.body_mut(v.sa) {

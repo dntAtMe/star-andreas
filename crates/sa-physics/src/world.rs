@@ -528,6 +528,7 @@ impl World {
         // CPedIntelligence::ProcessAfterProcCol: seated peds follow their vehicle.
         self.process_peds_in_vehicles(ts);
         self.process_peds_entering(ts);
+        self.process_peds_leaving(ts);
         self.process_effects(ts);
         // CGame::Process: g_breakMan.Update after the world.
         self.process_breaks(ts);

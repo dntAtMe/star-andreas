@@ -453,6 +453,9 @@ impl World {
             .into_iter()
             .filter_map(|id| {
                 let p = self.body(id)?.logic.as_any().downcast_ref::<PedLogic>()?;
+                if p.leave.as_ref().is_some_and(|l| l.out_of_seat()) {
+                    return None;
+                }
                 Some((id, p.vehicle.as_ref()?.veh))
             })
             .collect();

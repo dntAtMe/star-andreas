@@ -119,6 +119,8 @@ pub struct PedLogic {
     pub run_over_by_player: bool,
     /// CTaskComplexEnterCarAsDriver (the player getting into a car).
     pub enter: Option<crate::entercar::EnterCar>,
+    /// CTaskComplexLeaveCar (the player getting out).
+    pub leave: Option<crate::entercar::LeaveCar>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,6 +163,7 @@ impl PedLogic {
             vehicle: None,
             run_over_by_player: false,
             enter: None,
+            leave: None,
         }
     }
 
