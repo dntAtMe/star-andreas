@@ -52,7 +52,7 @@ Last updated: 2026-10-05.
 
 | System | Status | Notes |
 |---|---|---|
-| NPC event responses (CEventGroup / decision makers) | 🟡 | PedEvent.txt + R_Norm/R_Tough/R_Weak/... decision makers with the add-time weighted roll; shot fired / whizzed by (45 m, silenced needs sight), gun aimed at (free-aim ray, seeing range), potential get run over (SlowCarDownForPeds + handler: evasive step / dive + get up / hands up / shake fist), seen panicked ped, dead ped, damage; responses: smart flee 911/910 (sprint wander away by octant, re-target, 60 m end, path hand-over), duck 415/427, react to gun aimed at 601 (heading, hands up 3–5 s, walk away 10 s; cower for GUN_PANIC), temporary-event parking; no acquaintances, groups, inform friends, look-at, fight back (1000), flee 909, investigate dead ped 600, speech |
+| NPC event responses (CEventGroup / decision makers) | 🟡 | PedEvent.txt + R_Norm/R_Tough/R_Weak/... decision makers with the add-time weighted roll; shot fired / whizzed by (45 m, silenced needs sight), gun aimed at (free-aim ray, seeing range), potential get run over (SlowCarDownForPeds + handler: evasive step / dive + get up / hands up / shake fist), seen panicked ped, dead ped, damage; responses: smart flee 911/910 (sprint wander away by octant, re-target, 60 m end, path hand-over), duck 415/427, react to gun aimed at 601 (heading, hands up 3–5 s, walk away 10 s; cower for GUN_PANIC), temporary-event parking; fight back: KillPedOnFoot 1000 → melee 1001 (seek at a run to 1 m, FightingControl 1019: attack timer from the shooting rate, block rolls, ChooseMovement shuffles/steps, AIChooseAttackMove, 8 m give-up), unarmed peds flee armed attackers; no acquaintances, groups, inform friends, look-at, armed fighting (1002), weapon give at fight start, flee 909, investigate dead ped 600, speech |
 | Wanted level (CWanted / CCrime) | 🟡 | chaos ↔ level table and caps, SetWantedLevel / NoDrop / Cheat / max level, ReportCrime with WorkOutPolicePresence (cops, police vehicles), the 16-slot crime queue (500 ms report, once per victim per 10 s), ReportCrimeNow K table and parole, decay (1/s, 2/s countryside outdoors, none ≥ 2 stars in cities, not near police or in a cop car); crimes from shots (1), bullet hits (4), player damage (2), explosions (4/5), running peds over (10/11), car theft (6), destroyed cars (20); HUD stars, cops, police cars, busted not yet |
 | Enter / exit vehicles | 🟡 | warp in/out (SetPedInCarDirect); seated driver: SetPedPositionInCar (bike lean matrix), AddInCarAnim, car/boat ProcessDrivingAnims (skill sets, steer L/R, look-back), bike ProcessRiderAnims; no enter/exit sequences or doors yet |
 | Player locomotion (PlayerControlZelda, SetRealMoveAnim, sprint, walk_start, run stops) | ✅ | turning on the spot, adrenaline, fat/muscle groups missing |
@@ -144,7 +144,7 @@ Last updated: 2026-10-05.
 
 ## Suggested next steps
 
-1. Vehicle enter/exit sequences and door anims (stage B/C, docs ready), traffic drivers and SIMPLE rails mode, glass, bicycles, NPC fight back (docs in progress), wanted level and police (docs ready), pickups and flight (docs ready).
+1. Vehicle enter/exit sequences and door anims (stage B/C, docs ready), traffic drivers and SIMPLE rails mode, glass, bicycles, NPC armed combat 1002 (docs ready), wanted level and police (docs ready), pickups and flight (docs ready).
 2. NPC ped damage responses.
 3. Traffic and pedestrian population.
 4. Real-time shadows and skid marks.

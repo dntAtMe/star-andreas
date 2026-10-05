@@ -348,8 +348,25 @@ impl BodyLogic for PedLogic {
                     }
                     let ri = npc.resp_in;
                     let mut me = crate::pedevents::PedNow { pos: p.matrix.pos, move_speed: p.move_speed, aim_rot: &mut self.aim_rot, cur_rot: self.cur_rot };
-                    if !npc.process_response(&mut me, clump, &m, &ri, &i) {
+                    if !npc.process_response(&mut me, clump, &m, &mut self.tasks, &ri, &i) {
                         npc.process(p.matrix.pos, p.move_speed, &mut self.aim_rot, self.cur_rot, &i);
+                    }
+                    // Secondary slot 0: an NPC's CTaskSimpleFight.
+                    if let Some(mut f) = self.tasks.fight.take() {
+                        let mut core = PedCore {
+                            p,
+                            clump,
+                            cur_rot: &mut self.cur_rot,
+                            aim_rot: &mut self.aim_rot,
+                            turn_rate: &mut self.turn_rate,
+                            standing: self.standing,
+                            ground_below: self.ground_below,
+                            ground_entity: self.ground_entity.is_some(),
+                            ground_car: self.ground_entity.is_some() && self.ground_is_car,
+                        };
+                        if !f.process_ped(&mut self.tasks, &mut core, ctx, &m) {
+                            self.tasks.fight = Some(f);
+                        }
                     }
                 }
                 npc.set_move_anim(clump, &m);

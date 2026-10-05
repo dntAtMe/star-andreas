@@ -158,6 +158,12 @@ pub struct FightTask {
     pub current_move: i8,
     next_cmd: i8,
     pub last_cmd: i8,
+    /// NPC fighters: what AIChooseAttackMove reads about the target (set each frame by
+    /// CTaskSimpleFightingControl): lying on the ground, and (wanted level, health) when it is
+    /// the player.
+    pub ai_target_down: bool,
+    pub ai_target_wanted_hp: Option<(i32, f32)>,
+    ai_rng: crate::damage::Rand,
 }
 
 impl FightTask {
@@ -176,7 +182,38 @@ impl FightTask {
             current_move: -1,
             next_cmd: command,
             last_cmd: 0,
+            ai_target_down: false,
+            ai_target_wanted_hp: None,
+            ai_rng: crate::damage::Rand::new(idle_period ^ 0x5EED),
         }
+    }
+
+    /// `AIChooseAttackMove` (0x624A40): 20 % ATTACK3 (not a knock-down hit on a wanted player
+    /// above 20 hp), the ground kick at a target lying down, 30 % ATTACK2, else ATTACK1.
+    fn ai_choose_attack_move(&mut self, t: &PedTasks) -> i32 {
+        let Some(md) = t.melee.as_deref() else { return 0 };
+        let mut f = md.combo(self.combo_set.max(4)).flags & 0xFF;
+        if (5..=7).contains(&self.combo_set) {
+            f &= t.fight_moves as u16;
+        }
+        let r = self.ai_rng.rand01();
+        let check_a2 = if r > 0.8 && f & mf::ATTACK_3 != 0 {
+            // FALL_3: no knock-down hit on a wanted player above 20 hp.
+            if f & 0x40 != 0 && self.ai_target_wanted_hp.is_some_and(|(w, hp)| w > 0 && hp > 20.0) {
+                true
+            } else {
+                return 2;
+            }
+        } else {
+            false
+        };
+        if !check_a2 && self.ai_target_down && f & mf::GROUND != 0 {
+            return 3;
+        }
+        if r > 0.5 && f & mf::ATTACK_2 != 0 {
+            return 1;
+        }
+        0
     }
 
     /// `ControlFight` (0x61C5E0): the maximum command of the frame wins.
@@ -446,10 +483,28 @@ impl FightTask {
                 });
             }
             3..=10 => {
-                if t.is_player {
-                    // The player shuffles through 0x61C9B0.
-                } else {
-                    // NPC step anims are not ported.
+                if !t.is_player {
+                    // NPC shuffle (3..6, held, FightSH_FWD/Left/BWD/Right) and steps (7..10).
+                    let n = self.next_cmd;
+                    self.combo_set = 1;
+                    let anim = match n {
+                        7 => 0x2D,
+                        9 => 0x2E,
+                        8 => 0x29 + 1,
+                        10 => 0x29 + 2,
+                        _ => 0x29 + (n as i16 - 3),
+                    };
+                    self.anim = c.clump.blend_animation(m, group::DEFAULT, anim, 8.0).map(|i| {
+                        let a = &mut c.clump.assocs[i];
+                        if n == 3 {
+                            a.flags |= af::DELETE_BLENDED_OUT;
+                        } else {
+                            a.flags &= !(af::LOOPED | af::MOVEMENT);
+                            a.flags |= af::FADE_OUT_FINISHED;
+                            a.finish_cb = true;
+                        }
+                        a.uid
+                    });
                 }
             }
             11..=14 => {
@@ -515,7 +570,10 @@ impl FightTask {
             }
             if (self.next_cmd != 0 || self.combo_set != 0) && self.last_cmd != cmd::END_WALK {
                 self.combo_set = self.get_combo_type(t, self.next_cmd);
-                if (3..=6).contains(&self.next_cmd) && t.is_player {
+                if !t.is_player {
+                    let mv = self.ai_choose_attack_move(t);
+                    self.start_anim(t, c, m, mv);
+                } else if (3..=6).contains(&self.next_cmd) {
                     self.shuffle(t, c.clump, m);
                 } else {
                     let mv = self.choose_attack_move(t, c);
@@ -524,7 +582,21 @@ impl FightTask {
             }
         } else if let Some(u) = self.anim {
             let cs = self.combo_set;
-            if cs >= 4 && self.last_cmd == cmd::BLOCK {
+            if cs < 4 {
+                // NPC shuffle / step anim.
+                if let Some(a) = c.clump.by_uid_mut(u) {
+                    let len = a.hier.total_length.max(1e-6);
+                    if matches!(self.last_cmd, 8 | 10) && a.time / len > 0.4 && a.blend_delta > -4.0 {
+                        a.blend_delta = -4.0;
+                    } else if self.last_cmd == cmd::SHUFFLE_F {
+                        if self.next_cmd == cmd::SHUFFLE_F {
+                            self.next_cmd = 0;
+                        } else if a.blend_delta > -4.0 {
+                            a.blend_delta = -4.0;
+                        }
+                    }
+                }
+            } else if cs >= 4 && self.last_cmd == cmd::BLOCK {
                 let combo = md.combo(cs);
                 let (hold, alt) = (combo.block_hold_time, combo.block_alt_hold_time);
                 if self.next_cmd == cmd::BLOCK {

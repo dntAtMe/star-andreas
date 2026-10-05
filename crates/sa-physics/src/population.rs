@@ -545,6 +545,10 @@ impl crate::world::World {
         logic.clump = Some(Box::new(clump));
         logic.tasks.anims = Some(anims);
         logic.tasks.anim_group = info.anim_group;
+        if let Some(pl) = self.player_id().and_then(|p| self.body(p)).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()) {
+            logic.tasks.melee = pl.tasks.melee.clone();
+            logic.tasks.infos = pl.tasks.infos.clone();
+        }
         let mut npc = crate::npc::NpcState::new(req.model, req.ped_type, seed, info.anim_group, req.dir, paths, self.now_ms);
         npc.dm = dm;
         npc.resp_in.shooting_rate = shooting_rate;

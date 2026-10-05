@@ -4,9 +4,12 @@
 //! response tasks (smart flee 911/910, duck 415/427, react-to-gun-aimed-at 601 with hands up
 //! 413 / cower 412, evasive step 502 / dive 504, shake fist 302).
 //!
+//! KillPedOnFoot (1000) with its melee child (1001: seek, then CTaskSimpleFightingControl)
+//! lets an unarmed ped fight back (ped_combat.md).
+//!
 //! Not ported: acquaintances from ped.dat (no friend/enemy source columns beyond "same ped
 //! type"), groups, inform friends / group (1700 / 1200) and the 300 look-at side effects,
-//! KillPedOnFoot (1000) and the other fight responses (an NPC that would fight does nothing),
+//! the armed kill task (1002) and GiveWeaponAtStartOfFight, dragging targets out of cars,
 //! FleeEntity 909, InvestigateDeadPed 600, the drive-away car responses, ambient speech.
 
 use glam::{Vec2, Vec3};
@@ -268,6 +271,26 @@ pub enum Resp {
     EvasiveStep { heading: f32, anim: Option<u32> },
     /// stage 0 turn, 1 dive, 2 get up.
     EvasiveDive { heading: f32, stage: u8, anim: Option<u32> },
+    /// CTaskComplexKillPedOnFoot (1000) → KillPedOnFootMelee (1001).
+    KillPedOnFoot(KillPedOnFoot),
+}
+
+/// CTaskComplexKillPedOnFoot (1000) with the melee child: 907 CTaskComplexSeekEntity (run to
+/// 1 m) or 1019 CTaskSimpleFightingControl (the CTaskSimpleFight driver).
+#[derive(Debug, Clone)]
+pub struct KillPedOnFoot {
+    pub target: EntityId,
+    /// 1019 is running (else 907 seek).
+    pub fighting: bool,
+    /// FightingControl +0x1C / +0x20.
+    next_attack: u32,
+    block_left: u32,
+}
+
+impl KillPedOnFoot {
+    pub fn new(target: EntityId) -> Self {
+        Self { target, fighting: false, next_attack: 0, block_left: 0 }
+    }
 }
 
 impl Resp {
@@ -275,6 +298,7 @@ impl Resp {
     pub fn threat(&self) -> Option<EntityId> {
         match self {
             Resp::SmartFlee(f) => Some(f.threat),
+            Resp::KillPedOnFoot(k) => Some(k.target),
             Resp::AimedAt { aimer, stage: AimedAt::WalkAway { .. } | AimedAt::HandsUp { .. } | AimedAt::Cower { .. } | AimedAt::Heading } => Some(*aimer),
             _ => None,
         }
@@ -286,6 +310,11 @@ impl Resp {
 pub struct RespIn {
     /// The response threat's current position (None when it is gone).
     pub threat_pos: Option<Vec3>,
+    /// The threat is a living ped / lying on the ground / (wanted level, health) if the player.
+    pub threat_alive: bool,
+    pub threat_is_ped: bool,
+    pub threat_down: bool,
+    pub threat_wanted_hp: Option<(i32, f32)>,
     /// The ped's pedstats shooting rate (+0x30, read as a signed byte for GUN_PANIC).
     pub shooting_rate: u16,
 }
@@ -336,6 +365,7 @@ impl NpcState {
                 427 => duck(38527),
                 911 => flee(*by, true, 60.0),
                 1000 if !can_fight => flee(*by, false, 60.0),
+                1000 => Some(Resp::KillPedOnFoot(KillPedOnFoot::new(*by))),
                 _ => None,
             },
             // 0x4C2840 gun aimed at.
@@ -351,6 +381,7 @@ impl NpcState {
                     601 => Some(Resp::AimedAt { aimer: *aimer, stage: AimedAt::Heading }),
                     911 => flee(*aimer, false, 60.0),
                     1000 if !can_fight => flee(*aimer, false, 60.0),
+                    1000 => Some(Resp::KillPedOnFoot(KillPedOnFoot::new(*aimer))),
                     _ => None,
                 }
             }
@@ -382,6 +413,7 @@ impl NpcState {
             (EventKind::Damage { src }, t) => match (t, src) {
                 (911, Some(s)) => flee(*s, false, 60.0),
                 (1000, Some(s)) if !can_fight => flee(*s, false, 60.0),
+                (1000, Some(s)) => Some(Resp::KillPedOnFoot(KillPedOnFoot::new(*s))),
                 (415, _) => duck(rand_range(&mut self.rng, 2000, 5000) as u32),
                 (427, _) => duck(0xE0FF),
                 _ => None,
@@ -408,6 +440,7 @@ impl NpcState {
         self.end_response_anims(clump);
         // The world updates the threat position from the next frame on.
         self.resp_in.threat_pos = e.src_pos;
+        self.resp_in.threat_alive = true;
         if e.kind.temporary() {
             if let (Some(cur), Some(ce)) = (self.response.take(), self.cur_event.take()) {
                 if !ce.kind.temporary() {
@@ -448,13 +481,24 @@ impl NpcState {
     }
 
     /// Run the active response for one frame. Returns false when no response is active.
-    pub fn process_response(&mut self, me: &mut PedNow, clump: &mut Clump, m: &AnimManager, ri: &RespIn, i: &NpcIn) -> bool {
+    pub fn process_response(
+        &mut self,
+        me: &mut PedNow,
+        clump: &mut Clump,
+        m: &AnimManager,
+        tasks: &mut crate::pedtask::PedTasks,
+        ri: &RespIn,
+        i: &NpcIn,
+    ) -> bool {
         let Some(mut r) = self.response.take() else { return false };
         let now = i.now_ms;
         let mut done = false;
         match &mut r {
             Resp::SmartFlee(f) => {
                 done = self.smart_flee(f, me, ri, i);
+            }
+            Resp::KillPedOnFoot(k) => {
+                done = self.kill_ped_on_foot(k, me, clump, m, tasks, ri, i);
             }
             Resp::Duck { until, anim } => {
                 self.move_state = 1;
@@ -590,6 +634,128 @@ impl NpcState {
             self.finish_response(clump);
         }
         true
+    }
+
+    /// 1000 Control (0x626260) with 1001 (0x62BE30 / 0x62BC10 / 0x626D90) and 1019
+    /// (0x62A0A0). Returns true when the kill task ends.
+    #[allow(clippy::too_many_arguments)]
+    fn kill_ped_on_foot(
+        &mut self,
+        k: &mut KillPedOnFoot,
+        me: &mut PedNow,
+        clump: &mut Clump,
+        m: &AnimManager,
+        tasks: &mut crate::pedtask::PedTasks,
+        ri: &RespIn,
+        i: &NpcIn,
+    ) -> bool {
+        let now = i.now_ms;
+        // Target gone or dead: the kill task ends.
+        let Some(tp) = ri.threat_pos.filter(|_| ri.threat_alive) else {
+            if let Some(mut f) = tasks.fight.take() {
+                f.make_abortable(tasks, clump, m, false);
+            }
+            return true;
+        };
+        let d = tp - me.pos;
+        let dist2 = d.length_squared();
+        // UpdateTargetAndRange: the combo range (1.6 in every melee.dat entry).
+        let range = tasks.melee.as_deref().map_or(1.6, |md| {
+            let c = tasks.fight.as_ref().map_or(0, |f| (f.combo_set - 4).max(0));
+            md.combo(c as i8 + 4).range
+        });
+        if !k.fighting {
+            // 907 CTaskComplexSeekEntity: run (moveState 6) straight at the target, done at 1 m.
+            self.move_state = 6;
+            *me.aim_rot = limit_radian_angle(radian_angle_between_points(tp.x, tp.y, me.pos.x, me.pos.y));
+            if dist2 <= 1.0 || dist2 < range * range {
+                k.fighting = true;
+                k.next_attack = 0;
+            }
+            return false;
+        }
+        // 1001 Control: past the give-up range (8 m) chase again.
+        if dist2 > 8.0 * 8.0 {
+            if let Some(mut f) = tasks.fight.take() {
+                f.make_abortable(tasks, clump, m, false);
+            }
+            k.fighting = false;
+            self.last_move_state = 0;
+            return false;
+        }
+        // 1019 CTaskSimpleFightingControl.
+        self.move_state = 1;
+        self.last_move_state = 1;
+        let rate = ri.shooting_rate as f32;
+        let ms_step = (i.ts * 0.02 * 1000.0) as i32 as u32;
+        let mut cmd: i8 = 0;
+        if tasks.fight.is_none() {
+            tasks.fight = Some(crate::melee::FightTask::new(Some(k.target), 0, 60000));
+            k.next_attack = 0;
+        } else if k.next_attack <= now {
+            k.next_attack = 0;
+            cmd = if tasks.fight_style != 4 && tasks.weapons[tasks.active_slot].ty == 0 { 12 } else { 11 };
+        } else if ri.threat_is_ped && k.block_left == 0 {
+            if self.rng.rand01() * 100.0 < 2.0 * rate * 0.025 {
+                k.block_left = rand_range(&mut self.rng, 500, 2000) as u32;
+                cmd = 2;
+            }
+        } else if k.block_left > 0 {
+            k.block_left = k.block_left.saturating_sub(ms_step);
+            cmd = 2;
+        }
+        if k.next_attack == 0 {
+            let u = self.rng.next() as f32 * 3.051_850_9e-5;
+            k.next_attack = ((u + 0.25) / (rate * 0.025 * 0.7 + 0.3) * 2000.0) as i32 as u32 + now;
+        }
+        let combo_set = tasks.fight.as_ref().map_or(0, |f| f.combo_set);
+        if combo_set <= 1 {
+            let mv = self.choose_movement(k, me, d, range, ri, ms_step);
+            if mv > -1 {
+                cmd = mv;
+            }
+        }
+        // CTaskSimpleFight faces the target every frame.
+        *me.aim_rot = limit_radian_angle(radian_angle_between_points(tp.x, tp.y, me.pos.x, me.pos.y));
+        if let Some(f) = tasks.fight.as_mut() {
+            f.ai_target_down = ri.threat_down;
+            f.ai_target_wanted_hp = ri.threat_wanted_hp;
+            f.control_fight(Some(k.target), cmd);
+        }
+        false
+    }
+
+    /// `CTaskSimpleFightingControl::ChooseMovement` (0x624B50) against a ped.
+    fn choose_movement(&mut self, k: &mut KillPedOnFoot, me: &PedNow, d: Vec3, range: f32, ri: &RespIn, ms_step: u32) -> i8 {
+        let dist = d.length();
+        let a = limit_radian_angle((-d.x).atan2(d.y) - me.cur_rot);
+        if a.abs() > 0.2618 {
+            // Turning: idle and postpone the attack.
+            k.next_attack = k.next_attack.wrapping_add(ms_step);
+            return 0;
+        }
+        if !ri.threat_is_ped {
+            return if dist - range > 0.3 { 3 } else { -1 };
+        }
+        let gap = dist - range;
+        let r16 = self.rng.next() & 0xF == 0;
+        if gap > 0.1 {
+            3
+        } else if gap > -0.1 {
+            if r16 { 7 } else { -1 }
+        } else if dist >= 0.8 {
+            if self.rng.next() & 0x3F == 0 {
+                8
+            } else if self.rng.next() & 0x3F == 0 {
+                10
+            } else {
+                -1
+            }
+        } else if r16 {
+            9
+        } else {
+            -1
+        }
     }
 
     /// 911 ControlSubTask (0x65C780) + 910 Create/Control (0x65C140 / 0x65C1E0).
@@ -1013,12 +1179,27 @@ impl crate::world::World {
                 self.add_ped_event(&dd, v, k, &views);
             }
         }
-        // The responses' threat positions.
+        // The responses' threats: position, alive, lying down, the player's wanted level.
+        let wanted = self.wanted.level;
         for v in views.iter().filter(|v| v.npc) {
             let threat = npc_ref(self, v.id).and_then(|n| n.response.as_ref().and_then(|r| r.threat()));
-            let tp = threat.and_then(|t| self.body(t)).map(|b| b.phys.matrix.pos);
+            let (tp, alive, is_ped, down, wanted_hp) = {
+                let tb = threat.and_then(|t| self.body(t));
+                let tl = tb.and_then(|b| b.logic.as_any().downcast_ref::<crate::ped::PedLogic>());
+                (
+                    tb.map(|b| b.phys.matrix.pos),
+                    tl.is_none_or(|l| l.tasks.health.alive() && l.tasks.health.health > 0.0),
+                    tl.is_some(),
+                    tl.is_some_and(|l| l.tasks.health.fall.is_some() || l.knocked_down > 0.0),
+                    tl.filter(|l| l.is_player).map(|l| (wanted, l.tasks.health.health)),
+                )
+            };
             if let Some(n) = npc_mut(self, v.id) {
                 n.resp_in.threat_pos = tp;
+                n.resp_in.threat_alive = alive;
+                n.resp_in.threat_is_ped = is_ped;
+                n.resp_in.threat_down = down;
+                n.resp_in.threat_wanted_hp = wanted_hp;
             }
         }
     }

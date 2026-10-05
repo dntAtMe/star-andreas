@@ -29,7 +29,7 @@ impl Plugin for NpcPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NpcModels>()
             .add_systems(Startup, load_population)
-            .add_systems(Update, (despawn_npcs, spawn_npcs, animate_npcs, log_responses).chain().after(SaStep));
+            .add_systems(Update, (despawn_npcs, spawn_npcs, animate_npcs, log_responses, provoke).chain().after(SaStep));
     }
 }
 
@@ -209,6 +209,7 @@ fn log_responses(sa: Res<SaPhys>, mut last: Local<HashMap<u32, String>>) {
                 Resp::ShakeFist { .. } => "shake fist",
                 Resp::EvasiveStep { .. } => "evasive step",
                 Resp::EvasiveDive { .. } => "evasive dive",
+                Resp::KillPedOnFoot(k) => if k.fighting { "kill ped on foot (fighting)" } else { "kill ped on foot (seek)" },
             };
             format!("{name} (event {:?})", n.cur_event.as_ref().map(|e| (e.kind.ty(), e.task)))
         });
@@ -217,6 +218,31 @@ fn log_responses(sa: Res<SaPhys>, mut last: Local<HashMap<u32, String>>) {
                 info!("npc {i}: {kind}");
             }
             last.insert(i, kind);
+        }
+    }
+}
+
+/// Debug `SA_PROVOKE=1`: every 5 s the nearest NPC within 30 m counts as damaged by the player
+/// (the DAMAGE event, as if punched).
+fn provoke(time: Res<Time>, mut sa: ResMut<SaPhys>, mut next: Local<f32>) {
+    if std::env::var("SA_PROVOKE").is_err() || time.elapsed_secs() < (*next).max(12.0) {
+        return;
+    }
+    *next = time.elapsed_secs() + 5.0;
+    let Some(pid) = sa.world.player_id() else { return };
+    let Some(pp) = sa.world.body(pid).map(|b| b.phys.matrix.pos) else { return };
+    let best = sa
+        .world
+        .body_ids()
+        .into_iter()
+        .filter(|&id| sa.logic::<PedLogic>(id).is_some_and(|p| p.npc.as_ref().is_some_and(|n| n.response.is_none())))
+        .filter_map(|id| sa.world.body(id).map(|b| (id, b.phys.matrix.pos.distance(pp))))
+        .filter(|x| x.1 < 30.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some((id, d)) = best {
+        if let Some(n) = sa.logic_mut::<PedLogic>(id).and_then(|p| p.npc.as_mut()) {
+            n.damaged_by = Some(Some(pid));
+            info!("SA_PROVOKE: npc {id:?} at {d:.1} m");
         }
     }
 }
