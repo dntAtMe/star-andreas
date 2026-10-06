@@ -54,7 +54,8 @@ impl Plugin for StreamPlugin {
             .init_resource::<Cache>()
             .init_resource::<Streamer>()
             .add_systems(Update, (receive_loaded, finalize_models, stream_instances).chain())
-            .add_systems(Update, object_damage_visuals.after(crate::saphys::SaStep));
+            .add_systems(Update, object_damage_visuals.after(crate::saphys::SaStep))
+            .add_systems(Update, pickup_objects.after(crate::saphys::SaStep).after(finalize_models));
     }
 }
 
@@ -132,7 +133,7 @@ struct ColSet {
     breakable: Option<Arc<dff::Breakable>>,
 }
 
-enum ModelState {
+pub(crate) enum ModelState {
     Loading,
     /// Parsed; waiting for its TXD chain before materials can be built.
     Parsed(Vec<PartCpu>, ColSet),
@@ -153,8 +154,8 @@ enum TxdState {
 }
 
 #[derive(Resource, Default)]
-struct Cache {
-    models: HashMap<u32, ModelState>,
+pub(crate) struct Cache {
+    pub(crate) models: HashMap<u32, ModelState>,
     txds: HashMap<String, TxdState>,
     materials: HashMap<(String, String, [u8; 4], bool), Handle<WorldMaterial>>,
 }
@@ -179,7 +180,7 @@ pub struct Stats {
 
 // ---------------------------------------------------------------- workers
 
-fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
+pub(crate) fn request_model(world: &WorldRes, loader: &Loader, id: u32) {
     let (world, tx) = (world.0.clone(), loader.tx.clone());
     AsyncComputeTaskPool::get()
         .spawn(async move {
@@ -248,7 +249,8 @@ fn build_parts(clump: &dff::Clump) -> Result<Vec<PartCpu>> {
         let frame = atomic.frame as usize;
         let name = clump.frames.get(frame).map(|f| f.name.to_ascii_lowercase()).unwrap_or_default();
         // Very-low variants are not used; "_dam" atomics are the damaged version.
-        if name.ends_with("_vlo") {
+        // The weapon models' muzzle flash is drawn only while firing (pickups never fire).
+        if name.ends_with("_vlo") || name == "gunflash" {
             continue;
         }
         let damaged = name.ends_with("_dam");
@@ -689,6 +691,87 @@ pub fn object_damage_visuals(
                 if *v != want {
                     *v = want;
                 }
+            }
+        }
+    }
+}
+
+/// The pickup CObjects (pickups.md §4): one per visible, enabled pickup (CPickups::Update's
+/// 100 m camera gate), spinning once per 2.048 s and scaled up when small (DoPickUpEffects);
+/// hidden in widescreen.
+fn pickup_objects(
+    mut commands: Commands,
+    world: Res<WorldRes>,
+    loader: Res<Loader>,
+    mut cache: ResMut<Cache>,
+    mut sa: ResMut<SaPhys>,
+    overlay: Res<crate::hud::Overlay>,
+    mut objs: Local<HashMap<usize, (u16, Entity)>>,
+    mut test_done: Local<bool>,
+    mut tfs: Query<&mut Transform>,
+) {
+    // SA_TESTPICKUP=<model>[,type]: one pickup 3 m north of the player (debug).
+    if !*test_done {
+        if let Some(v) = std::env::var("SA_TESTPICKUP").ok() {
+            let mut it = v.split(',').filter_map(|t| t.trim().parse::<u32>().ok());
+            let (m, t) = (it.next().unwrap_or(1240), it.next().unwrap_or(2));
+            if let Some(p) = sa.world.player_id().and_then(|p| sa.world.body(p)).map(|b| b.phys.matrix.pos) {
+                if sa.world.now_ms > 5000 {
+                    sa.world.generate_pickup(p + Vec3::new(2.0, 4.0, 0.0), m as u16, t as u8, 0, 0, false, 0);
+                    *test_done = true;
+                }
+            }
+        }
+    }
+    let w = &sa.world;
+    let now = w.now_ms;
+    let a = (now & 0x7FF) as f32 * 0.003_056_640_7;
+    for (i, p) in w.pickups.slots.iter().enumerate() {
+        let want = p.ty != sa_physics::pickups::ty::NONE && p.visible && !p.disabled && !overlay.widescreen;
+        match objs.get(&i).copied() {
+            Some((r, e)) if !want || r != p.ref_index => {
+                commands.entity(e).despawn();
+                objs.remove(&i);
+            }
+            _ => {}
+        }
+        if !want {
+            continue;
+        }
+        let id = p.model as u32;
+        let model = match cache.models.get(&id) {
+            Some(ModelState::Ready(m)) => m.clone(),
+            None => {
+                cache.models.insert(id, ModelState::Loading);
+                request_model(&world, &loader, id);
+                continue;
+            }
+            _ => continue,
+        };
+        // The scale from the collision box: s = max(1.2 / max dimension, 1), (s - 1) * 0.6 + 1.
+        let s = if p.model == 362 {
+            1.2
+        } else {
+            let d = model.cols.sa.as_ref().map_or(1.2, |c| (c.bbox_max - c.bbox_min).max_element());
+            (1.2 / d.max(1e-3)).max(1.0) * 0.6 + 0.4
+        };
+        let tf = Transform::from_translation(crate::world::g2b(p.position().to_array())).with_rotation(Quat::from_rotation_y(a)).with_scale(Vec3::splat(s));
+        match objs.get(&i) {
+            Some(&(_, e)) => {
+                if let Ok(mut t) = tfs.get_mut(e) {
+                    *t = tf;
+                }
+            }
+            None => {
+                let e = commands
+                    .spawn((tf, Visibility::default()))
+                    .with_children(|c| {
+                        for part in model.parts.iter().filter(|p| !p.damaged) {
+                            c.spawn((Mesh3d(part.mesh.clone()), MeshMaterial3d(part.material.clone())));
+                        }
+                    })
+                    .id();
+                objs.insert(i, (p.ref_index, e));
             }
         }
     }

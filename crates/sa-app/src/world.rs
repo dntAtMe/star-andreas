@@ -99,6 +99,12 @@ impl World {
                 txd_parent.extend(ide.txd_parents);
             }
         }
+        // default.ide (loaded by the game outside gta.dat): the weapon models (pickups).
+        if let Ok(text) = std::fs::read(root.join("data/default.ide")) {
+            for o in ide::parse(&String::from_utf8_lossy(&text))?.weapons {
+                objects.entry(o.id).or_insert(ObjectInfo { model: o.model, txd: o.txd, draw_distance: o.draw_distance.max(30.0) });
+            }
+        }
 
         // Raw placements; LOD indices made global per IPL group.
         struct Raw {

@@ -37,6 +37,7 @@ pub mod npc;
 pub mod objects;
 pub mod paths;
 pub mod physical;
+pub mod pickups;
 pub mod population;
 pub mod projectile;
 pub mod surface;

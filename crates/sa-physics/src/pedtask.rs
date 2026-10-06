@@ -48,6 +48,8 @@ pub struct Pad {
     pub duck_just_down: bool,
     /// `ExitVehicleJustDown` (enter / exit key).
     pub enter_exit_just_down: bool,
+    /// `CollectPickupJustDown` (LeftShoulder1 on foot).
+    pub collect_just_down: bool,
 }
 
 impl Pad {

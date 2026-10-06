@@ -562,6 +562,8 @@ pub(crate) fn player_control(
         pad.duck_just_down = true;
     }
     pad.enter_exit_just_down |= just(KeyCode::KeyF);
+    // CollectPickupJustDown (LeftShoulder1 on foot): Tab.
+    pad.collect_just_down |= just(KeyCode::Tab);
     // Next / previous weapon: mouse wheel, E / Q.
     pad.next_weapon_just_down |= just(KeyCode::KeyE) || (mouse && scroll.delta.y < 0.0);
     pad.prev_weapon_just_down |= just(KeyCode::KeyQ) || (mouse && scroll.delta.y > 0.0);

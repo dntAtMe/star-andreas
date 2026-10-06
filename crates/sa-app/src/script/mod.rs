@@ -209,6 +209,13 @@ fn run_scripts(world: &mut World) {
         if let Some(mut cs) = world.get_resource_mut::<crate::colstore::ColStore>() {
             cs.mission_points = pts;
         }
+        let reqs = std::mem::take(&mut world.resource_mut::<SaPhys>().world.pickups.help_requests);
+        if let Some((key, quick)) = reqs.into_iter().last() {
+            let mut o = world.resource_mut::<Overlay>();
+            o.help = key;
+            o.help_quick = quick;
+            o.help_permanent = false;
+        }
         let mut host = WorldHost { world, st, ts: dt * 50.0 };
         vm.process(&mut host, (dt * 1000.0) as u32);
         let texts = std::mem::take(&mut host.st.texts);
@@ -339,6 +346,15 @@ impl WorldHost<'_> {
         if let Some(mut cs) = self.world.get_resource_mut::<crate::colstore::ColStore>() {
             cs.waiting.push(id);
         }
+    }
+
+    /// A pickup model: negative = the script's used-object table.
+    fn pickup_model(&self, vm: &Vm, m: i32) -> u16 {
+        if m >= 0 {
+            return m as u16;
+        }
+        let name = self.model_name(vm, m);
+        self.world.resource::<crate::world::WorldRes>().0.objects.iter().find(|(_, o)| o.model.eq_ignore_ascii_case(&name)).map_or(0, |(&id, _)| id as u16)
     }
 
     fn create_char(&mut self, vm: &Vm, ped_type: i32, model: i32, pos: Vec3, seat: Option<(EntityId, i8)>, mission: bool) -> i32 {
@@ -868,6 +884,70 @@ impl Host for WorldHost<'_> {
             0x016B => {
                 let f = self.world.resource::<Overlay>().fading();
                 x.cond(f);
+            }
+            // ---- pickups (CPickups, pickups.md §2.2): z <= -100 → ground + 0.5
+            0x0213 | 0x032B => {
+                let m = x.int();
+                let t = x.int();
+                let ammo = if op == 0x032B { x.int() } else { 0 };
+                let mut p = Vec3::from(x.floats::<3>());
+                let model = self.pickup_model(x.vm, m);
+                if p.z <= -100.0 {
+                    p.z = self.sa().world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z) + 0.5;
+                }
+                let h = self.sa().world.generate_pickup(p, model, t as u8, ammo as u32, 0, false, 0);
+                x.store(&[h]);
+            }
+            0x02E1 => {
+                // CREATE_MONEY_PICKUP x y z amount permanent
+                let mut p = Vec3::from(x.floats::<3>());
+                let [amount, permanent] = x.ints::<2>();
+                if p.z <= -100.0 {
+                    p.z = self.sa().world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z) + 0.5;
+                }
+                let t = if permanent != 0 { 19 } else { 8 };
+                let h = self.sa().world.generate_pickup(p, sa_physics::pickups::mi::MONEY, t, amount as u32, 0, false, 0);
+                x.store(&[h]);
+            }
+            0x0517 | 0x0518 => {
+                // Locked / for-sale property pickups.
+                let mut p = Vec3::from(x.floats::<3>());
+                let price = if op == 0x0518 { x.int() } else { 0 };
+                let key = x.text();
+                if p.z <= -100.0 {
+                    p.z = self.sa().world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z) + 0.5;
+                }
+                let idx = match key.to_ascii_uppercase().as_str() {
+                    "PROP_3" => 1,
+                    "PROP_4" => 2,
+                    _ => 0,
+                };
+                let (model, t) = if op == 0x0517 { (sa_physics::pickups::mi::PROPERTY_LOCKED, 17) } else { (sa_physics::pickups::mi::PROPERTY_FSALE, 18) };
+                let h = self.sa().world.generate_pickup(p, model, t, price as u32, 0, false, idx);
+                x.store(&[h]);
+            }
+            0x0958..=0x095A => {
+                // Snapshot / horseshoe / oyster collectables (the stat counters are not ported).
+                let mut p = Vec3::from(x.floats::<3>());
+                if p.z <= -100.0 {
+                    p.z = self.sa().world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z) + 0.5;
+                }
+                let (model, t) = match op {
+                    0x0958 => (sa_physics::pickups::mi::CAMERAPICKUP, 20),
+                    0x0959 => (954, 3),
+                    _ => (953, 3),
+                };
+                let h = self.sa().world.generate_pickup(p, model, t, 0, 0, false, 0);
+                x.store(&[h]);
+            }
+            0x0214 => {
+                let h = x.int();
+                let r = self.sa().world.is_pickup_picked_up(h);
+                x.cond(r);
+            }
+            0x0215 => {
+                let h = x.int();
+                self.sa().world.remove_pickup(h);
             }
             0x01EB | 0x03DE => {
                 let v = x.float();

@@ -215,6 +215,8 @@ pub struct World {
     pub npc_removed: Vec<EntityId>,
     /// `CVehicleRecording` playback slots.
     pub recordings: crate::carrec::Recordings,
+    /// `CPickups`.
+    pub pickups: crate::pickups::Pickups,
     /// `CCarCtrl` (road traffic), set by the app with the path and car group data.
     pub traffic: Option<Box<crate::traffic::Traffic>>,
     /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
@@ -289,6 +291,7 @@ impl World {
             population: None,
             npc_removed: Vec::new(),
             recordings: Default::default(),
+            pickups: Default::default(),
             traffic: None,
             gun_fx_toggle: 0,
             veh_anim_flags: Vec::new(),
@@ -490,6 +493,12 @@ impl World {
         }
         self.update_traffic();
         self.traffic_ai();
+        // CPickups::Update with the player's "collect pickup" button.
+        let collect = self.player_id().and_then(|p| self.body(p)).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()).is_some_and(|l| l.tasks.pad.collect_just_down);
+        self.update_pickups(collect);
+        if let Some(l) = self.player_id().and_then(|p| self.body_mut(p)).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()) {
+            l.tasks.pad.collect_just_down = false;
+        }
         self.probe_ped_ground();
         let moving: Vec<usize> = (0..self.bodies.len())
             .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))
