@@ -67,3 +67,62 @@ pub fn parse_binary(data: &[u8]) -> Result<Vec<Instance>> {
         })
         .collect()
 }
+
+/// One IPL `enex` line (`CFileLoader::LoadEntryExit` 0x5B8030): entrance rect, exit point,
+/// area, flags, name, sky colour, ped count (default 2) and time window (default 0..24).
+#[derive(Debug, Clone)]
+pub struct EntryExit {
+    pub pos: [f32; 3],
+    /// Stored in radians in the files.
+    pub rot: f32,
+    pub size: [f32; 2],
+    pub exit: [f32; 3],
+    /// Degrees.
+    pub exit_rot: f32,
+    pub area: u8,
+    pub flags: u16,
+    pub name: String,
+    pub sky: u8,
+    pub num_peds: u8,
+    pub time_on: u8,
+    pub time_off: u8,
+}
+
+/// The `enex` sections of a text IPL.
+pub fn parse_entry_exits(text: &str) -> Vec<EntryExit> {
+    let mut out = Vec::new();
+    let mut in_enex = false;
+    for raw in text.lines() {
+        let f = fields(raw);
+        if f.is_empty() {
+            continue;
+        }
+        if f.len() == 1 {
+            in_enex = f[0].eq_ignore_ascii_case("enex");
+            continue;
+        }
+        if !in_enex || f.len() < 14 {
+            continue;
+        }
+        let num = |i: usize| f.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+        let int = |i: usize, d: i32| f.get(i).and_then(|v| v.parse::<i32>().ok()).unwrap_or(d);
+        // The token's quotes are cut: `"NAME"` → NAME; no quote → no name.
+        let tok = f[13];
+        let name = if tok.starts_with('"') { tok.trim_matches('"').to_string() } else { String::new() };
+        out.push(EntryExit {
+            pos: [num(0), num(1), num(2)],
+            rot: num(3),
+            size: [num(4), num(5)],
+            exit: [num(7), num(8), num(9)],
+            exit_rot: num(10),
+            area: int(11, 0) as u8,
+            flags: int(12, 0) as u16,
+            name,
+            sky: int(14, 0) as u8,
+            num_peds: int(15, 2) as u8,
+            time_on: int(16, 0) as u8,
+            time_off: int(17, 24) as u8,
+        });
+    }
+    out
+}

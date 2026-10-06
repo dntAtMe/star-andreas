@@ -63,6 +63,8 @@ pub struct World {
     /// Collision model name -> its COL slot (the .col archive it is in, `CColStore`).
     pub col_slot: HashMap<String, usize>,
     pub col_slot_names: Vec<String>,
+    /// IPL `enex` entries (CEntryExitManager).
+    pub entry_exits: Vec<sa_formats::ipl::EntryExit>,
     /// object.dat physics for movable / breakable props, by model name.
     pub physics: HashMap<String, objdat::ObjectPhysics>,
 }
@@ -123,11 +125,13 @@ impl World {
             lod: Option<usize>,
         }
         let mut raw: Vec<Raw> = Vec::new();
+        let mut entry_exits = Vec::new();
         for e in &entries {
             let dat::Entry::Ipl(p) = e else { continue };
             let text = std::fs::read(path(p)).with_context(|| p.clone())?;
             let base = raw.len();
             let globalize = |lod: i32| (lod >= 0).then(|| base + lod as usize);
+            entry_exits.extend(ipl::parse_entry_exits(&String::from_utf8_lossy(&text)));
             for inst in ipl::parse_text(&String::from_utf8_lossy(&text))? {
                 let lod = globalize(inst.lod);
                 raw.push(Raw { inst, lod });
@@ -137,8 +141,20 @@ impl World {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
-            for n in 0.. {
-                let Some(data) = imgs[0].get(&format!("{stem}_stream{n}.ipl")) else { break };
+            // CIplStore: every `<stem>_stream<n>.ipl` in any archive (interiors live in gta_int.img).
+            let prefix = format!("{stem}_stream");
+            let mut streams: Vec<(u32, &[u8])> = imgs
+                .iter()
+                .flat_map(|img| {
+                    img.entries().iter().filter_map(|e| {
+                        let n = e.name.to_ascii_lowercase();
+                        let idx = n.strip_prefix(&prefix)?.strip_suffix(".ipl")?.parse().ok()?;
+                        Some((idx, img.data(e)))
+                    })
+                })
+                .collect();
+            streams.sort_by_key(|s| s.0);
+            for (_, data) in streams {
                 for inst in ipl::parse_binary(data)? {
                     let lod = globalize(inst.lod);
                     raw.push(Raw { inst, lod });
@@ -194,6 +210,6 @@ impl World {
 
         let physics = objdat::parse(&String::from_utf8_lossy(&std::fs::read(root.join("data/object.dat")).context("object.dat")?));
 
-        Ok(Self { imgs, objects, txd_parent, instances, cols, col_slot, col_slot_names, physics })
+        Ok(Self { imgs, objects, txd_parent, instances, cols, col_slot, col_slot_names, entry_exits, physics })
     }
 }

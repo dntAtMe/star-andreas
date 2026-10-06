@@ -54,6 +54,19 @@ impl Default for PlayerControl {
     }
 }
 
+impl ScriptCam {
+    /// A MODE_FIXED shot (TakeControlNoEntity with a jump cut), as the entry-exit walk-in uses.
+    pub fn set_fixed_shot(&mut self, source: Vec3, target: Vec3) {
+        self.stored_source = source;
+        self.shot = Some((source, target));
+    }
+
+    /// RestoreWithJumpCut.
+    pub fn restore(&mut self) {
+        self.shot = None;
+    }
+}
+
 /// A `CAMERA_SET_VECTOR_MOVE` / `_TRACK` interpolation.
 #[derive(Clone, Copy, Debug)]
 struct VecMove {
@@ -854,6 +867,20 @@ impl Host for WorldHost<'_> {
                 // streamer's area filter).
                 let a = x.int();
                 self.sa().world.curr_area = a as u8;
+            }
+            0x07FB => {
+                // SET_INTERIOR_ENTRY…: EnableEntryExits(name, b).
+                let name = x.text();
+                let on = x.int() != 0;
+                if let Some(mut ee) = self.world.get_resource_mut::<crate::entryexit::EntryExits>() {
+                    ee.enable(&name, on);
+                }
+            }
+            0x08E7 => {
+                let d = x.int() != 0;
+                if let Some(mut ee) = self.world.get_resource_mut::<crate::entryexit::EntryExits>() {
+                    ee.disabled = d;
+                }
             }
             0x077E => {
                 let a = self.world.resource::<SaPhys>().world.curr_area as i32;
