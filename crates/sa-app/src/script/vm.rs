@@ -648,6 +648,13 @@ impl Exec<'_> {
         for _ in 0..n {
             self.skip_param();
         }
+        // An unported condition must not inherit the previous command's result: inside an
+        // ANDOR group or right before GOTO_IF_FALSE it reads as false.
+        let ip = self.vm.scripts[self.s].ip;
+        let next = self.vm.space.get(ip..ip + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) & 0x7FFF);
+        if self.vm.scripts[self.s].logical_op != 0 || next == Some(0x004D) {
+            self.cond(false);
+        }
         Flow::Continue
     }
 

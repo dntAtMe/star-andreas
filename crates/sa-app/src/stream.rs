@@ -34,7 +34,7 @@ use sa_physics::{
 
 use crate::{
     world_material::{ATTRIBUTE_NIGHT_COLOR, WorldGlobals, WorldMatUniform, WorldMaterial},
-    saphys::{SaBody, SaBuilding, SaPhys, gta_matrix},
+    saphys::{SaBody, SaPhys, gta_matrix},
     world::{WorldRes, g2b},
 };
 
@@ -618,9 +618,9 @@ fn stream_instances(
                             let id = sa.world.add_body(p, (**sa_col).clone(), Box::new(logic));
                             ec.insert(SaBody::new(id, m));
                         }
-                        None => {
-                            ec.insert(SaBuilding(sa.world.add_building(m, sa_col.clone())));
-                        }
+                        // Buildings collide through their COL slot (colstore.rs), streamed
+                        // around the player.
+                        None => {}
                     }
                 }
                 if !model.cols.lights.is_empty() {

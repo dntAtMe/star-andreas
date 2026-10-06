@@ -196,6 +196,18 @@ fn run_scripts(world: &mut World) {
         if std::env::var("SA_SCMLOG").is_ok() && now / 2000 != now.wrapping_sub((dt * 1000.0) as u32) / 2000 {
             let list: Vec<String> = vm.active_scripts().iter().map(|&i| format!("{}@{:X}", vm.scripts[i].name, vm.scripts[i].ip)).collect();
             info!("scripts: {}", list.join(" "));
+            let w = &world.resource::<SaPhys>().world;
+            for (h, c) in &st.cars {
+                info!("script car {h}: {:?}", w.body(c.1).map(|b| b.phys.matrix.pos));
+            }
+        }
+        // Mission cars and peds keep their collision streamed in.
+        let pts: Vec<Vec3> = {
+            let w = &world.resource::<SaPhys>().world;
+            st.cars.values().map(|c| c.1).chain(st.peds.values().copied()).filter_map(|id| w.body(id).map(|b| b.phys.matrix.pos)).collect()
+        };
+        if let Some(mut cs) = world.get_resource_mut::<crate::colstore::ColStore>() {
+            cs.mission_points = pts;
         }
         let mut host = WorldHost { world, st, ts: dt * 50.0 };
         vm.process(&mut host, (dt * 1000.0) as u32);
@@ -318,7 +330,18 @@ impl WorldHost<'_> {
         self.st.peds_ide.get(&m).map(|p| p.0.clone()).unwrap_or_default()
     }
 
-    fn create_char(&mut self, vm: &Vm, ped_type: i32, model: i32, pos: Vec3, seat: Option<(EntityId, i8)>) -> i32 {
+    /// Entity flag 0x40000 (mission-cleanup scripts' CREATE_*): static until the collision at
+    /// its position is loaded (colstore.rs clears it).
+    fn wait_for_collision(&mut self, id: EntityId) {
+        if let Some(b) = self.sa().world.body_mut(id) {
+            b.phys.eflags |= sa_physics::physical::ef::IS_STATIC;
+        }
+        if let Some(mut cs) = self.world.get_resource_mut::<crate::colstore::ColStore>() {
+            cs.waiting.push(id);
+        }
+    }
+
+    fn create_char(&mut self, vm: &Vm, ped_type: i32, model: i32, pos: Vec3, seat: Option<(EntityId, i8)>, mission: bool) -> i32 {
         let name = self.model_name(vm, model);
         // Special characters take the anim group of their peds.ide slot (special01..).
         let group = self.st.peds_ide.get(&(model as u32)).map_or(sa_physics::anim::group::DEFAULT, |p| p.2);
@@ -332,6 +355,9 @@ impl WorldHost<'_> {
         match id {
             Some(id) => {
                 self.st.peds.insert(h, id);
+                if mission && seat.is_none() {
+                    self.wait_for_collision(id);
+                }
             }
             None => warn!("script: CREATE_CHAR {model} ({name}) failed"),
         }
@@ -429,7 +455,8 @@ impl Host for WorldHost<'_> {
             0x009A => {
                 let [t, m] = x.ints::<2>();
                 let p = Vec3::from(x.floats::<3>());
-                let h = self.create_char(x.vm, t, m, p, None);
+                let mc = x.mission_cleanup();
+                let h = self.create_char(x.vm, t, m, p, None, mc);
                 x.store(&[h]);
             }
             0x0129 => {
@@ -437,7 +464,8 @@ impl Host for WorldHost<'_> {
                 let [v, t, m] = x.ints::<3>();
                 let seat = self.car(v).map(|c| (c, -1));
                 let p = self.car(v).and_then(|c| self.pos_of(c)).unwrap_or_default();
-                let h = self.create_char(x.vm, t, m, p, seat);
+                let mc = x.mission_cleanup();
+                let h = self.create_char(x.vm, t, m, p, seat, mc);
                 x.store(&[h]);
             }
             0x01C8 => {
@@ -445,7 +473,8 @@ impl Host for WorldHost<'_> {
                 let [v, t, m, s] = x.ints::<4>();
                 let seat = self.car(v).map(|c| (c, s.max(0) as i8));
                 let p = self.car(v).and_then(|c| self.pos_of(c)).unwrap_or_default();
-                let h = self.create_char(x.vm, t, m, p, seat);
+                let mc = x.mission_cleanup();
+                let h = self.create_char(x.vm, t, m, p, seat, mc);
                 x.store(&[h]);
             }
             0x0430 => {
@@ -491,6 +520,34 @@ impl Host for WorldHost<'_> {
             0x00DB => {
                 let [p, v] = x.ints::<2>();
                 let r = self.ped(p).and_then(|p| self.in_vehicle(p)).is_some_and(|c| Some(c) == self.car(v));
+                x.cond(r);
+            }
+            0x00DD => {
+                // IS_CHAR_IN_MODEL ped model
+                let [p, m] = x.ints::<2>();
+                let w = &self.world.resource::<SaPhys>().world;
+                let r = self
+                    .ped(p)
+                    .and_then(|p| self.in_vehicle(p))
+                    .and_then(|v| w.body(v))
+                    .and_then(|b| {
+                        let l = b.logic.as_any();
+                        l.downcast_ref::<sa_physics::automobile::Automobile>()
+                            .map(|c| c.model as i32)
+                            .or_else(|| l.downcast_ref::<sa_physics::bike::Bike>().map(|c| c.model as i32))
+                    })
+                    .is_some_and(|model| model == m);
+                x.cond(r);
+            }
+            0x03EE => {
+                // CAN_PLAYER_START_MISSION (CPlayerPed::CanPlayerStartMission 0x609590) [S]:
+                // playing, on foot, not entering / leaving a vehicle.
+                let _p = x.int();
+                let r = self.player_ped().is_some_and(|id| {
+                    self.world.resource::<SaPhys>().logic::<PedLogic>(id).is_some_and(|l| {
+                        l.tasks.health.health > 0.0 && l.vehicle.is_none() && l.enter.is_none() && l.leave.is_none()
+                    })
+                });
                 x.cond(r);
             }
             0x00DF => {
@@ -543,9 +600,10 @@ impl Host for WorldHost<'_> {
                 let p = if p.z <= -100.0 { Vec3::new(p.x, p.y, self.sa().world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z)) } else { p };
                 match self.world.run_system_cached_with(crate::vehicle::spawn_script_car, (name.clone(), p, 0.0)).ok().flatten() {
                     Some(c) => {
-                        let at = self.world.resource::<SaPhys>().world.body(c.1).map(|b| b.phys.matrix.pos);
-                        debug!("script: CREATE_CAR {m} ({name}) at {at:?}");
                         self.st.cars.insert(h, c);
+                        if x.mission_cleanup() {
+                            self.wait_for_collision(c.1);
+                        }
                     }
                     None => warn!("script: CREATE_CAR {m} ({name}) failed"),
                 }
@@ -778,6 +836,9 @@ impl Host for WorldHost<'_> {
             }
             0x02A3 => {
                 let on = x.int();
+                if std::env::var("SA_SCMLOG").is_ok() {
+                    info!("script {} @{:X}: SET_WIDESCREEN {on}", x.vm.scripts[x.s].name, x.vm.scripts[x.s].ip);
+                }
                 self.world.resource_mut::<Overlay>().widescreen = on != 0;
             }
             // ---- text
@@ -867,6 +928,9 @@ impl Host for WorldHost<'_> {
             // ---- camera
             0x015F => {
                 let v = x.floats::<6>();
+                if std::env::var("SA_SCMLOG").is_ok() {
+                    info!("script {} @{:X}: SET_FIXED_CAMERA_POSITION {:?}", x.vm.scripts[x.s].name, x.vm.scripts[x.s].ip, &v[..3]);
+                }
                 self.world.resource_mut::<ScriptCam>().stored_source = Vec3::new(v[0], v[1], v[2]);
             }
             0x0160 => {

@@ -49,6 +49,9 @@ pub struct World {
     pub instances: Vec<Instance>,
     /// Collision model name -> (img index, absolute offset, size).
     pub cols: HashMap<String, (usize, usize, usize)>,
+    /// Collision model name -> its COL slot (the .col archive it is in, `CColStore`).
+    pub col_slot: HashMap<String, usize>,
+    pub col_slot_names: Vec<String>,
     /// object.dat physics for movable / breakable props, by model name.
     pub physics: HashMap<String, objdat::ObjectPhysics>,
 }
@@ -161,16 +164,21 @@ impl World {
             .collect();
 
         let mut cols = HashMap::new();
+        let mut col_slot = HashMap::new();
+        let mut col_slot_names = Vec::new();
         for (i, img) in imgs.iter().enumerate() {
             for e in img.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".col")) {
+                let slot = col_slot_names.len();
+                col_slot_names.push(e.name.to_ascii_lowercase());
                 for c in col::index(img.data(e)).with_context(|| e.name.clone())? {
                     cols.insert(c.name.to_ascii_lowercase(), (i, e.offset + c.offset, c.size));
+                    col_slot.insert(c.name.to_ascii_lowercase(), slot);
                 }
             }
         }
 
         let physics = objdat::parse(&String::from_utf8_lossy(&std::fs::read(root.join("data/object.dat")).context("object.dat")?));
 
-        Ok(Self { imgs, objects, txd_parent, instances, cols, physics })
+        Ok(Self { imgs, objects, txd_parent, instances, cols, col_slot, col_slot_names, physics })
     }
 }

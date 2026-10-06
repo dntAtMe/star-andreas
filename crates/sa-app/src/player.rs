@@ -456,6 +456,20 @@ pub(crate) fn player_control(
 ) {
     let id = ped.sa;
     let s = st.stats;
+    if std::env::var("SA_SCMLOG").is_ok() && sa.world.frame % 100 == 0 {
+        let l = sa.logic::<PedLogic>(id);
+        info!(
+            "player: cam {:?} frozen {} pos {:?} enter {} veh {} stream pending {} loading {} spawned {}",
+            sa.world.camera_pos,
+            ped.frozen,
+            sa.world.body(id).map(|b| b.phys.matrix.pos),
+            l.is_some_and(|l| l.enter.is_some()),
+            l.is_some_and(|l| l.vehicle.is_some()),
+            s.pending,
+            s.models_loading,
+            s.spawned
+        );
+    }
     if ped.frozen {
         // Wait for collision around the spawn point before enabling gravity.
         if s.pending == 0 && s.models_loading == 0 && s.spawned > 0 && time.elapsed_secs() > ped.frozen_at + 1.0 {
