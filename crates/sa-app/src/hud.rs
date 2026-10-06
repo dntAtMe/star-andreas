@@ -37,6 +37,7 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Overlay>()
+            .init_resource::<crate::radar::Radar>()
             .add_systems(Startup, setup_hud)
             .add_systems(Update, process_fade.after(crate::saphys::SaStep))
             .add_systems(PostUpdate, draw_hud);
@@ -67,6 +68,10 @@ pub struct Overlay {
     pub mission_table: Option<String>,
     /// This frame's script text lines (`IntroTextLines`, DISPLAY_TEXT).
     pub texts: Vec<IntroText>,
+    /// `CHud::SetHelpMessage(text, quick, permanent)`: the help box's GXT key (None = cleared).
+    pub help: Option<String>,
+    pub help_quick: bool,
+    pub help_permanent: bool,
 }
 
 /// One `IntroTextLines` entry (scm.md §11), in the 640×448 script screen space.
@@ -648,6 +653,7 @@ struct HudState {
     popups: NamePopups,
     /// The loaded mission GXT table.
     table: Option<String>,
+    help: HelpBox,
     pool: Vec<(Entity, Handle<Mesh>, Handle<ColorMaterial>)>,
 }
 
@@ -675,6 +681,8 @@ struct HudAssets {
     radar_disc: Option<Handle<Image>>,
     radar_north: Option<Handle<Image>>,
     radar_centre: Option<Handle<Image>>,
+    /// `RadarBlipSprites[64]` from hud.txd.
+    blip_sprites: Vec<Option<Handle<Image>>>,
     data: FontData,
     gxt: sa_formats::gxt::Gxt,
     /// CTheZones' navigation zones; zone 0 is `SAN_AND`.
@@ -928,6 +936,7 @@ fn setup_hud(mut commands: Commands, root: Res<GameRoot>, mut images: ResMut<Ass
         radar_disc: hud.get("radardisc").cloned(),
         radar_north: hud.get("radar_north").cloned(),
         radar_centre: hud.get("radar_centre").cloned(),
+        blip_sprites: crate::radar::SPRITE_NAMES.iter().map(|n| hud.get(*n).cloned()).collect(),
         data: FontData { vals },
         gxt,
         zones,
@@ -947,6 +956,146 @@ fn srgb_col(c: [u8; 4]) -> [f32; 4] {
     [l(c[0]), l(c[1]), l(c[2]), c[3] as f32 / 255.0]
 }
 
+/// `CHud::DrawHelpText` state (0xBAA474 state, 0xBAA478 fade, 0xBAA47C display, 0xBAA460 lines).
+#[derive(Default)]
+struct HelpBox {
+    last: Option<String>,
+    to_print: Vec<u8>,
+    state: u8,
+    fade: f32,
+    display: f32,
+    lines: f32,
+}
+
+/// `InsertPlayerControlKeysInString`: `~k~~ACTION~` → the key bound to it (the port's bindings).
+fn insert_control_keys(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i..].starts_with(b"~k~~") {
+            if let Some(end) = s[i + 4..].iter().position(|&c| c == b'~') {
+                let action = &s[i + 4..i + 4 + end];
+                let key: &[u8] = match action {
+                    b"GO_FORWARD" => b"W",
+                    b"GO_BACK" => b"S",
+                    b"GO_LEFT" => b"A",
+                    b"GO_RIGHT" => b"D",
+                    b"VEHICLE_ENTER_EXIT" => b"F",
+                    b"PED_SPRINT" => b"LSHIFT",
+                    b"PED_JUMPING" => b"SPACE",
+                    b"PED_DUCK" => b"C",
+                    b"PED_FIREWEAPON" => b"LMB",
+                    b"PED_LOCK_TARGET" => b"RMB",
+                    b"VEHICLE_ACCELERATE" => b"W",
+                    b"VEHICLE_BRAKE" => b"S",
+                    b"VEHICLE_HANDBRAKE" => b"SPACE",
+                    b"PED_CYCLE_WEAPON_RIGHT" => b"E",
+                    b"PED_CYCLE_WEAPON_LEFT" => b"Q",
+                    _ => action,
+                };
+                out.extend_from_slice(key);
+                i += 4 + end + 1;
+                continue;
+            }
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `CHud::DrawHelpText` (0x58B6E0, hud.md §4.3): appears at once, stays `lines` seconds (quick
+/// help 3 s), fades out over 300 ms; light grey subtitles font on a black box at (34, 28).
+fn draw_help(hb: &mut HelpBox, overlay: &Overlay, assets: &HudAssets, sc: &Scale, dt_ms: f32, out: &mut DrawList) {
+    let Some(key) = overlay.help.clone() else {
+        hb.state = 0;
+        hb.last = None;
+        return;
+    };
+    let text = insert_control_keys(assets.gxt.get(&key));
+    let w = sc.w;
+    let setup = |f: &mut Font| {
+        f.proportional = true;
+        f.scale = (sc.sx(0.52), sc.sy(1.1));
+        f.set_orientation(1);
+        f.justify = false;
+        f.wrap_x = sc.sx(34.0) + sc.sx(200.0) - sc.sx(4.0);
+        f.set_font_style(1);
+        f.set_drop_shadow(0);
+        let c = HUD_COLOURS[4];
+        f.colour = [c[0], c[1], c[2], 255];
+    };
+    if hb.last.as_deref() != Some(key.as_str()) {
+        if hb.state == 0 {
+            hb.state = 2;
+            hb.display = 0.0;
+            hb.fade = 0.0;
+            hb.to_print = text.clone();
+            let mut f = Font::new(w);
+            setup(&mut f);
+            hb.lines = assets.data.print_string(&mut f, sc, sc.sx(34.0), sc.sy(28.0), &hb.to_print, &mut DrawList::default()) as f32 + 3.0;
+        } else {
+            hb.state = 4;
+            hb.display = 5.0;
+        }
+        hb.last = Some(key);
+    }
+    let mut alpha = 200.0;
+    match hb.state {
+        1 => {
+            hb.fade = 600.0;
+            if !overlay.help_permanent && (hb.display > hb.lines * 1000.0 || (overlay.help_quick && hb.display > 3000.0)) {
+                hb.state = 3;
+            }
+        }
+        2 => {
+            if !overlay.widescreen {
+                hb.fade += 2.0 * dt_ms;
+                if hb.fade > 0.0 {
+                    hb.fade = 0.0;
+                    hb.state = 1;
+                }
+            }
+            alpha = hb.fade * 0.001 * 200.0;
+        }
+        3 => {
+            hb.fade -= 2.0 * dt_ms;
+            if hb.fade < 0.0 || overlay.widescreen {
+                hb.fade = 0.0;
+                hb.state = 0;
+            }
+            alpha = hb.fade * 0.001 * 200.0;
+        }
+        4 => {
+            hb.fade -= 2.0 * dt_ms;
+            if hb.fade < 0.0 {
+                hb.fade = 0.0;
+                hb.state = 2;
+                hb.to_print = text.clone();
+            }
+            alpha = hb.fade * 0.001 * 200.0;
+        }
+        _ => return,
+    }
+    hb.display += dt_ms;
+    if hb.state == 0 || alpha <= 0.0 {
+        return;
+    }
+    let mut f = Font::new(w);
+    setup(&mut f);
+    let a = alpha as u8;
+    f.colour[3] = a;
+    // SetBackground(1, 1) with colour (0, 0, 0, alpha): the box behind the lines [I: CFont's
+    // exact box margins].
+    let y_off = if overlay.widescreen { 56.0 } else { 0.0 };
+    let (x, y) = (sc.sx(34.0), sc.sy(28.0) + y_off * 0.6 * sc.sy(1.0));
+    let mut tmp = DrawList::default();
+    let n = assets.data.print_string(&mut f, sc, x, y, &hb.to_print, &mut tmp).max(1) as f32;
+    let line_h = 18.0 * f.scale.1;
+    out.rect(x - sc.sx(4.0), y - sc.sy(4.0), f.wrap_x + sc.sx(4.0), y + n * line_h + sc.sy(4.0), [0, 0, 0, a]);
+    out.text.append(&mut tmp.text);
+}
+
 /// `CHud::DrawPlayerInfo` + `CHud::DrawWanted`.
 #[allow(clippy::too_many_arguments)]
 fn draw_hud(
@@ -964,10 +1113,10 @@ fn draw_hud(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut st: Local<HudState>,
-    (time, mut overlay, root): (Res<Time>, ResMut<Overlay>, Res<GameRoot>),
+    (time, mut overlay, root, radar): (Res<Time>, ResMut<Overlay>, Res<GameRoot>, Res<crate::radar::Radar>),
     mut hud_meshes: Query<(&mut Transform, &mut Visibility), With<HudMesh>>,
 ) {
-    let HudState { last_level, popups, pool, table } = &mut *st;
+    let HudState { last_level, popups, pool, table, help } = &mut *st;
     let Some(mut assets) = assets else { return };
     if overlay.mission_table != *table {
         *table = overlay.mission_table.clone();
@@ -1150,6 +1299,7 @@ fn draw_hud(
     });
     let ms = (time.delta_secs() * 50.0 * 0.02 * 1000.0) as i32;
     draw_name_popups(popups, &assets, &sc, ms, &mut out);
+    draw_help(help, &overlay, &assets, &sc, time.delta_secs() * 1000.0, &mut out);
 
     // CHud::DrawRadar.
     let veh = driving.0.and_then(|e| cars.get(e).ok()).map(|v| v.sa);
@@ -1176,7 +1326,7 @@ fn draw_hud(
                 })
                 .clone()
         };
-        draw_radar(&mut out, &sc, &assets, &sa.world, origin, heading, veh.is_some(), speed, &mut load_tile);
+        draw_radar(&mut out, &sc, &assets, &sa.world, &radar, origin, heading, veh.is_some(), speed, &mut load_tile);
     }
 
     // Widescreen (cutscenes): the HUD is suppressed; the bars and the subtitle instead.
@@ -1424,11 +1574,81 @@ fn disc_polygon() -> Vec<Vec2> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `CRadar::DrawBlips` (0x588050), the script blips: a sprite pass then the non-sprite height
+/// markers, each in priority order 1..3 (hud.md §7.6-7.8).
+fn draw_blips(out: &mut DrawList, sc: &Scale, assets: &HudAssets, world: &sa_physics::world::World, blips: &crate::radar::Radar, r: &Radar, player_z: f32) {
+    use crate::radar::{BlipType, sprite_priority, trace_colour};
+    // The blip's world position: the entity's (a ped in a vehicle: the vehicle's).
+    let pos_of = |t: &crate::radar::Trace| -> Option<Vec3> {
+        match t.entity {
+            Some(id) => {
+                let veh = world.body(id).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()).and_then(|p| p.vehicle.as_ref().map(|v| v.veh));
+                world.body(veh.unwrap_or(id)).map(|b| b.phys.matrix.pos)
+            }
+            None => Some(t.pos),
+        }
+    };
+    for sprite_pass in [true, false] {
+        for prio in 1..=3u8 {
+            for t in blips.traces.iter().flatten() {
+                if t.display == 1 {
+                    continue;
+                }
+                let has_sprite = t.sprite != 0;
+                if has_sprite != sprite_pass || sprite_priority(t.sprite).max(1) != prio {
+                    continue;
+                }
+                let Some(p) = pos_of(t) else { continue };
+                let mut rp = r.to_radar(p.truncate());
+                let len = rp.length();
+                if len > 1.0 {
+                    rp /= len;
+                }
+                let s = radar_to_screen(sc, rp);
+                if has_sprite {
+                    if t.short_range && len > 1.0 {
+                        continue;
+                    }
+                    if let Some(Some(img)) = assets.blip_sprites.get(t.sprite as usize) {
+                        let (hw, hh) = (sc.sx(8.0) as i32 as f32, sc.sy(8.0) as i32 as f32);
+                        out.sprite(img, s[0] - hw, s[1] - hh, s[0] + hw, s[1] + hh, [255, 255, 255, 255]);
+                    }
+                    continue;
+                }
+                // ShowRadarTraceWithHeight (0x584070).
+                let mut col = match (t.ty, t.appearance) {
+                    (BlipType::Coord | BlipType::Contact, 1) => trace_colour(2, false, false),
+                    (BlipType::Coord | BlipType::Contact, 2) => trace_colour(0, true, false),
+                    _ => trace_colour(t.colour, t.bright, t.friendly),
+                };
+                if t.fade {
+                    col[3] = (255 - (len * (1.0 / 6.0) * 255.0) as i32).max(70) as u8;
+                }
+                let a = col[3];
+                let sz = t.size as f32;
+                let (x, y) = (s[0], s[1]);
+                let tri = |out: &mut DrawList, pts: [[f32; 2]; 3], c: [u8; 4]| out.fan(None, pts.iter().map(|&p| (p, [0.0, 0.0])).collect(), c);
+                if player_z < p.z - 2.0 {
+                    tri(out, [[x - sc.sx(sz + 3.0), y + sc.sy(sz + 2.0)], [x + sc.sx(sz + 3.0), y + sc.sy(sz + 2.0)], [x, y - sc.sy(sz + 3.0)]], [0, 0, 0, a]);
+                    tri(out, [[x - sc.sx(sz + 1.0), y + sc.sy(sz + 1.0)], [x + sc.sx(sz + 1.0), y + sc.sy(sz + 1.0)], [x, y - sc.sy(sz + 1.0)]], col);
+                } else if player_z > p.z + 4.0 {
+                    tri(out, [[x, y + sc.sy(sz + 3.0)], [x - sc.sx(sz + 3.0), y - sc.sy(sz + 2.0)], [x + sc.sx(sz + 3.0), y - sc.sy(sz + 2.0)]], [0, 0, 0, a]);
+                    tri(out, [[x, y + sc.sy(sz + 1.0)], [x - sc.sx(sz + 1.0), y - sc.sy(sz + 1.0)], [x + sc.sx(sz + 1.0), y - sc.sy(sz + 1.0)]], col);
+                } else {
+                    out.rect(x - sc.sx(sz + 1.0), y - sc.sy(sz + 1.0), x + sc.sx(sz + 1.0), y + sc.sy(sz + 1.0), [0, 0, 0, a]);
+                    out.rect(x - sc.sx(sz), y - sc.sy(sz), x + sc.sx(sz), y + sc.sy(sz), col);
+                }
+            }
+        }
+    }
+}
+
 fn draw_radar(
     out: &mut DrawList,
     sc: &Scale,
     assets: &HudAssets,
     world: &sa_physics::world::World,
+    blips: &crate::radar::Radar,
     origin3: Vec3,
     heading: f32,
     in_vehicle: bool,
@@ -1514,6 +1734,7 @@ fn draw_radar(
         let (hw, hh) = (sc.sx(8.0) as i32 as f32, sc.sy(8.0) as i32 as f32);
         out.sprite(north, p[0] - hw, p[1] - hh, p[0] + hw, p[1] + hh, [255, 255, 255, 255]);
     }
+    draw_blips(out, sc, assets, world, blips, &r, origin3.z);
     if let Some(arrow) = assets.radar_centre.as_ref() {
         let p = radar_to_screen(sc, Vec2::ZERO);
         let a = heading - (angle + std::f32::consts::PI);

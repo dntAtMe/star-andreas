@@ -14,6 +14,7 @@ mod hud;
 mod lights;
 mod peds;
 mod player;
+mod radar;
 mod saphys;
 mod script;
 mod shadows;

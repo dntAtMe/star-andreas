@@ -644,18 +644,66 @@ impl Host for WorldHost<'_> {
                 let dead = self.car(h).is_none_or(|id| self.world.resource::<SaPhys>().world.body(id).is_none());
                 x.cond(dead);
             }
-            0x01C3 | 0x067F | 0x0186 | 0x018B | 0x07E0 => {
-                // Accepted, not modelled yet (blips, lights, collision flags).
+            0x01C3 | 0x067F => {
+                // Accepted, not modelled yet (no-longer-needed cars, light overrides).
                 let n = x.vm_count(op);
-                if op == 0x0186 {
-                    x.int();
-                    let h = self.handle();
-                    x.store(&[h]);
-                } else {
-                    for _ in 0..n {
-                        x.skip_param();
-                    }
+                for _ in 0..n {
+                    x.skip_param();
                 }
+            }
+            // ---- radar blips (CRadar, radar.rs)
+            0x0186 | 0x0187 => {
+                // ADD_BLIP_FOR_CAR / ADD_BLIP_FOR_CHAR: SetEntityBlip(type, entity, 0, 3),
+                // ChangeBlipScale 3.
+                use crate::radar::BlipType;
+                let h = x.int();
+                let ent = if op == 0x0186 { self.car(h) } else { self.ped(h) };
+                let ty = if op == 0x0186 { BlipType::Car } else { BlipType::Char };
+                let mut radar = self.world.resource_mut::<crate::radar::Radar>();
+                let b = ent.map_or(-1, |e| radar.set_entity_blip(ty, e, 0, 3));
+                if let Some(t) = radar.get_mut(b) {
+                    t.size = 3;
+                }
+                x.store(&[b]);
+            }
+            0x0164 => {
+                let b = x.int();
+                self.world.resource_mut::<crate::radar::Radar>().clear_blip(b);
+            }
+            0x018B => {
+                let [b, d] = x.ints::<2>();
+                if let Some(t) = self.world.resource_mut::<crate::radar::Radar>().get_mut(b) {
+                    t.display = d as u8;
+                }
+            }
+            0x07E0 => {
+                let [b, f] = x.ints::<2>();
+                if let Some(t) = self.world.resource_mut::<crate::radar::Radar>().get_mut(b) {
+                    t.friendly = f != 0;
+                }
+            }
+            0x02A7 | 0x02A8 | 0x04CE | 0x0570 => {
+                // ADD_SPRITE_BLIP_FOR_CONTACT_POINT / _FOR_COORD and the short-range variants:
+                // SetCoordBlip(contact 5 / coord 4, pos, colour, 3) + SetBlipSprite.
+                use crate::radar::BlipType;
+                let mut p = Vec3::from(x.floats::<3>());
+                let sprite = x.int();
+                if p.z <= -100.0 {
+                    p.z = self.sa().world.find_ground_z(p + Vec3::Z * 50.0).unwrap_or(p.z);
+                }
+                let (ty, colour, short) = match op {
+                    0x02A7 => (BlipType::Contact, 0, false),
+                    0x02A8 => (BlipType::Coord, 5, false),
+                    0x04CE => (BlipType::Coord, 5, true),
+                    _ => (BlipType::Contact, 2, true),
+                };
+                let mut radar = self.world.resource_mut::<crate::radar::Radar>();
+                let b = radar.set_coord_blip(ty, p, colour, 3);
+                if let Some(t) = radar.get_mut(b) {
+                    t.sprite = sprite.clamp(0, 63) as u8;
+                    t.short_range = short;
+                }
+                x.store(&[b]);
             }
             0x05EB | 0x085E => {
                 // START_PLAYBACK_RECORDED_CAR (085E: looped)
@@ -863,6 +911,23 @@ impl Host for WorldHost<'_> {
                 if o.subtitle.as_deref() == Some(key.as_str()) {
                     o.subtitle = None;
                 }
+            }
+            0x03E5 | 0x0512 => {
+                // PRINT_HELP / PRINT_HELP_FOREVER: CHud::SetHelpMessage(text, 0, permanent).
+                let key = x.text();
+                if std::env::var("SA_SCMLOG").is_ok() {
+                    info!("script {}: PRINT_HELP {key} at {:.1}s", x.vm.scripts[x.s].name, self.world.resource::<Time>().elapsed_secs());
+                }
+                let mut o = self.world.resource_mut::<Overlay>();
+                o.help = Some(key);
+                o.help_quick = false;
+                o.help_permanent = op == 0x0512;
+            }
+            0x03E6 => {
+                let mut o = self.world.resource_mut::<Overlay>();
+                o.help = None;
+                o.help_quick = true;
+                o.help_permanent = false;
             }
             0x09C8 => x.cond(true),
             0x03F0 => {
