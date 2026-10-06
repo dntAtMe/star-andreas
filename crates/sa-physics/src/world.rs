@@ -217,6 +217,8 @@ pub struct World {
     pub recordings: crate::carrec::Recordings,
     /// `CPickups`.
     pub pickups: crate::pickups::Pickups,
+    /// `CGame::currArea` (0 = the outside world).
+    pub curr_area: u8,
     /// `CCarCtrl` (road traffic), set by the app with the path and car group data.
     pub traffic: Option<Box<crate::traffic::Traffic>>,
     /// Byte 0xC8A80C: every-second-shot gun FX toggle of the fast rifles.
@@ -292,6 +294,7 @@ impl World {
             npc_removed: Vec::new(),
             recordings: Default::default(),
             pickups: Default::default(),
+            curr_area: 0,
             traffic: None,
             gun_fx_toggle: 0,
             veh_anim_flags: Vec::new(),

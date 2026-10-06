@@ -849,7 +849,17 @@ impl Host for WorldHost<'_> {
                     w.npc_removed.push(id);
                 }
             }
-            0x03CB | 0x04E4 | 0x0A0B | 0x04BB => {
+            0x04BB => {
+                // SELECT_INTERIOR / SET_AREA_VISIBLE: currArea (RemoveBuildingsNotInArea is the
+                // streamer's area filter).
+                let a = x.int();
+                self.sa().world.curr_area = a as u8;
+            }
+            0x077E => {
+                let a = self.world.resource::<SaPhys>().world.curr_area as i32;
+                x.store(&[a]);
+            }
+            0x03CB | 0x04E4 | 0x0A0B => {
                 let n = x.vm_count(op);
                 for _ in 0..n {
                     x.skip_param();

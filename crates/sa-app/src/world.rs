@@ -40,6 +40,17 @@ pub struct Instance {
     /// Visible when the camera distance is in [near, far).
     pub near: f32,
     pub far: f32,
+    /// The IPL interior field's low byte (`CEntity::m_nAreaCode`); 13 = every area.
+    pub area: u8,
+    /// `tobj` visibility window (game hours), if timed.
+    pub time: Option<(u8, u8)>,
+}
+
+impl Instance {
+    /// `CEntity::IsInCurrentArea`.
+    pub fn in_area(&self, area: u8) -> bool {
+        self.area == area || self.area == 13
+    }
 }
 
 pub struct World {
@@ -148,24 +159,22 @@ impl World {
             }
         }
 
-        let noon = |id: u32| match timed.get(&id) {
-            Some(&(on, off)) if on < off => on <= 12 && 12 < off,
-            Some(&(on, off)) => 12 >= on || 12 < off,
-            None => true,
-        };
         let instances = raw
             .iter()
             .enumerate()
             .filter_map(|(i, r)| {
                 let obj = objects.get(&r.inst.id)?;
-                // Interiors live in the sky; only the outside world (0) and "everywhere" (13).
-                let interior = r.inst.interior & 0xFF;
-                if !(interior == 0 || interior == 13) || !noon(r.inst.id) {
-                    return None;
-                }
                 let far = obj.draw_distance * dd_scale;
                 let near = if lod_near[i] < far { lod_near[i] } else { 0.0 };
-                Some(Instance { id: r.inst.id, pos: g2b(r.inst.pos), rot: ipl_rot(r.inst.rot), near, far })
+                Some(Instance {
+                    id: r.inst.id,
+                    pos: g2b(r.inst.pos),
+                    rot: ipl_rot(r.inst.rot),
+                    near,
+                    far,
+                    area: (r.inst.interior & 0xFF) as u8,
+                    time: timed.get(&r.inst.id).copied(),
+                })
             })
             .collect();
 

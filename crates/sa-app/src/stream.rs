@@ -166,6 +166,8 @@ pub struct Streamer {
     /// Instances waiting for their model to become Ready.
     pending: HashSet<usize>,
     timer: f32,
+    /// The area and game hour of the last scan (a change rescans at once).
+    last_area_hour: (u8, u8),
     pub stats: Stats,
 }
 
@@ -566,14 +568,22 @@ fn stream_instances(
     let cam_pos = cam.translation();
     let st = &mut *st;
 
+    let area = sa.world.curr_area;
+    let hour = sa.world.clock.hours;
     st.timer -= time.delta_secs();
+    if (area, hour) != st.last_area_hour {
+        st.last_area_hour = (area, hour);
+        st.timer = 0.0;
+    }
     if st.timer <= 0.0 {
         st.timer = SCAN_INTERVAL;
+        let clock = &sa.world.clock;
         for (i, inst) in world.0.instances.iter().enumerate() {
             let d = inst.pos.distance(cam_pos);
             let spawned = st.spawned.contains_key(&i);
-            let want = d < inst.far + LOAD_MARGIN && d + LOAD_MARGIN >= inst.near;
-            let drop = d > inst.far + UNLOAD_MARGIN || d + UNLOAD_MARGIN < inst.near;
+            let shown = inst.in_area(area) && inst.time.is_none_or(|(on, off)| clock.is_time_in_range(on, off));
+            let want = shown && d < inst.far + LOAD_MARGIN && d + LOAD_MARGIN >= inst.near;
+            let drop = !shown || d > inst.far + UNLOAD_MARGIN || d + UNLOAD_MARGIN < inst.near;
             if want && !spawned {
                 st.pending.insert(i);
                 if !cache.models.contains_key(&inst.id) {

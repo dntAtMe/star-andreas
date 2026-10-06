@@ -1670,9 +1670,11 @@ fn draw_radar(
     let angle = (-cam.front.x).atan2(cam.front.y);
     let r = Radar { origin: origin3.truncate(), range, sin: angle.sin(), cos: angle.cos() };
     let disc = disc_polygon();
+    // DrawMap: no map in other areas (interiors): only the ring, blips and arrows.
+    let outside = world.curr_area == 0;
     let tx = ((r.origin.x + 3000.0) * 0.002).floor() as i32;
     let ty = (11.0 - (r.origin.y + 3000.0) * 0.002).ceil() as i32;
-    for dy in -1..=1 {
+    for dy in if outside { -1..=1 } else { 0..=-1 } {
         for dx in -1..=1 {
             // DrawRadarSection (0x586110).
             let (x, y) = (tx + dx, ty + dy);
