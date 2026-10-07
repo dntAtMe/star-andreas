@@ -18,6 +18,8 @@ const POISE_RESET: f32 = 5.0;
 const HIT_STOP_SCALE: f32 = 0.5;
 /// Frames to blend into and back out of a reaction.
 const BLEND_OUT: f32 = 4.0;
+/// Enemies allowed to swing at once; the rest circle.
+const ATTACK_TOKENS: usize = 2;
 
 /// A ped's poise and the ER hurt animation it is playing.
 pub struct Reaction {
@@ -122,8 +124,111 @@ impl World {
         (!l.is_player && l.tasks.health.alive() && l.vehicle.is_none()).then_some(b.phys.matrix.pos)
     }
 
+    /// Before ProcessControl: peds fighting a souls-mode player get (or lose) the ER enemy
+    /// brain; the nearest ones get the attack tokens.
+    fn souls_enemies(&mut self, pid: EntityId, ppos: Vec3) {
+        let data = self.body(pid).and_then(|b| b.logic.as_any().downcast_ref::<PedLogic>()).and_then(|l| l.souls.as_deref()).map(|s| s.data.clone());
+        let mut fighters: Vec<(EntityId, f32, bool)> = Vec::new();
+        for id in self.body_ids() {
+            if id == pid {
+                continue;
+            }
+            let Some(b) = self.body_mut(id) else { continue };
+            let pos = b.phys.matrix.pos;
+            let heading = heading_of(Vec2::new(b.phys.matrix.fwd.x, b.phys.matrix.fwd.y));
+            let Some(l) = b.logic.as_any_mut().downcast_mut::<PedLogic>() else { continue };
+            let hostile = l.tasks.health.alive()
+                && l.vehicle.is_none()
+                && l.npc.as_ref().is_some_and(|n| {
+                    matches!(&n.response, Some(crate::pedevents::Resp::KillPedOnFoot(k)) if k.target == pid)
+                        || n.pursuit.as_ref().is_some_and(|p| p.target == pid)
+                });
+            match (&data, hostile) {
+                (Some(d), true) => {
+                    if l.souls_enemy.is_none() {
+                        // Melee only: a nightstick or other melee weapon if carried, else fists.
+                        let t = &mut l.tasks;
+                        let melee = (0..t.weapons.len()).find(|&s| matches!(t.weapons[s].ty, 1..=15) && t.weapons[s].ty != 9);
+                        let slot = melee.unwrap_or(0);
+                        if t.active_slot != slot {
+                            t.set_current_weapon(slot);
+                        }
+                        let ty = t.weapons[slot].ty;
+                        t.fight = None;
+                        let seed = (id_index(id) as u32).wrapping_mul(2654435761) ^ (pos.x.to_bits());
+                        l.souls_enemy = Some(Box::new(super::Enemy::new(d.clone(), ty, heading, seed)));
+                    }
+                    let e = l.souls_enemy.as_deref_mut().unwrap();
+                    e.target = ppos;
+                    fighters.push((id, pos.distance(ppos), e.attacking()));
+                }
+                _ => l.souls_enemy = None,
+            }
+        }
+        // The attack tokens: those already swinging keep theirs, then the nearest.
+        let swinging = fighters.iter().filter(|f| f.2).count();
+        let mut free = ATTACK_TOKENS.saturating_sub(swinging);
+        fighters.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for (id, _, attacking) in fighters {
+            let may = attacking || {
+                let ok = free > 0;
+                free = free.saturating_sub(1);
+                ok
+            };
+            if let Some(e) = self.body_mut(id).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()).and_then(|l| l.souls_enemy.as_deref_mut()) {
+                e.may_attack = may;
+            }
+        }
+    }
+
+    /// After ProcessControl: the enemies' blades against the player.
+    fn souls_enemy_hits(&mut self, pid: EntityId, ppos: Vec3) {
+        for id in self.body_ids() {
+            if id == pid {
+                continue;
+            }
+            let Some(b) = self.body_mut(id) else { continue };
+            let epos = b.phys.matrix.pos;
+            let Some(e) = b.logic.as_any_mut().downcast_mut::<PedLogic>().and_then(|l| l.souls_enemy.as_deref_mut()) else { continue };
+            let Some(hit) = e.active_hit.take() else { continue };
+            let ty = e.gta_weapon;
+            let (lo, hi, head) = (ppos - Vec3::Z * 0.6, ppos + Vec3::Z * 0.4, ppos + Vec3::Z * 0.65);
+            let touches = hit.sweep.iter().any(|&(a, c)| {
+                segment_distance(a, c, lo, hi) <= hit.radius + 0.3 || segment_distance(a, c, head, head) <= hit.radius + 0.15
+            });
+            if !touches {
+                continue;
+            }
+            // Rolled through it: the swing stays live until its window ends.
+            let dodged = self.souls_of(pid).is_some_and(|s| s.invincible());
+            if dodged {
+                continue;
+            }
+            if let Some(e) = self.body_mut(id).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()).and_then(|l| l.souls_enemy.as_deref_mut()) {
+                e.mark_hit(hit.stop);
+            }
+            if let Some(l) = self.body_mut(pid).and_then(|b| b.logic.as_any_mut().downcast_mut::<PedLogic>()) {
+                l.pending_damage.push(crate::peddamage::DamageIn {
+                    src: Some(id),
+                    src_pos: Some(epos),
+                    ty,
+                    damage: hit.damage,
+                    piece: 3,
+                    dir: 0,
+                    fight: None,
+                    force_death: false,
+                });
+            }
+        }
+    }
+
     /// Before ProcessControl: the lock-on target, and switching it.
     pub(crate) fn souls_pre(&mut self) {
+        if let Some(pid) = self.player_id() {
+            if let Some(ppos) = self.body(pid).map(|b| b.phys.matrix.pos) {
+                self.souls_enemies(pid, ppos);
+            }
+        }
         let Some(pid) = self.player_id() else { return };
         let Some(ppos) = self.body(pid).map(|b| b.phys.matrix.pos) else { return };
         let Some(s) = self.souls_of(pid) else { return };
@@ -171,10 +276,11 @@ impl World {
         s.target = target.map(|t| t.1 + Vec3::Z * 0.3);
     }
 
-    /// After ProcessControl: the player's blade against the other peds.
+    /// After ProcessControl: the player's blade against the other peds, and theirs back.
     pub(crate) fn souls_post(&mut self) {
         let Some(pid) = self.player_id() else { return };
         let Some(ppos) = self.body(pid).map(|b| b.phys.matrix.pos) else { return };
+        self.souls_enemy_hits(pid, ppos);
         let Some(s) = self.souls_of(pid) else { return };
         if !s.locked {
             s.target_id = None;
@@ -231,5 +337,11 @@ impl World {
                 s.mark_hit(hit.stop);
             }
         }
+    }
+}
+
+fn id_index(id: EntityId) -> usize {
+    match id {
+        EntityId::Body(i) | EntityId::Building(i) => i as usize,
     }
 }

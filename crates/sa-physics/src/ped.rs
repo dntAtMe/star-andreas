@@ -148,6 +148,8 @@ pub struct PedLogic {
     pub souls: Option<Box<crate::souls::Souls>>,
     /// Souls mode's hit reactions and poise on a ped the player fights.
     pub souls_react: Option<Box<crate::souls::Reaction>>,
+    /// Souls mode's ER melee brain on a ped fighting the player.
+    pub souls_enemy: Option<Box<crate::souls::Enemy>>,
     /// Random NPC state (wander task, population bookkeeping); None for the player.
     pub npc: Option<crate::npc::NpcState>,
     /// ped+0x58C with ped+0x46C & 0x100: seated in a vehicle (CTaskSimpleCarDrive).
@@ -198,6 +200,7 @@ impl PedLogic {
             pending_damage: Vec::new(),
             souls: None,
             souls_react: None,
+            souls_enemy: None,
             npc: None,
             vehicle: None,
             run_over_by_player: false,
@@ -491,7 +494,9 @@ impl BodyLogic for PedLogic {
                     }
                     let ri = npc.resp_in;
                     let mut me = crate::pedevents::PedNow { pos: p.matrix.pos, move_speed: p.move_speed, aim_rot: &mut self.aim_rot, cur_rot: self.cur_rot };
-                    if !npc.process_response(&mut me, clump, &m, &mut self.tasks, &ri, &i)
+                    // Souls mode enemies fight with the ER brain instead (below).
+                    if self.souls_enemy.is_some() {
+                    } else if !npc.process_response(&mut me, clump, &m, &mut self.tasks, &ri, &i)
                         && !npc.process_pursuit(&mut me, clump, &m, &mut self.tasks, &ri, &i)
                     {
                         npc.process(p.matrix.pos, p.move_speed, &mut self.aim_rot, self.cur_rot, &i);
@@ -539,7 +544,21 @@ impl BodyLogic for PedLogic {
             npc.alpha = if npc.fading_out { npc.alpha.saturating_sub(8) } else { npc.alpha.saturating_add(16) };
         }
 
-        // Souls mode: an ER hurt reaction overrides the ped's pose, turn and anim velocity.
+        // Souls mode: the ER enemy brain moves, turns and poses a ped fighting the player…
+        if let (Some(e), Some(clump)) = (self.souls_enemy.as_deref_mut(), self.clump.as_deref_mut()) {
+            if !self.tasks.health.alive() || self.vehicle.is_some() {
+                self.souls_enemy = None;
+            } else if self.souls_react.as_deref().is_some_and(|r| r.active()) {
+                e.interrupt();
+            } else {
+                let (h, v) = e.step(p.matrix.pos, clump, ts);
+                self.cur_rot = h;
+                self.aim_rot = h;
+                self.anim_velocity = v;
+                self.tasks.fight = None;
+            }
+        }
+        // …and an ER hurt reaction overrides the ped's pose, turn and anim velocity.
         if let (Some(r), Some(clump)) = (self.souls_react.as_deref_mut(), self.clump.as_deref_mut()) {
             if !self.tasks.health.alive() {
                 self.souls_react = None;

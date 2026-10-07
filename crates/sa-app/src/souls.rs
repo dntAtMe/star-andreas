@@ -235,6 +235,12 @@ fn souls_input(
         i.switch_target = motion.delta.x.signum() as i8;
         *flick = 0.35;
     }
+    // SA_SOULSLOG=1: the peds fighting with the ER brain, every 2 s.
+    if std::env::var("SA_SOULSLOG").is_ok() && sa.world.frame % 100 == 0 {
+        let hp = sa.logic::<PedLogic>(id).map_or(0.0, |l| l.tasks.health.health);
+        let n = sa.world.body_ids().into_iter().filter(|&e| sa.logic::<PedLogic>(e).is_some_and(|l| l.souls_enemy.is_some())).count();
+        info!("souls: {n} enemies, player hp {hp:.0}");
+    }
     if let Ok(demo) = std::env::var("SA_SOULS_DEMO") {
         let down = sa.world.now_ms % 2000 < 150;
         let lock_tick = sa.world.now_ms % 4000 < 20;

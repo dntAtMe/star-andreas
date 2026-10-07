@@ -580,7 +580,7 @@ impl World {
                     }
                 } else if let Some(p) = self.body_mut(id).and_then(|b| b.logic.as_any_mut().downcast_mut::<crate::ped::PedLogic>()) {
                     // ArrestPed ControlSubTask: SetWeapon every frame (not while arresting).
-                    if !p.npc.as_ref().and_then(|n| n.pursuit.as_ref()).is_some_and(|pu| pu.arresting()) {
+                    if p.souls_enemy.is_none() && !p.npc.as_ref().and_then(|n| n.pursuit.as_ref()).is_some_and(|pu| pu.arresting()) {
                         set_weapon(&mut p.tasks, level, player_gun);
                     }
                 }

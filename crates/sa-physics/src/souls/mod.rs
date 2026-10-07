@@ -12,17 +12,20 @@
 //!   grip and weapon swaps, guard, guard break and guard counters, hurt reactions, hit-stop.
 //! * `anim` — clip selection, cross-fades, the upper-body layers (carry, guard, swap) and
 //!   the retargeting of the ER skeleton onto the GTA ped skeleton.
-//! * `world` — lock-on targeting, blade hits, enemy poise and reactions.
+//! * `enemy` — the ER melee brain of peds fighting the player in souls mode.
+//! * `world` — lock-on targeting, blade hits both ways, enemy poise and reactions.
 
 use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
 
 pub mod anim;
+pub mod enemy;
 pub mod player;
 pub mod world;
 
 pub use player::{Button, Grip, Input, Load, Souls};
+pub use enemy::Enemy;
 pub use world::Reaction;
 
 /// One damaging hit of an attack.

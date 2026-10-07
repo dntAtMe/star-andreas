@@ -1217,7 +1217,7 @@ pub(crate) fn hurt_level(damage: f32) -> &'static str {
 // ------------------------------------------------------------------ helpers
 
 /// The ends of a blade at `frame` from samples starting at `from` rounded down.
-fn blade_at(blade: &[[f32; 6]], from: f32, frame: f32) -> Option<(Vec3, Vec3)> {
+pub(crate) fn blade_at(blade: &[[f32; 6]], from: f32, frame: f32) -> Option<(Vec3, Vec3)> {
     let last = blade.len().checked_sub(1)?;
     let at = (frame - from.floor()).clamp(0.0, last as f32);
     let (a, b) = (blade[at as usize], blade[(at as usize + 1).min(last)]);
