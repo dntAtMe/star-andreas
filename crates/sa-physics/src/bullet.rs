@@ -317,7 +317,8 @@ impl World {
         f(&mut fx)
     }
 
-    fn sphere_visible(&self, c: Vec3, r: f32) -> bool {
+    /// `CCamera::IsSphereVisible` against the side planes.
+    pub fn sphere_visible(&self, c: Vec3, r: f32) -> bool {
         self.camera_planes.iter().all(|(n, d)| n.dot(c) - d <= r)
     }
 

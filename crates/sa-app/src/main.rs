@@ -8,6 +8,7 @@ mod colour_filter;
 mod coronas;
 mod cutscene;
 mod entryexit;
+mod markers;
 mod fx;
 mod gfx;
 mod heat_haze;
@@ -109,6 +110,7 @@ fn main() -> anyhow::Result<()> {
         colour_filter::ColourFilterPlugin,
     ))
     .add_plugins((camera::CameraPlugin, weapons::WeaponsPlugin, wasted::WastedPlugin, water::WaterPlugin, dynlight::DynLightPlugin, peds::NpcPlugin, breaks::BreaksPlugin, hud::HudPlugin, target_tri::TargetTrianglePlugin, gfx::GfxPlugin, audio::AudioPlugin, cutscene::CutscenePlugin, script::ScriptPlugin, colstore::ColStorePlugin, entryexit::EntryExitPlugin))
+    .add_plugins(markers::MarkersPlugin)
     .add_systems(Startup, setup)
     .add_systems(Update, (fly_camera.run_if(resource_equals(Mode::Fly)), update_hud, auto_screenshot))
     .add_systems(Last, fps_cap);

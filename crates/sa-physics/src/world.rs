@@ -1295,6 +1295,11 @@ impl World {
 
     // ------------------------------------------------------------ queries
 
+    /// `CTimer::ms_fTimeStep` of the last `process`.
+    pub fn ts(&self) -> f32 {
+        self.last_ts
+    }
+
     /// Simplified `CWorld::ProcessLineOfSight` over buildings and bodies:
     /// nearest hit along `start..end` as (entity, fraction, colpoint).
     pub fn line_of_sight(

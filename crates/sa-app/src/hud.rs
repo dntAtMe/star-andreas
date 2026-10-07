@@ -1113,7 +1113,7 @@ fn draw_hud(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut st: Local<HudState>,
-    (time, mut overlay, root, radar): (Res<Time>, ResMut<Overlay>, Res<GameRoot>, Res<crate::radar::Radar>),
+    (time, overlay, root, radar): (Res<Time>, ResMut<Overlay>, Res<GameRoot>, Res<crate::radar::Radar>),
     mut hud_meshes: Query<(&mut Transform, &mut Visibility), With<HudMesh>>,
 ) {
     let HudState { last_level, popups, pool, table, help } = &mut *st;

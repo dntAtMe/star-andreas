@@ -64,7 +64,7 @@ pub struct StreamCamera;
 
 // ---------------------------------------------------------------- CPU data
 
-struct PartCpu {
+pub(crate) struct PartCpu {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
@@ -96,7 +96,7 @@ enum Loaded {
 }
 
 #[derive(Resource)]
-struct Loader {
+pub(crate) struct Loader {
     tx: Sender<Loaded>,
     rx: Mutex<Receiver<Loaded>>,
 }
@@ -104,24 +104,24 @@ struct Loader {
 // ---------------------------------------------------------------- caches
 
 #[derive(Clone)]
-struct Part {
-    mesh: Handle<Mesh>,
-    material: Handle<WorldMaterial>,
-    damaged: bool,
+pub(crate) struct Part {
+    pub(crate) mesh: Handle<Mesh>,
+    pub(crate) material: Handle<WorldMaterial>,
+    pub(crate) damaged: bool,
 }
 
 /// A model part of a map object: intact (false) or the damaged version (true).
 #[derive(Component)]
 pub struct ObjectPart(pub bool);
 
-struct Model {
-    parts: Vec<Part>,
+pub(crate) struct Model {
+    pub(crate) parts: Vec<Part>,
     cols: ColSet,
 }
 
 /// Collision for one model.
 #[derive(Default)]
-struct ColSet {
+pub(crate) struct ColSet {
     /// The model's collision for the SA physics world (GTA space).
     sa: Option<Arc<SaColModel>>,
     /// object.dat physics for knockable props.

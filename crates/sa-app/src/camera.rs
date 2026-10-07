@@ -140,6 +140,17 @@ impl SaCam {
         self.transition.is_some()
     }
 
+    /// `CCamera::RestoreWithJumpCut` on foot: the follow camera starts over behind a ped
+    /// facing `fwd`.
+    pub fn jump_cut_behind(&mut self, fwd: Vec3) {
+        self.beta = (-fwd.y).atan2(-fwd.x);
+        self.initialised = true;
+        self.transition = None;
+        self.lag = None;
+        self.prev_target = None;
+        self.col_fraction = 1.0;
+    }
+
     /// Re-read alpha/beta from the orbit camera the next time the SA camera runs.
     pub fn reset_from_orbit(&mut self) {
         self.initialised = false;
@@ -199,9 +210,15 @@ pub(crate) fn sa_camera(
     cam.aspect = window.width().max(1.0) / window.height().max(1.0);
 
     if !cam.initialised {
-        // Continue from wherever the orbit/fly camera looked.
+        // Continue from wherever the orbit/fly camera looked; the very first time (the game's
+        // start-up jump cut) from behind the player.
         cam.beta = orbit.yaw - FRAC_PI_2;
         cam.alpha = orbit.pitch;
+        if cam.source == Vec3::ZERO {
+            if let Some(f) = sa.world.body(ped.sa).map(|b| b.phys.matrix.fwd) {
+                cam.beta = (-f.y).atan2(-f.x);
+            }
+        }
         cam.initialised = true;
         // SA_FP=1: start in first person (debug).
         if std::env::var("SA_FP").is_ok() {

@@ -233,6 +233,7 @@ fn run_scripts(world: &mut World) {
         vm.process(&mut host, (dt * 1000.0) as u32);
         let texts = std::mem::take(&mut host.st.texts);
         host.world.resource_mut::<Overlay>().texts = texts.clone();
+        host.world.resource_mut::<crate::markers::Markers>().on_mission = vm.on_mission();
         host.st.texts = texts;
     });
 }
@@ -604,7 +605,16 @@ impl Host for WorldHost<'_> {
                     let v = x.floats::<4>();
                     (Vec3::new(v[0], v[1], 0.0), Vec3::new(v[2], v[3], 0.0))
                 };
-                let _sphere = x.int();
+                let sphere = x.int();
+                if sphere != 0 {
+                    // HighlightImportantArea(this + IP).
+                    let mid = (x.s as u32) << 24 ^ x.script().ip as u32;
+                    let (lo, hi) = ((c - r).truncate(), (c + r).truncate());
+                    let z = if is3d { c.z } else { -100.0 };
+                    self.world.resource_scope(|w, mut mk: Mut<crate::markers::Markers>| {
+                        mk.highlight_area(&mut w.resource_mut::<SaPhys>(), mid, lo, hi, z);
+                    });
+                }
                 let id = self.ped(h);
                 let p = id.and_then(|id| self.pos_of(id)).unwrap_or(Vec3::splat(1e9));
                 let mut inside = (p.x - c.x).abs() <= r.x && (p.y - c.y).abs() <= r.y;
@@ -1130,6 +1140,11 @@ impl Host for WorldHost<'_> {
                 // Restore / RestoreWithJumpCut: back to the player camera (the 1350 ms blend of
                 // Restore is taken as a cut).
                 self.world.resource_mut::<ScriptCam>().shot = None;
+                // The follow camera restarts (ResetStatics) behind the player on foot.
+                let fwd = self.player_ped().filter(|&p| self.in_vehicle(p).is_none()).and_then(|p| self.sa().world.body(p).map(|b| b.phys.matrix.fwd));
+                if let Some(f) = fwd {
+                    self.world.resource_mut::<crate::camera::SaCam>().jump_cut_behind(f);
+                }
             }
             0x0373 => {}
             0x0925 => {

@@ -172,6 +172,7 @@ fn update_entry_exits(
     mut control: ResMut<PlayerControl>,
     cs: Res<Cutscene>,
     mut sacam: ResMut<crate::camera::SaCam>,
+    mut markers: ResMut<crate::markers::Markers>,
 ) {
     let Some(mut ee) = ee else { return };
     let ee = &mut *ee;
@@ -184,7 +185,14 @@ fn update_entry_exits(
         if done {
             ee.active = None;
             // RestoreWithJumpCut: the follow camera starts over behind the player.
-            sacam.reset_from_orbit();
+            match veh {
+                None => {
+                    if let Some(f) = sa.world.body(pid).map(|b| b.phys.matrix.fwd) {
+                        sacam.jump_cut_behind(f);
+                    }
+                }
+                Some(_) => sacam.reset_from_orbit(),
+            }
         }
         return;
     }
@@ -204,6 +212,26 @@ fn update_entry_exits(
     }
     if !inside {
         ee.state = if ee.state == 3 { 4 } else { 0 };
+    }
+    // The cones: yellow CONE_NO_COLLISION over every enabled entry of this area within 40 m
+    // of the camera, looking 30 m ahead.
+    if blocked || ee.state != 0 {
+        return;
+    }
+    let w = &sa.world;
+    let q = w.camera_pos.truncate() + w.camera_fwd.truncate() * 30.0;
+    for (i, e) in ee.entries.iter().enumerate() {
+        let c = e.centre();
+        if e.flags & ENABLED == 0 || (c.x - q.x).abs() > 30.0 || (c.y - q.y).abs() > 30.0 {
+            continue;
+        }
+        // [I] the area test: linked entries of the current area.
+        if e.link.is_none() || e.area != w.curr_area {
+            continue;
+        }
+        if w.sphere_visible(c, 1.0) && w.clock.is_time_in_range(e.time_on, e.time_off) && (c.truncate() - w.camera_pos.truncate()).length_squared() < 1600.0 {
+            markers.place_cone(0x8000_0000 | i as u32, c + Vec3::Z, 2.0, [255, 255, 0], false);
+        }
     }
 }
 

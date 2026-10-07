@@ -266,6 +266,11 @@ impl Vm {
         self.running_mission = true;
     }
 
+    /// `CTheScripts::OnAMissionFlag` is set (the flag variable holds 1).
+    pub fn on_mission(&self) -> bool {
+        self.on_a_mission_flag != 0 && self.global(self.on_a_mission_flag) == 1
+    }
+
     pub fn global(&self, off: usize) -> i32 {
         self.space.get(off..off + 4).map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
     }
