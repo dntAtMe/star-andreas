@@ -507,6 +507,8 @@ impl World {
             .filter(|&i| self.bodies[i].as_ref().is_some_and(|b| !b.phys.is_static()))
             .collect();
 
+        // The player's souls combat mode: lock-on before, blade hits after.
+        self.souls_pre();
         // ProcessControl pass (uses last frame's line results), then reset lines.
         for &i in &moving {
             let b = self.bm(i);
@@ -514,6 +516,7 @@ impl World {
             b.lines = LineHits::default();
             self.process_buoyancy(i, ts);
         }
+        self.souls_post();
 
         // Up to 6 collision passes.
         ctx.later_collision_pass = false;

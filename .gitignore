@@ -5,3 +5,5 @@
 /tools/exe_read.py
 __pycache__/
 sa-rs-imgui.ini
+/er-data/
+/tools/er/

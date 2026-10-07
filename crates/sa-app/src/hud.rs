@@ -1224,6 +1224,15 @@ fn draw_hud(
         let pct = health.health * 100.0 / max_h.max(1) as f32;
         out.bar_chart(&sc, x + sc.sx(109.0) - width as f32, y, width, sc.sy(9.0) as i32 as u8, pct, HUD_COLOURS[0]);
     }
+    // Souls mode: the stamina bar under the health bar (not in SA).
+    if let Some(s) = l.souls.as_deref() {
+        let h = s.hud();
+        let x = (w - sc.sx(141.0)) as i32 as f32;
+        let y = (ypos(sc.sy(77.0), 10.0) + sc.sy(12.0)) as i32 as f32;
+        let width = sc.sx(109.0) as i32 as u16;
+        let pct = h.stamina * 100.0 / h.max_stamina.max(1.0);
+        out.bar_chart(&sc, x, y, width, sc.sy(6.0) as i32 as u8, pct, [54, 160, 58]);
+    }
     // Armour bar.
     if health.armour > 1.0 {
         let x = (w - sc.sx(94.0)) as i32 as f32;

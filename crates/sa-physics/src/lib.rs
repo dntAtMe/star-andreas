@@ -33,6 +33,7 @@ pub mod peddamage;
 pub mod pedevents;
 pub mod pedtask;
 pub mod shadows;
+pub mod souls;
 pub mod npc;
 pub mod objects;
 pub mod paths;

@@ -498,6 +498,8 @@ pub struct Clump {
     pub deleted: Vec<u32>,
     /// Bind-pose local translation per frame (`AnimBlendFrameData.resetPos`).
     reset: Vec<Vec3>,
+    /// Bind-pose local rotation per frame (the DFF frame matrices).
+    pub bind_rot: Vec<Quat>,
     /// Local (rotation, translation) per frame after the last update.
     pub pose: Vec<(Quat, Vec3)>,
     /// Root motion of the last update, anim-local (x right, y forward): the ped's
@@ -518,9 +520,15 @@ impl Clump {
             finished: Vec::new(),
             deleted: Vec::new(),
             reset: bones.iter().map(|b| b.3).collect(),
+            bind_rot: bones.iter().map(|b| b.2).collect(),
             pose,
             velocity: Vec3::ZERO,
         }
+    }
+
+    /// Bind-pose local translation of a frame.
+    pub fn reset_pos(&self, frame: usize) -> Vec3 {
+        self.reset[frame]
     }
 
     pub fn num_frames(&self) -> usize {

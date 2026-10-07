@@ -4909,6 +4909,7 @@ dependencies = [
  "sa-fx",
  "sa-physics",
  "sc2-bevy",
+ "serde_json",
 ]
 
 [[package]]
