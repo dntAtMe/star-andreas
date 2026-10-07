@@ -265,6 +265,11 @@ fn souls_input(
                 s.input.light.feed((300..450).contains(&t));
             }
             "guard" => i.guard.feed(true),
+            "guardlock" => {
+                i.guard.feed(true);
+                let locked = s.locked;
+                s.input.lock |= !locked;
+            }
             "lock" => i.lock |= lock_tick,
             "hunt" => {
                 let me = sa.world.body(id).map(|b| b.phys.matrix.pos).unwrap_or_default();

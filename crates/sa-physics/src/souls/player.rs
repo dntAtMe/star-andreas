@@ -474,8 +474,11 @@ impl Souls {
         }
     }
 
+    /// Raised and settled, or still held through the guard-hit reaction (the block holds
+    /// between blows, as in the game).
     fn guard_up(&self) -> bool {
-        self.guarding && self.guard_t >= GUARD_RAISE_FRAMES
+        let reacting = matches!(&self.state, State::Act(a) if matches!(&a.id, ActionId::Base(n) if n == "GuardHit"));
+        (self.guarding && self.guard_t >= GUARD_RAISE_FRAMES) || (reacting && self.input.guard.held)
     }
 
     fn spend(&mut self, cost: f32) {
