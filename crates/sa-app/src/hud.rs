@@ -1224,14 +1224,30 @@ fn draw_hud(
         let pct = health.health * 100.0 / max_h.max(1) as f32;
         out.bar_chart(&sc, x + sc.sx(109.0) - width as f32, y, width, sc.sy(9.0) as i32 as u8, pct, HUD_COLOURS[0]);
     }
-    // Souls mode: the stamina bar under the health bar (not in SA).
+    // Souls mode: the stamina bar, top left as in Elden Ring (not in SA).
     if let Some(s) = l.souls.as_deref() {
         let h = s.hud();
-        let x = (w - sc.sx(141.0)) as i32 as f32;
-        let y = (ypos(sc.sy(77.0), 10.0) + sc.sy(12.0)) as i32 as f32;
-        let width = sc.sx(109.0) as i32 as u16;
+        let x = sc.sx(24.0) as i32 as f32;
+        let y = sc.sy(22.0) as i32 as f32;
+        let width = (sc.sx(1.6) * h.max_stamina) as i32 as u16;
         let pct = h.stamina * 100.0 / h.max_stamina.max(1.0);
         out.bar_chart(&sc, x, y, width, sc.sy(6.0) as i32 as u8, pct, [54, 160, 58]);
+        // The lock-on dot: the target's chest projected through the camera.
+        if let Some(t) = h.locked {
+            let (cp, cf, cu) = (world.camera_pos, world.camera_fwd.normalize_or_zero(), world.camera_up.normalize_or_zero());
+            let cr = cf.cross(cu).normalize_or_zero();
+            let v = t - cp;
+            let z = v.dot(cf);
+            if z > 0.1 {
+                let tx = (world.camera_fov.to_radians() * 0.5).tan();
+                let ty = tx / world.camera_aspect.max(0.1);
+                let sx = w * 0.5 * (1.0 + v.dot(cr) / (z * tx));
+                let sy = _h * 0.5 * (1.0 - v.dot(cu) / (z * ty));
+                let r = sc.sy(4.0);
+                out.rect(sx - r - 1.0, sy - r - 1.0, sx + r + 1.0, sy + r + 1.0, [0, 0, 0, 160]);
+                out.rect(sx - r, sy - r, sx + r, sy + r, [255, 255, 255, 230]);
+            }
+        }
     }
     // Armour bar.
     if health.armour > 1.0 {

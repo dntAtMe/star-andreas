@@ -301,8 +301,21 @@ pub(crate) fn sa_camera(
             if !transitioning {
                 cam.fov += (70.0 - cam.fov).clamp(-ts, ts);
             }
-            cam.beta += mx * -2.5 * k * HACC;
-            cam.alpha += my * 2.5 * k * HACC;
+            let locked = sa.logic::<PedLogic>(ped.sa).and_then(|l| l.souls.as_deref()).and_then(|s| s.hud().locked);
+            if let Some(target) = locked {
+                // Souls lock-on: swing round to look from behind the player at the target.
+                let to = target - (ped_pos + Vec3::Z * 0.6);
+                if to.truncate().length_squared() > 0.01 {
+                    let ease = 1.0 - (-8.0 * ts * 0.02f32).exp();
+                    let goal = (-to.y).atan2(-to.x);
+                    let d = (goal - cam.beta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                    cam.beta += d * ease;
+                    cam.alpha += (-0.24 - cam.alpha) * ease;
+                }
+            } else {
+                cam.beta += mx * -2.5 * k * HACC;
+                cam.alpha += my * 2.5 * k * HACC;
+            }
             cam.alpha = cam.alpha.clamp(-1.483_529_9, 0.785_398_2);
             cam.front = front_of(cam.alpha, cam.beta);
             // Raw ped position with the mouse (Using3rdPersonMouseCam), +0.6.

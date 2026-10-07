@@ -234,36 +234,48 @@ fn update_weapon_model(
     let t = &logic.tasks;
     let model = t.weapon_model;
     let twin = t.info_of(t.active_weapon().ty).is_some_and(|i| i.has(wf::TWIN_PISTOL));
+    // Souls mode: the off-hand weapon (the shield and the torch are drawn by souls.rs).
+    let souls_left = logic.souls.as_deref().and_then(|s| s.left_item().map(|i| (s, i))).map(|(s, i)| {
+        sa_physics::souls::gta_weapon_for(s.data.weapons.get(i).map_or("", |w| w.name.as_str())).1
+    });
+    let left_model = match souls_left {
+        Some(m) => m,
+        None if logic.souls.is_some() => -1,
+        None if model >= 0 && twin => model,
+        None => -1,
+    };
     let current: Vec<(Entity, i32, bool)> = held
         .iter()
         .filter(|(_, _, p)| !loose.contains(p.parent()) && ped.bones.contains(&p.parent()))
         .map(|(e, h, _)| (e, h.model, h.left))
         .collect();
-    let want_left = model >= 0 && twin;
-    let ok = current.iter().all(|&(_, m, _)| m == model)
+    let want_left = left_model >= 0;
+    let ok = current.iter().all(|&(_, m, l)| m == if l { left_model } else { model })
         && current.iter().any(|&(_, _, l)| !l) == (model >= 0)
         && current.iter().any(|&(_, _, l)| l) == want_left;
     if !ok {
         for (e, _, _) in &current {
             commands.entity(*e).despawn();
         }
-        if model >= 0 {
-            let entry = cache.0.entry(model).or_insert_with(|| {
-                let (name, txd_name) = defs.0.get(&model)?;
+        for (m, left) in [(model, false), (left_model, true)] {
+            if m < 0 {
+                continue;
+            }
+            let entry = cache.0.entry(m).or_insert_with(|| {
+                let (name, txd_name) = defs.0.get(&m)?;
                 load_model(&world, &mut images, name, txd_name)
             });
             if let (Some(wm), Some(clump)) = (entry.as_ref(), logic.clump.as_deref()) {
                 let bone = |tag: i32| clump.frame_of_tag(tag).and_then(|k| ped.node_frames.get(k)).and_then(|&f| ped.bones.get(f)).copied();
-                if let Some(rh) = bone(24) {
-                    spawn_weapon(&mut commands, &mut meshes, &mut materials, wm, rh, Transform::IDENTITY, model, false);
-                }
-                if want_left {
-                    if let Some(lh) = bone(34) {
-                        // RwMatrixRotate(X, 180°) then RwMatrixTranslate((0.04, -0.05, 0)), both pre-concatenated.
-                        let r = Quat::from_rotation_x(std::f32::consts::PI);
-                        let tf = Transform { rotation: r, translation: r * Vec3::new(0.04, -0.05, 0.0), ..default() };
-                        spawn_weapon(&mut commands, &mut meshes, &mut materials, wm, lh, tf, model, true);
+                if !left {
+                    if let Some(rh) = bone(24) {
+                        spawn_weapon(&mut commands, &mut meshes, &mut materials, wm, rh, Transform::IDENTITY, m, false);
                     }
+                } else if let Some(lh) = bone(34) {
+                    // RwMatrixRotate(X, 180°) then RwMatrixTranslate((0.04, -0.05, 0)), both pre-concatenated.
+                    let r = Quat::from_rotation_x(std::f32::consts::PI);
+                    let tf = Transform { rotation: r, translation: r * Vec3::new(0.04, -0.05, 0.0), ..default() };
+                    spawn_weapon(&mut commands, &mut meshes, &mut materials, wm, lh, tf, m, true);
                 }
             }
         }

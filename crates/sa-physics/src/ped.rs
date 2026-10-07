@@ -146,6 +146,8 @@ pub struct PedLogic {
     pub pending_damage: Vec<crate::peddamage::DamageIn>,
     /// Souls combat mode (the player only; None = GTA's own controls).
     pub souls: Option<Box<crate::souls::Souls>>,
+    /// Souls mode's hit reactions and poise on a ped the player fights.
+    pub souls_react: Option<Box<crate::souls::Reaction>>,
     /// Random NPC state (wander task, population bookkeeping); None for the player.
     pub npc: Option<crate::npc::NpcState>,
     /// ped+0x58C with ped+0x46C & 0x100: seated in a vehicle (CTaskSimpleCarDrive).
@@ -195,6 +197,7 @@ impl PedLogic {
             },
             pending_damage: Vec::new(),
             souls: None,
+            souls_react: None,
             npc: None,
             vehicle: None,
             run_over_by_player: false,
@@ -339,7 +342,13 @@ impl BodyLogic for PedLogic {
         if souls_on {
             let pos = p.matrix.pos;
             let s = self.souls.as_deref_mut().unwrap();
-            self.pending_damage.retain(|d| s.receive_hit(pos, d.src_pos.unwrap_or(pos), d.damage));
+            self.pending_damage.retain(|d| {
+                // Souls falls hurt by its own rule; GTA's fall damage is dropped.
+                if d.ty == 54 {
+                    return d.piece == crate::souls::player::OWN_FALL_PIECE;
+                }
+                s.receive_hit(pos, d.src_pos.unwrap_or(pos), d.damage)
+            });
         }
         // Damage events of the last frame (health changes at once, reactions are blended).
         if let (Some(clump), Some(m)) = (self.clump.as_deref_mut(), self.tasks.anims.clone()) {
@@ -387,36 +396,53 @@ impl BodyLogic for PedLogic {
             }
         }
         // Souls mode replaces the player's tasks: its state machine moves and turns the ped
-        // and poses the clump.
+        // and poses the clump; GTA's physics keeps collision, ground and gravity.
         if souls_on {
             if let (Some(s), Some(clump)) = (self.souls.as_deref_mut(), self.clump.as_deref_mut()) {
                 let dt = ts * 0.02;
+                // Q / E still switch between the fists and the melee weapon.
                 let pad = &self.tasks.pad;
-                let n = self.tasks.weapons.len().max(1);
                 if pad.next_weapon_just_down || pad.prev_weapon_just_down {
-                    let dir = if pad.next_weapon_just_down { 1 } else { n - 1 };
-                    // Melee slots only (0 fist, 1 melee).
-                    let mut slot = self.tasks.pd.chosen_slot;
-                    for _ in 0..n {
-                        slot = (slot + dir) % n;
-                        if slot <= 1 && (slot == 0 || self.tasks.weapons[slot].ty != 0) {
-                            break;
-                        }
-                    }
+                    let slot = if self.tasks.pd.chosen_slot == 0 && self.tasks.weapons.get(1).is_some_and(|w| w.ty != 0) { 1 } else { 0 };
                     self.tasks.pd.chosen_slot = slot;
                 }
-                if self.tasks.pd.chosen_slot <= 1 && (self.tasks.active_slot != self.tasks.pd.chosen_slot || self.tasks.weapon_model < 0) {
-                    self.tasks.set_current_weapon(self.tasks.pd.chosen_slot);
+                let chosen = self.tasks.pd.chosen_slot;
+                if chosen <= 1 {
+                    self.tasks.active_slot = chosen;
+                    s.set_gta_weapon(self.tasks.weapons.get(chosen).map_or(0, |w| w.ty));
                 }
-                s.set_gta_weapon(self.tasks.active_weapon().ty);
                 s.face_target(p.matrix.pos, dt);
-                let vel = s.step(p.matrix.pos, dt);
+                let out = s.step(p.matrix.pos, self.standing, dt);
                 s.animate(clump, dt);
+                self.tasks.weapon_model = s.gta_model;
                 let h = s.heading;
                 self.cur_rot = h;
                 self.aim_rot = h;
                 let (f, r) = (Vec2::new(-h.sin(), h.cos()), Vec2::new(h.cos(), h.sin()));
-                self.anim_velocity = Vec2::new(vel.dot(r), vel.dot(f)) * 0.02;
+                self.anim_velocity = Vec2::new(out.vel.dot(r), out.vel.dot(f)) * 0.02;
+                if !self.standing {
+                    // In the air the carried velocity stands in for the anim velocity.
+                    p.move_speed.x = out.vel.x * 0.02;
+                    p.move_speed.y = out.vel.y * 0.02;
+                }
+                if let Some(vz) = out.vz {
+                    p.move_speed.z = vz * 0.02;
+                    if vz > 0.0 {
+                        self.standing = false;
+                    }
+                }
+                if out.fall_damage > 0.0 {
+                    self.pending_damage.push(crate::peddamage::DamageIn {
+                        src: None,
+                        src_pos: None,
+                        ty: 54,
+                        damage: out.fall_damage,
+                        piece: crate::souls::player::OWN_FALL_PIECE,
+                        dir: 0,
+                        fight: None,
+                        force_death: out.fall_damage >= 1000.0,
+                    });
+                }
             }
             self.tasks.pad.clear_just_down();
         }
@@ -513,6 +539,16 @@ impl BodyLogic for PedLogic {
             npc.alpha = if npc.fading_out { npc.alpha.saturating_sub(8) } else { npc.alpha.saturating_add(16) };
         }
 
+        // Souls mode: an ER hurt reaction overrides the ped's pose, turn and anim velocity.
+        if let (Some(r), Some(clump)) = (self.souls_react.as_deref_mut(), self.clump.as_deref_mut()) {
+            if !self.tasks.health.alive() {
+                self.souls_react = None;
+            } else if let Some((h, v)) = r.step(clump, ts) {
+                self.cur_rot = h;
+                self.aim_rot = h;
+                self.anim_velocity = v;
+            }
+        }
         // Jump task (from the intelligence step).
         if let Some(JumpKind::Speed(hs)) = self.jump_request.take() {
             if self.standing {
